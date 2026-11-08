@@ -7,7 +7,7 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 ## Status
 
-Phase 0 in progress: step 1 (build skeleton) is done. Update this section as phases land.
+Phase 0 in progress: steps 1 (build skeleton) and 2 (RealtimeSanitizer guardrail) are done. Update this section as phases land.
 
 ## Build and test
 
@@ -25,6 +25,7 @@ Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/l
 - Everything lives in namespace `ks`. Public headers go in `src/<lib>/include/ks/<lib>/` and are included as `<ks/<lib>/<name>.h>`.
 - Every source file starts with `// SPDX-License-Identifier: GPL-3.0-or-later`.
 - Tests: `<name>_test.cpp`, registered with `ks_add_test()` in `tests/CMakeLists.txt`.
+- `tests/guardrails/` holds tests proving that the checks themselves work (for example, that RealtimeSanitizer reports an allocation in a `KS_NONBLOCKING` function). Never weaken, skip, or delete them.
 
 ## Processes
 
