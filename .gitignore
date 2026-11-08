@@ -1,0 +1,19 @@
+# Build output (one directory per CMake preset)
+/build/
+/vcpkg_installed/
+
+# Machine-specific CMake presets
+/CMakeUserPresets.json
+
+# Tooling caches
+/.cache/
+/compile_commands.json
+
+# Local Claude Code settings (shared project settings in .claude/settings.json are committed)
+/.claude/settings.local.json
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
