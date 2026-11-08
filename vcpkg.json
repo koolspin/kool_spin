@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "kool-spin",
+  "version": "0.0.1",
+  "description": "Open-source DJ software",
+  "homepage": "https://github.com/koolspin/kool_spin",
+  "license": "GPL-3.0-or-later",
+  "builtin-baseline": "ec48c11eae9448c8c6e7739d93e06fa2433aa95f",
+  "dependencies": [
+    "catch2"
+  ]
+}

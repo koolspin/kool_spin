@@ -1,0 +1,24 @@
+# clang-format 21. CI uses the same major version; other versions may format differently.
+BasedOnStyle: LLVM
+Standard: Latest
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -4
+NamespaceIndentation: None
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: All
+BreakTemplateDeclarations: Yes
+InsertNewlineAtEOF: true
+# Include order: the file's own header, then kool_spin headers, then
+# third-party headers, then the standard library.
+IncludeBlocks: Regroup
+MainIncludeChar: Any
+IncludeIsMainRegex: '(_test)?$'
+IncludeCategories:
+  - Regex: '^<ks/'
+    Priority: 2
+  - Regex: '^<[a-z_0-9]+>$'
+    Priority: 4
+  - Regex: '.*'
+    Priority: 3

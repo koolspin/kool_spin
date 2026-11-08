@@ -7,7 +7,25 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 ## Status
 
-Pre-code: Phase 0 (build scaffold) has not started. Update this section, and add build and test commands, as phases land.
+Phase 0 in progress: steps 1 (build skeleton) and 2 (RealtimeSanitizer guardrail) are done. Update this section as phases land.
+
+## Build and test
+
+Needs `VCPKG_ROOT` set to a vcpkg checkout. On Linux, Clang 21 is picked automatically (`cmake/KsToolchain.cmake`).
+
+- Configure, build, and test: `cmake --workflow --preset <preset>`. Presets: `debug`, `release`, `asan`, `tsan`, `rtsan`, `fuzz` (the last two Linux only).
+- Step by step: `cmake --preset debug`, `cmake --build --preset debug`, `ctest --preset debug`.
+- Formatting and clang-tidy: `tools/lint.sh` (reads `build/debug/compile_commands.json`, so configure `debug` first). `KS_LINT_FIX=1 tools/lint.sh` applies formatting fixes.
+
+Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/lint.sh` is clean. Warnings are errors.
+
+## Code conventions
+
+- Types, enumerators, and template parameters are `CamelCase`. Functions, variables, and namespaces are `snake_case`. Private and protected members end in `_`. Constants are `kCamelCase`. Macros are `KS_UPPER_CASE`. clang-tidy enforces all of these.
+- Everything lives in namespace `ks`. Public headers go in `src/<lib>/include/ks/<lib>/` and are included as `<ks/<lib>/<name>.h>`.
+- Every source file starts with `// SPDX-License-Identifier: GPL-3.0-or-later`.
+- Tests: `<name>_test.cpp`, registered with `ks_add_test()` in `tests/CMakeLists.txt`.
+- `tests/guardrails/` holds tests proving that the checks themselves work (for example, that RealtimeSanitizer reports an allocation in a `KS_NONBLOCKING` function). Never weaken, skip, or delete them.
 
 ## Processes
 
@@ -33,7 +51,7 @@ Code reachable from the audio callback must not:
 - Call into Qt, SQLite, FFmpeg, or the JS engine.
 - Trust data read from shared memory: other processes write it. Validate indices, lengths, and enum values before use.
 
-Mark audio-thread entry points and every function they call `KS_NONBLOCKING` (it expands to `[[clang::nonblocking]]`). The `rtsan` preset must stay clean. Never suppress a RealtimeSanitizer or function-effect diagnostic without the maintainer's approval.
+Mark audio-thread entry points and every function they call `noexcept KS_NONBLOCKING`, from `<ks/core/realtime.h>` (it expands to `[[clang::nonblocking]]`; the build fails if such a function allocates, blocks, or calls an unmarked function). The `rtsan` preset must stay clean. Never suppress a RealtimeSanitizer or function-effect diagnostic without the maintainer's approval.
 
 Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks (state out), both in shared memory. Objects the audio thread lets go of are handed to a deferred-deletion queue that a non-real-time thread drains.
 

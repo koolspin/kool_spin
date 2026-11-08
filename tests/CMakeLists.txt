@@ -1,0 +1,35 @@
+find_package(Catch2 3 CONFIG REQUIRED)
+include(Catch)
+
+# ks_add_test(<name> SOURCES <file>... [LIBRARIES <target>...])
+#
+# Builds a Catch2 test executable and registers its test cases with CTest.
+function(ks_add_test name)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "SOURCES;LIBRARIES")
+    add_executable(${name} ${arg_SOURCES})
+    target_link_libraries(${name} PRIVATE ${arg_LIBRARIES} ks::warnings Catch2::Catch2WithMain)
+    # Discover test cases when CTest runs, not at build time, so a sanitizer
+    # report shows up as a failing test rather than a broken build.
+    catch_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
+endfunction()
+
+ks_add_test(ks_core_tests
+    SOURCES core/realtime_test.cpp
+    LIBRARIES ks::core)
+
+# Guardrail: prove RealtimeSanitizer reports real-time violations. The canary
+# is built in every preset, so it is always compiled and linted, but it is
+# registered as a test only in the rtsan preset, where each mode must produce
+# a RealtimeSanitizer report. Other presets have nothing that could detect it.
+add_executable(ks_rtsan_canary guardrails/rtsan_canary.cpp)
+target_link_libraries(ks_rtsan_canary PRIVATE ks::core ks::warnings)
+
+if(KS_SANITIZER STREQUAL "rtsan")
+    add_test(NAME guardrail.rtsan_reports_allocation COMMAND ks_rtsan_canary allocate)
+    add_test(NAME guardrail.rtsan_reports_locking COMMAND ks_rtsan_canary lock)
+    # Pass only on the expected report; the exit code is ignored.
+    set_tests_properties(guardrail.rtsan_reports_allocation PROPERTIES
+        PASS_REGULAR_EXPRESSION "Intercepted call to real-time unsafe function `malloc` in real-time context")
+    set_tests_properties(guardrail.rtsan_reports_locking PROPERTIES
+        PASS_REGULAR_EXPRESSION "Intercepted call to real-time unsafe function `pthread_mutex_lock` in real-time context")
+endif()
