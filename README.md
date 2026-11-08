@@ -30,6 +30,13 @@ cmake --workflow --preset debug
 
 `tools/lint.sh` checks formatting and runs clang-tidy.
 
+To check audio output, play a short test tone at -20 dBFS:
+
+```sh
+build/debug/src/apps/tone/ks-tone                    # first backend that works
+build/debug/src/apps/tone/ks-tone --backend alsa     # or pulseaudio, jack, coreaudio
+```
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
