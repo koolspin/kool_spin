@@ -1,13 +1,26 @@
 # kool_spin: notes for AI agents
 
-Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, miniaudio.
+Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, miniaudio. It runs as several processes so the music keeps playing when any part fails.
 
-- Decisions: `docs/adr/`. Read ADR 0001 before adding a dependency.
+- Decisions: `docs/adr/`. ADR 0001 covers the stack; ADR 0002 covers reliability and the process model. Read both before adding a dependency or crossing a process boundary.
 - Plan and exit criteria: `docs/roadmap.md`.
 
 ## Status
 
 Pre-code: Phase 0 (build scaffold) has not started. Update this section, and add build and test commands, as phases land.
+
+## Processes
+
+| Process | Role | Allowed dependencies |
+|---|---|---|
+| Supervisor | Starts and restarts the others; owns shared memory; writes the session journal | Standard library only |
+| Engine | Audio I/O, decks, mixer, output safety stage, MIDI, controller scripts | miniaudio, libremidi, QuickJS-ng |
+| UI | Qt Quick interface; hosts the library database | Qt, SQLite |
+| Workers | Decoding, tags, analysis | FFmpeg, TagLib, qm-dsp, libebur128 |
+
+- Never add a dependency to the engine or supervisor without updating ADR 0002.
+- Never put a process boundary inside the per-buffer audio path.
+- Never make the engine wait on another process.
 
 ## Real-time rules (non-negotiable)
 
@@ -18,14 +31,22 @@ Code reachable from the audio callback must not:
 - Do I/O or make system calls: files, network, console, sleep.
 - Throw exceptions.
 - Call into Qt, SQLite, FFmpeg, or the JS engine.
+- Trust data read from shared memory: other processes write it. Validate indices, lengths, and enum values before use.
 
 Mark audio-thread entry points and every function they call `KS_NONBLOCKING` (it expands to `[[clang::nonblocking]]`). The `rtsan` preset must stay clean. Never suppress a RealtimeSanitizer or function-effect diagnostic without the maintainer's approval.
 
-Talk to the audio thread through lock-free SPSC queues (commands in) and atomics or seqlocks (state out). Objects the audio thread lets go of are handed to a deferred-deletion queue that a non-real-time thread drains.
+Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks (state out), both in shared memory. Objects the audio thread lets go of are handed to a deferred-deletion queue that a non-real-time thread drains.
+
+## Reliability rules
+
+- The output safety stage (NaN/Inf to silence, limiter, denormal flushing, gain ramps) is always the last stage before the device. Never bypass it.
+- The engine never reads files during playback; tracks are fully decoded into memory first.
+- Never modify users' music files unless they have opted in.
+- Every failure path gets an automated test: chaos tests for crashes and device loss, fuzzing for anything that parses outside input.
 
 ## Working conventions
 
 - The engine library must not depend on Qt and must be able to render offline, without an audio device, so it can be tested headless.
 - Every engine change comes with an offline-render test.
-- Add dependencies only through `vcpkg.json` (Qt excepted), only when the current phase needs them, and record them in the ADR.
+- Add dependencies only through `vcpkg.json` (Qt excepted), only when the current phase needs them, and record them in the ADRs.
 - Keep diffs small and reviewable: a human reviews every change.
