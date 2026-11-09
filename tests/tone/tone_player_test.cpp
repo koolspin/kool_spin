@@ -30,6 +30,20 @@ TEST_CASE("play_tone plays through the null backend", "[tone][audio]") {
     CHECK(report->peak == Catch::Approx(amplitude).epsilon(1e-3));
 }
 
+TEST_CASE("play_tone plays the given settings for a fractional duration", "[tone][audio]") {
+    const ks::tone::ToneSettings settings{.frequency_hz = 1000.0, .level_dbfs = -12.0};
+    const auto report = ks::tone::play_tone("null", settings, std::chrono::duration<double>{0.1});
+
+    REQUIRE(report.has_value());
+    // Roughly 100 ms of audio plus the fade-out, allowing for scheduling slack.
+    const auto expected_frames = report->device.sample_rate / 10;
+    CHECK(report->frames_rendered >= expected_frames / 2);
+    CHECK(report->frames_rendered < report->device.sample_rate / 2); // not rounded up to 1 s
+
+    const auto amplitude = static_cast<float>(std::pow(10.0, -12.0 / 20.0));
+    CHECK(report->peak == Catch::Approx(amplitude).epsilon(1e-3));
+}
+
 TEST_CASE("play_tone rejects an unknown backend", "[tone][audio]") {
     const auto report =
         ks::tone::play_tone("nonexistent", ks::tone::ToneSettings{}, std::chrono::milliseconds{0});

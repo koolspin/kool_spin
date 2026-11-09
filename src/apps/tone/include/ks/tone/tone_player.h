@@ -41,7 +41,7 @@ struct PlaybackReport {
 /// Returns an error message if the backend or device can't be opened.
 [[nodiscard]] std::expected<PlaybackReport, std::string>
 play_tone(std::string_view backend, const ToneSettings& settings,
-          std::chrono::milliseconds duration,
+          std::chrono::duration<double> duration,
           const std::function<void(const DeviceInfo&)>& on_start = {});
 
 } // namespace ks::tone

@@ -72,7 +72,7 @@ std::span<const std::string_view> backend_names() noexcept {
 
 std::expected<PlaybackReport, std::string>
 play_tone(std::string_view backend, const ToneSettings& settings,
-          std::chrono::milliseconds duration,
+          std::chrono::duration<double> duration,
           const std::function<void(const DeviceInfo&)>& on_start) {
     std::optional<ma_backend> requested;
     if (!backend.empty()) {
