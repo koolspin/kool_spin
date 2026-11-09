@@ -7,7 +7,7 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 ## Status
 
-Phase 0 in progress: steps 1 (build skeleton) and 2 (RealtimeSanitizer guardrail) are done. Update this section as phases land.
+Phase 0 in progress: steps 1 (build skeleton), 2 (RealtimeSanitizer guardrail), and 3 (`ks-tone`) are done. Update this section as phases land.
 
 ## Build and test
 
@@ -23,6 +23,9 @@ Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/l
 
 - Types, enumerators, and template parameters are `CamelCase`. Functions, variables, and namespaces are `snake_case`. Private and protected members end in `_`. Constants are `kCamelCase`. Macros are `KS_UPPER_CASE`. clang-tidy enforces all of these.
 - Everything lives in namespace `ks`. Public headers go in `src/<lib>/include/ks/<lib>/` and are included as `<ks/<lib>/<name>.h>`.
+- Out-of-line definitions repeat `noexcept KS_NONBLOCKING`: the attribute is part of the function's type, and the build fails if a definition doesn't match its declaration.
+- Executables live in `src/apps/<app>/`, split into a library (everything except argument handling, so tests can use it) and a thin `main.cpp`. `ks-tone` is a standalone diagnostic tool, outside the process model.
+- `third_party/` compiles third-party code that vcpkg ships as headers only (such as miniaudio). It isn't linted and doesn't use `ks::warnings`.
 - Every source file starts with `// SPDX-License-Identifier: GPL-3.0-or-later`.
 - Tests: `<name>_test.cpp`, registered with `ks_add_test()` in `tests/CMakeLists.txt`.
 - `tests/guardrails/` holds tests proving that the checks themselves work (for example, that RealtimeSanitizer reports an allocation in a `KS_NONBLOCKING` function). Never weaken, skip, or delete them.

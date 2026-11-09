@@ -7,6 +7,7 @@
   "license": "GPL-3.0-or-later",
   "builtin-baseline": "ec48c11eae9448c8c6e7739d93e06fa2433aa95f",
   "dependencies": [
-    "catch2"
+    "catch2",
+    "miniaudio"
   ]
 }

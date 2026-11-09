@@ -26,6 +26,7 @@ include(KsWarnings)
 
 option(KS_BUILD_TESTS "Build the test suite" ON)
 
+add_subdirectory(third_party)
 add_subdirectory(src)
 
 if(KS_BUILD_TESTS)

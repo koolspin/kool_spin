@@ -17,6 +17,24 @@ ks_add_test(ks_core_tests
     SOURCES core/realtime_test.cpp
     LIBRARIES ks::core)
 
+ks_add_test(ks_dsp_tests
+    SOURCES dsp/sine_oscillator_test.cpp
+    LIBRARIES ks::dsp)
+
+ks_add_test(ks_tone_tests
+    SOURCES
+        tone/tone_generator_test.cpp
+        tone/tone_player_test.cpp
+    LIBRARIES ks::tone)
+
+# ks-tone itself, end to end, without audio hardware.
+add_test(NAME ks-tone.plays_on_null_backend COMMAND ks-tone --backend null)
+set_tests_properties(ks-tone.plays_on_null_backend PROPERTIES
+    PASS_REGULAR_EXPRESSION "Playing on Null:.*Done: [1-9][0-9]* frames, peak -20.0 dBFS")
+add_test(NAME ks-tone.rejects_unknown_arguments COMMAND ks-tone --bogus)
+set_tests_properties(ks-tone.rejects_unknown_arguments PROPERTIES
+    PASS_REGULAR_EXPRESSION "unexpected argument '--bogus'")
+
 # Guardrail: prove RealtimeSanitizer reports real-time violations. The canary
 # is built in every preset, so it is always compiled and linted, but it is
 # registered as a test only in the rtsan preset, where each mode must produce
