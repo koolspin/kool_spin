@@ -4,6 +4,7 @@ Build a small, solid core first, and add features only on top of something alrea
 
 - Stack and license: [ADR 0001](adr/0001-tech-stack.md).
 - Reliability and process model: [ADR 0002](adr/0002-reliability-and-process-model.md). The music keeps playing through any failure short of a kernel panic or power loss.
+- Engine threading, IPC, and memory: [ADR 0003](adr/0003-engine-threading-ipc-and-memory.md).
 - Development workflow: `docs/process.md` (written in Phase 0). Each feature goes through spec, acceptance tests, plan, build loop, pull request, and review. Risky core code is built interactively; well-specified breadth work is built by Ralph loops.
 
 Exit criteria are tagged `[auto]` (CI or a loop can verify it) or `[manual]` (needs the maintainer and real hardware). A build loop is done when all of its `[auto]` criteria pass.
@@ -53,40 +54,61 @@ Exit criteria:
 
 Goal: glitch-free playback of real tracks, controlled from a CLI, that survives crashes of every other process and recovers from crashes of its own.
 
-**How it's built:** interactively for ADR 0003, the shared-memory primitives, the audio callback core, the output safety stage, and the supervisor's restart logic. Loops for the decode worker, `ks-play`, and the fuzz tests.
+[ADR 0003](adr/0003-engine-threading-ipc-and-memory.md) decides the engine's threads, the shared-memory and socket protocols, and how tracks are held in memory. It also splits this phase in two:
 
-Processes and IPC:
+- **Phase 1a** builds the engine as a library, in one process.
+- **Phase 1b** separates the processes and adds crash recovery.
 
-- Supervisor, engine, and decode-worker processes, plus `ks-play`, a CLI client for manual testing.
-- Shared-memory primitives: SPSC command ring, seqlock state block, track buffer regions. A Unix-socket control channel.
-- Engine restart: the engine publishes its state to shared memory. After a crash, the supervisor restarts it and it resumes with a fade-in. Crash-loop guard.
-- Session journal, written by the supervisor. The previous session is restored, paused, at launch.
+The shared-memory primitives have their final layouts from 1a on, so 1b changes what backs them, not the engine.
 
-Audio:
+### Phase 1a: Engine library
 
+**How it's built:** interactively for the shared-memory primitives, the render core and its drivers, the deck's interpolator, and the output safety stage. Loops for the mixer, the development harness, and the fuzz tests.
+
+- Shared-memory primitives: the SPSC command ring, the seqlock state block, and the region they live in, backed by anonymous memory until 1b. The command decoder.
 - `AudioBackend` interface, with a miniaudio implementation and an offline implementation for tests. The offline backend runs either as fast as possible (golden tests) or paced in real time while recording its output (chaos and soak tests). It can simulate device loss.
-- Device loss: the engine clock keeps running on a timer, and the engine reattaches when the device returns.
-- Track loading: a worker decodes with FFmpeg into shared memory, which the engine maps read-only. Playback can start before decoding finishes. Track memory is locked when the OS permits.
-- Deck: load, play/pause, seek, cue point, and variable rate including reverse, using an interpolating resampler. Track-to-device sample-rate conversion is folded into the same rate, so there is one interpolation stage.
-- Mixer: N decks, channel gain, crossfader, a main bus and a headphone-cue bus, and mapping of buses to device channels.
+- Render core: one render function, called by one driver at a time. Device loss: a freewheel driver keeps the engine clock running on a timer, and the engine reattaches when the device returns.
+- Deck: load (from a track already in memory), play/pause, seek, cue point, and variable rate including reverse, using an interpolating resampler. Track-to-device sample-rate conversion is folded into the same rate, so there is one interpolation stage.
+- Mixer: N decks, channel gain, crossfader, a main bus and a headphone-cue bus, and mapping of buses to the channels of one device.
 - Output safety stage: NaN/Inf to silence, limiter, denormal flushing, gain ramps.
-- State out, including a visual play position (frame, host time, output latency) for the future waveform view.
+- State out, including a visual play position (frame, host time, output latency) for the future waveform view. The resume state, and its validation.
+- Development harness: drives the engine in one process from a script, playing synthetic signals or WAV files (through miniaudio's built-in decoder), either through a device or rendered to a file. It's for listening and soak tests, and isn't shipped.
+
+Exit criteria:
+
+- [ ] `[auto]` Offline-render golden tests for the deck and mixer: seek, rate change, reverse, crossfade. Golden files are compared with a tolerance. Property tests show the output doesn't depend on block size, bit for bit.
+- [ ] `[auto]` Engine tests are clean under the `rtsan`, `tsan`, and `asan` presets. The command decoder and the resume-state validator are fuzzed under `fuzz`.
+- [ ] `[auto]` Lock-free primitives pass stress tests on macOS arm64, whose weaker memory ordering exposes bugs that x86 hides.
+- [ ] `[auto]` Simulated device loss keeps the clock running, and the engine resumes at the right position when the device returns.
+- [ ] `[auto]` A corrupted resume state is rejected: the engine starts clean with decks paused, and never crashes.
+- [ ] `[manual]` Pulling and reconnecting the Inpulse 500's USB cable mid-playback behaves like the simulated device loss.
+- [ ] `[manual]` One-hour soak test through the harness on the Inpulse 500's audio interface: 4 decks, 128-frame buffer at 44.1 kHz (2.9 ms), scripted loads, seeks, and rate changes, with no buffer underruns caused by the engine.
+
+### Phase 1b: Processes and crash recovery
+
+**How it's built:** interactively for the shared-memory segments, the sockets, and the supervisor's restart logic. Loops for the decode worker, `ks-play`, and the fuzz tests.
+
+- Supervisor, engine, and decode-worker processes, plus `ks-play`, a CLI client for manual testing. The supervisor is the hub: it creates every shared-memory segment and passes it on.
+- Shared-memory segments (memfd on Linux, unlinked POSIX shared memory on macOS) and the Unix-socket control channel.
+- Track loading: a worker decodes with FFmpeg into shared memory, which the engine maps read-only. Playback can start before decoding finishes. Track memory is locked when the OS permits. Tracks are capped at 2 GiB each, within a total memory budget.
+- Engine restart: the engine publishes its state to shared memory. After a crash or a hang, the supervisor restarts it. It resumes with a fade-in, at the position the decks would have reached if they had kept playing. Crash-loop guard.
+- Supervisor crash: the other processes keep running, and relaunching offers to stop the orphaned engine.
+- Session journal, written by the supervisor. The previous session is restored, paused, at launch.
+- Per-process logs through shared memory, with shared timestamps.
 - Health checks reported by `ks-play`: real-time priority, memory locking, CPU power profile, battery. System sleep is blocked while decks are loaded.
 
 Exit criteria:
 
-- [ ] `[auto]` Offline-render golden tests for the deck and mixer: seek, rate change, reverse, crossfade.
-- [ ] `[auto]` Engine tests are clean under the `rtsan`, `tsan`, and `asan` presets. Shared-memory readers and IPC message parsing are fuzzed under `fuzz`.
-- [ ] `[auto]` Lock-free primitives pass stress tests on macOS arm64, whose weaker memory ordering exposes bugs that x86 hides.
+- [ ] `[auto]` Tests are clean under the `rtsan`, `tsan`, and `asan` presets. Socket message parsing, the track segment header, and the session journal are fuzzed under `fuzz`.
 - [ ] `[auto]` Killing `ks-play` or a decode worker with `kill -9` during playback leaves no gap in the recorded output.
 - [ ] `[auto]` Killing the engine with `kill -9` resumes playback at the right position with a fade-in. Restart time is measured; target under 1 second.
+- [ ] `[auto]` An engine whose audio thread stops making progress is killed and restarted, and resumes the same way as after a crash.
+- [ ] `[auto]` Killing the supervisor with `kill -9` leaves playback running. Relaunching reports the running engine and can stop it.
 - [ ] `[auto]` Corrupted shared state makes the engine start clean with decks paused; it never crashes.
-- [ ] `[auto]` Simulated device loss keeps the clock running, and the engine resumes at the right position when the device returns.
 - [ ] `[auto]` Deleting a playing track's file doesn't interrupt playback.
 - [ ] `[auto]` After all processes are killed, relaunching restores the previous session with decks paused.
-- [ ] `[manual]` Pulling and reconnecting the Inpulse 500's USB cable mid-playback behaves like the simulated device loss.
 - [ ] `[manual]` Removing the USB drive that holds a playing track doesn't interrupt it.
-- [ ] `[manual]` One-hour soak test on the Inpulse 500's audio interface: 4 decks, 128-frame buffer at 44.1 kHz (2.9 ms), scripted loads, seeks, and rate changes, with no buffer underruns caused by the engine.
+- [ ] `[manual]` The one-hour soak test passes again with all processes running, driven through `ks-play`.
 - [ ] `[manual]` After a reboot, launching restores the previous session with decks paused.
 
 ## Phase 2: Library and analysis
@@ -150,10 +172,14 @@ Exit criteria:
 
 Key lock (Rubber Band v3), sync and quantize, hot cues, loops, beat jump, effects, HID controllers, key detection, Ableton Link, rekordbox/Serato/Traktor library import, recording, stem separation, Windows (with ASIO and its own IPC layer), OS-level sandboxing of worker processes (seccomp or Landlock on Linux, sandbox profiles on macOS), and a dedicated library-database process if UI restarts prove disruptive.
 
+Deferred by ADR 0003:
+
+- headphone cue on a second audio device, with clock-drift compensation;
+- a fallback audio device during device loss;
+- a new supervisor adopting a running engine after a supervisor crash;
+- tracks longer than the 2 GiB cap, held compressed in memory;
+- native CoreAudio and JACK backends, if Phase 3 finds miniaudio's timing too coarse for the waveform playhead.
+
 ## Open design questions
 
-The details become ADR 0003 (engine threading, IPC, and memory) during Phase 1.
-
-- **Headphone cue on a second device.** Driving main and cue from two separate audio devices needs clock-drift compensation. *Proposal:* Phase 1 supports main and cue on one multi-channel device only, which covers most DJ controllers with built-in audio, including the Inpulse 500 (outputs 1–2 and 3–4).
-- **Shared-memory lifecycle.** How segments are named, sized, passed between processes, and cleaned up after an unclean exit, including stale segments left by a crashed supervisor. Linux offers `memfd_create`; macOS only has POSIX `shm_open`, with a 31-character name limit.
-- **Track memory cap.** Whole-track residency is decided (ADR 0002). The per-track size limit, and what happens with longer files (refuse them, or decode in windows), are not.
+None at the moment. The questions raised before Phase 1 (headphone cue on a second device, the shared-memory lifecycle, and the track memory cap) are settled in [ADR 0003](adr/0003-engine-threading-ipc-and-memory.md).

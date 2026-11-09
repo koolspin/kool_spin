@@ -2,7 +2,7 @@
 
 Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, miniaudio. It runs as several processes so the music keeps playing when any part fails.
 
-- Decisions: `docs/adr/`. ADR 0001 covers the stack; ADR 0002 covers reliability and the process model. Read both before adding a dependency or crossing a process boundary.
+- Decisions: `docs/adr/`. ADR 0001 covers the stack; ADR 0002 covers reliability and the process model; ADR 0003 covers engine threading, IPC, and memory. Read them before adding a dependency, crossing a process boundary, or changing the audio thread or shared memory.
 - Plan and exit criteria: `docs/roadmap.md`.
 - How features get built (specs, acceptance tests, build loops): `docs/process.md`.
 
@@ -14,7 +14,7 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 Phase 0 is complete (2026-11-09). It delivered the build, the checks and guardrails, CI on Linux and macOS, and the build-loop workflow, proven on its first feature (`ks-tone` options). Still open: listening to `ks-tone` through JACK and on macOS.
 
-Next is Phase 1, the headless engine and process model. It starts interactively with ADR 0003 (engine threading, IPC, and memory); see `docs/roadmap.md`. Update this section as phases land.
+Next is Phase 1, the headless engine and process model. ADR 0003 splits it in two: Phase 1a builds the engine as a library in one process, and Phase 1b separates the processes and adds crash recovery. Phase 1a starts interactively with the shared-memory primitives; see `docs/roadmap.md`. Update this section as phases land.
 
 ## Build and test
 
@@ -52,6 +52,7 @@ CI (`.github/workflows/ci.yml`) runs every preset on Linux, `debug`/`release`/`a
 - Never add a dependency to the engine or supervisor without updating ADR 0002.
 - Never put a process boundary inside the per-buffer audio path.
 - Never make the engine wait on another process.
+- The supervisor is the hub: every socket connects to it, and it creates every shared-memory segment and passes it on as a file descriptor. The engine's only socket is to the supervisor (ADR 0003).
 
 ## Real-time rules (non-negotiable)
 
@@ -62,11 +63,11 @@ Code reachable from the audio callback must not:
 - Do I/O or make system calls: files, network, console, sleep.
 - Throw exceptions.
 - Call into Qt, SQLite, FFmpeg, or the JS engine.
-- Trust data read from shared memory: other processes write it. Validate indices, lengths, and enum values before use.
+- Trust data read from shared memory: other processes write it. Copy a value into private memory, validate it (indices, lengths, enum values), and use only the copy; never read a shared field twice expecting the same value. Take a segment's size from the engine's own mapping, never from a header another process wrote.
 
 Mark audio-thread entry points and every function they call `noexcept KS_NONBLOCKING`, from `<ks/core/realtime.h>` (it expands to `[[clang::nonblocking]]`; the build fails if such a function allocates, blocks, or calls an unmarked function). The `rtsan` preset must stay clean. Never suppress a RealtimeSanitizer or function-effect diagnostic without the maintainer's approval.
 
-Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks (state out), both in shared memory. Objects the audio thread lets go of are handed to a deferred-deletion queue that a non-real-time thread drains.
+Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks (state out), both in shared memory. Commands carry absolute values ("rate 1.02", not "rate up"), so replaying one is harmless. Objects reach the audio thread through a give ring and leave through a retire ring, which the engine's control thread drains and frees. ADR 0003 has the details, including the memory ordering the seqlock needs.
 
 ## Reliability rules
 
@@ -79,5 +80,6 @@ Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks
 
 - The engine library must not depend on Qt and must be able to render offline, without an audio device, so it can be tested headless.
 - Every engine change comes with an offline-render test.
+- Engine output must not depend on how frames are split into blocks: smoothing, gain ramps, and the limiter work per sample and carry their state across blocks. Golden files are compared with a tolerance; block-size tests are bit-exact (ADR 0003).
 - Add dependencies only through `vcpkg.json` (Qt excepted), only when the current phase needs them, and record them in the ADRs.
 - Keep diffs small and reviewable: a human reviews every change.

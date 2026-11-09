@@ -1,6 +1,6 @@
 # ADR 0002: Reliability and process model
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [ADR 0003](0003-engine-threading-ipc-and-memory.md) (engine threading, IPC, and memory)
 - **Date:** 2026-11-08
 
 ## Context
@@ -39,7 +39,7 @@ The maintainer's DJ software from the 1990s lost sets when Windows kernel audio 
 
 | Process | Contains | Allowed dependencies | If it crashes |
 |---|---|---|---|
-| **Supervisor** (`kool_spin`) | Starts, monitors, and restarts the other processes. Creates and owns the shared-memory regions, so they outlive any child. Writes the session journal. | Standard library only | The children keep running. Automatic recovery is unavailable until the next launch, and the UI says so. |
+| **Supervisor** (`kool_spin`) | Starts, monitors, and restarts the other processes. Creates and owns the shared-memory regions, so they outlive any child. Writes the session journal. | Standard library only | The children keep running. Loading tracks and automatic recovery are unavailable until the orphaned engine is stopped (ADR 0003), and the UI says so. |
 | **Engine** (`ks-engine`) | Audio device I/O, decks, mixer, output safety stage, MIDI I/O, controller mapping scripts. | miniaudio, libremidi, QuickJS-ng; later, a time-stretch library | The supervisor restarts it. It maps the decoded tracks and its last published state from shared memory, and resumes playing with a short fade-in. |
 | **UI** (`ks-ui`) | Qt Quick interface, GPU waveforms. Hosts the library component, which owns the database. | Qt, SQLite | Audio and controllers are unaffected. The supervisor restarts it, and it rebuilds its view from the engine's state. |
 | **Workers** (`ks-worker`) | Decoding, tag reading, analysis. One job at a time; disposable. | FFmpeg, TagLib, qm-dsp, libebur128 | That job fails with an error, and the file is flagged so it isn't retried in a loop. Nothing else is affected. |
