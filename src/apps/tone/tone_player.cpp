@@ -116,15 +116,41 @@ std::expected<DeviceList, std::string> list_devices(std::string_view backend) {
     return list;
 }
 
-std::expected<PlaybackReport, std::string>
+std::expected<PlaybackReport, PlayError>
 play_tone(std::string_view backend, const ToneSettings& settings,
-          std::chrono::duration<double> duration,
+          std::chrono::duration<double> duration, std::optional<std::uint32_t> device_index,
           const std::function<void(const DeviceInfo&)>& on_start) {
+    const auto runtime_error = [](std::string message) {
+        return std::unexpected{
+            PlayError{.kind = PlayError::Kind::Runtime, .message = std::move(message)}};
+    };
+
     ma_context context;
     if (auto opened = open_context(backend, context); !opened) {
-        return std::unexpected{std::move(opened.error())};
+        return runtime_error(std::move(opened.error()));
     }
     const ScopeExit uninit_context{[&context] { ma_context_uninit(&context); }};
+
+    // The chosen device, copied out of the context's device list.
+    std::optional<ma_device_id> device_id;
+    if (device_index) {
+        ma_device_info* infos = nullptr;
+        ma_uint32 count = 0;
+        if (const ma_result result =
+                ma_context_get_devices(&context, &infos, &count, nullptr, nullptr);
+            result != MA_SUCCESS) {
+            return runtime_error(std::format("could not list the output devices: {}",
+                                             ma_result_description(result)));
+        }
+        if (*device_index >= count) {
+            return std::unexpected{PlayError{
+                .kind = PlayError::Kind::Usage,
+                .message = std::format("no output device {} on {}", *device_index,
+                                       ma_get_backend_name(context.backend)),
+            }};
+        }
+        device_id = std::span{infos, std::size_t{count}}[*device_index].id;
+    }
 
     ma_device_config config = ma_device_config_init(ma_device_type_playback);
     config.playback.format = ma_format_f32;
@@ -132,14 +158,15 @@ play_tone(std::string_view backend, const ToneSettings& settings,
     config.sampleRate = 0; // the device's native rate, so nothing is resampled
     config.performanceProfile = ma_performance_profile_low_latency;
     config.dataCallback = render_callback;
+    config.playback.pDeviceID = device_id ? &*device_id : nullptr; // null: the default device
 
     // Declared before the device so it is destroyed after the device is uninitialized.
     std::optional<ToneGenerator> generator;
 
     ma_device device;
     if (const ma_result result = ma_device_init(&context, &config, &device); result != MA_SUCCESS) {
-        return std::unexpected{
-            std::format("could not open the output device: {}", ma_result_description(result))};
+        return runtime_error(
+            std::format("could not open the output device: {}", ma_result_description(result)));
     }
     const ScopeExit uninit_device{[&device] { ma_device_uninit(&device); }};
 
@@ -147,7 +174,7 @@ play_tone(std::string_view backend, const ToneSettings& settings,
     device.pUserData = &*generator;
 
     if (ma_device_start(&device) != MA_SUCCESS) {
-        return std::unexpected{std::string{"could not start the output device"}};
+        return runtime_error("could not start the output device");
     }
 
     const DeviceInfo info{

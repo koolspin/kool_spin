@@ -90,14 +90,12 @@ int main(int argc, char* argv[]) {
         print_devices(*list);
         return 0;
     }
-    // --device is parsed but not acted on yet.
-
     const auto report = ks::tone::play_tone(
-        options->backend, options->settings, options->duration,
+        options->backend, options->settings, options->duration, options->device,
         [&options](const ks::tone::DeviceInfo& info) { print_start(*options, info); });
     if (!report) {
-        std::cerr << std::format("ks-tone: {}\n", report.error());
-        return 1;
+        std::cerr << std::format("ks-tone: {}\n", report.error().message);
+        return report.error().kind == ks::tone::PlayError::Kind::Usage ? 2 : 1;
     }
     std::cout << std::format("Done: {} frames, peak {:.1f} dBFS, {} Hz\n", report->frames_rendered,
                              20.0 * std::log10(static_cast<double>(report->peak)),

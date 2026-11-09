@@ -14,7 +14,7 @@
 TEST_CASE("play_tone plays through the null backend", "[tone][audio]") {
     std::optional<ks::tone::DeviceInfo> started;
     const auto report =
-        ks::tone::play_tone("null", ks::tone::ToneSettings{}, std::chrono::milliseconds{200},
+        ks::tone::play_tone("null", ks::tone::ToneSettings{}, std::chrono::milliseconds{200}, {},
                             [&started](const ks::tone::DeviceInfo& info) { started = info; });
 
     REQUIRE(report.has_value());
@@ -50,7 +50,30 @@ TEST_CASE("play_tone rejects an unknown backend", "[tone][audio]") {
     const auto report =
         ks::tone::play_tone("nonexistent", ks::tone::ToneSettings{}, std::chrono::milliseconds{0});
     REQUIRE_FALSE(report.has_value());
-    CHECK(report.error() == "unknown backend 'nonexistent'");
+    CHECK(report.error().kind == ks::tone::PlayError::Kind::Runtime);
+    CHECK(report.error().message == "unknown backend 'nonexistent'");
+}
+
+TEST_CASE("play_tone plays on a chosen device", "[tone][audio]") {
+    const auto report = ks::tone::play_tone("null", ks::tone::ToneSettings{},
+                                            std::chrono::duration<double>{0.1}, 0U);
+
+    REQUIRE(report.has_value());
+    CHECK(report->device.backend == "Null");
+    CHECK(report->device.device == "NULL Playback Device");
+    CHECK(report->frames_rendered > 0);
+}
+
+TEST_CASE("play_tone rejects a device number past the end", "[tone][audio]") {
+    bool started = false;
+    const auto report = ks::tone::play_tone(
+        "null", ks::tone::ToneSettings{}, std::chrono::duration<double>{0.1}, 1U,
+        [&started](const ks::tone::DeviceInfo& /*info*/) { started = true; });
+
+    REQUIRE_FALSE(report.has_value());
+    CHECK(report.error().kind == ks::tone::PlayError::Kind::Usage);
+    CHECK(report.error().message == "no output device 1 on Null");
+    CHECK_FALSE(started);
 }
 
 TEST_CASE("list_devices lists the null backend's one device", "[tone][audio]") {
