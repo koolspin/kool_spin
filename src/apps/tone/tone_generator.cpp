@@ -22,7 +22,7 @@ ToneGenerator::ToneGenerator(const ToneSettings& settings, double sample_rate,
                              std::size_t channels) noexcept
     : oscillator_{settings.frequency_hz, sample_rate}, channels_{channels},
       amplitude_{dbfs_to_amplitude(settings.level_dbfs)},
-      gain_step_{fade_step(settings.fade_seconds, sample_rate)} {}
+      gain_step_{fade_step(settings.fade_seconds, sample_rate)}, meter_{sample_rate} {}
 
 void ToneGenerator::render(std::span<float> interleaved) noexcept KS_NONBLOCKING {
     if (!fading_out_ && stop_requested_.load(std::memory_order_acquire)) {
@@ -39,10 +39,12 @@ void ToneGenerator::render(std::span<float> interleaved) noexcept KS_NONBLOCKING
             interleaved[(frame * channels_) + channel] = sample;
         }
         peak = std::max(peak, std::abs(sample));
+        meter_.push(sample); // channel 0; every channel is identical
     }
 
     peak_.store(peak, std::memory_order_relaxed);
     frames_rendered_.fetch_add(frames, std::memory_order_relaxed);
+    measured_hz_.store(meter_.frequency_hz(), std::memory_order_release);
     if (fading_out_ && gain_ <= 0.0F) {
         finished_.store(true, std::memory_order_release);
     }
@@ -62,6 +64,10 @@ std::uint64_t ToneGenerator::frames_rendered() const noexcept {
 
 float ToneGenerator::peak() const noexcept {
     return peak_.load(std::memory_order_relaxed);
+}
+
+double ToneGenerator::measured_frequency_hz() const noexcept {
+    return measured_hz_.load(std::memory_order_acquire);
 }
 
 } // namespace ks::tone

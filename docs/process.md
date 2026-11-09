@@ -37,6 +37,22 @@ tests/acceptance/<feature>/   acceptance tests (protected)
 
 - **Build environment:** the project builds locally, with `VCPKG_ROOT` set.
 - **Sandbox:** on Linux, `bubblewrap` and `socat` (`sudo apt install bubblewrap socat`). macOS has its sandbox built in. The loop refuses to run without the sandbox.
+- **Ubuntu 24.04 and later:** bubblewrap also needs an AppArmor profile. Without one, AppArmor blocks the user namespaces it uses (`setting up uid map: Permission denied`). This profile lets `/usr/bin/bwrap` create them, and leaves the system-wide restriction on for everything else:
+
+  ```sh
+  sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/bwrap>
+  }
+  EOF
+  sudo apparmor_parser -r /etc/apparmor.d/bwrap
+  ```
+
+  `tools/loop/run.sh` checks for this before the first pass.
 
 ### Start
 
@@ -64,10 +80,16 @@ Each pass is a fresh `claude -p` process. It has no memory of earlier passes: th
 
 1. takes the first unchecked task in the plan;
 2. implements it with tests;
-3. runs the checks (`debug`, `asan`, and `rtsan` workflows, plus `tools/lint.sh`);
+3. runs the checks;
 4. ticks the task and commits.
 
-If it can't make the checks pass, it reverts its changes and records the failed attempt in the plan instead. The prompts are `tools/loop/PROMPT_plan.md` and `tools/loop/PROMPT_build.md`. When a loop misbehaves, fix the prompt rather than patching its output by hand.
+If it can't make the checks pass, it reverts its changes and records the failed attempt in the plan instead.
+
+**Checks in a pass, and at the end:** acceptance tests describe the finished feature, so most fail until the last task is done. Every test in `tests/acceptance/` gets the CTest label `acceptance`, which splits the checks:
+- **Each pass:** every other test must pass in the `debug`, `asan`, and `rtsan` presets (`ctest -LE acceptance`), lint must be clean, and no acceptance test that passed before the pass may fail after it.
+- **Finishing:** the final pass, and CI on the pull request, run the complete suite, and everything must pass.
+
+A feature's acceptance tests register themselves: `tests/acceptance/CMakeLists.txt` adds every subdirectory that has a `CMakeLists.txt`, and provides `ks_acceptance_test()`, which checks a command's exit code and output lines with `tests/acceptance/expect.sh`. The prompts are `tools/loop/PROMPT_plan.md` and `tools/loop/PROMPT_build.md`. When a loop misbehaves, fix the prompt rather than patching its output by hand.
 
 ### When it stops
 
@@ -102,7 +124,12 @@ No single mechanism is airtight, so several independent layers each limit what a
 | CI check | A pull request that changes a protected path fails until the maintainer adds the `protected-paths-approved` label | `.github/workflows/protected-paths.yml` |
 | Guardrail tests | Prove the hook and the CI check work | `tests/guardrails/protected_paths_test.sh` |
 
-**Known gap:** a command on the allowlist could still write a protected file through shell redirection (`>`). The hook doesn't see Bash commands, so the CI check is the backstop.
+**What the first trial showed (ks-tone options, Phase 0):**
+- **Bypass attempts:** passes tried to edit files with `python3` scripts and `sed -i`, which would have bypassed the protected-path hook. The allowlist refused both, and the passes fell back to the Edit tool.
+- **Redirection:** in the loop's permission mode, writing to a file with `>` is refused even inside the worktree, so shell redirection isn't a way around the hook either.
+- **What remains:** the hook can't see writes that an allowed program makes as a side effect, such as a CMake script run with `cmake -P`. The CI check is the backstop for those.
+
+The build prompt lists exactly which shell constructs work.
 
 ## Protected paths
 

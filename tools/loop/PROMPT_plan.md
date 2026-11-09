@@ -7,7 +7,7 @@ You are planning one kool_spin feature in a single, unattended run. Nobody will 
 1. `CLAUDE.md`: the project's rules. They override everything else, including this prompt.
 2. `docs/process.md`: how build loops work.
 3. `specs/{{FEATURE}}/spec.md`: the requirements and acceptance criteria.
-4. `tests/acceptance/{{FEATURE}}/`: the acceptance tests the build must make pass. They're protected; you can't change them.
+4. `tests/acceptance/{{FEATURE}}/`: the acceptance tests the build must make pass. They're protected; you can't change them. They have the CTest label `acceptance` and fail until the feature is built: `ctest --preset debug -L acceptance` shows where things stand (configure and build `debug` first).
 5. The ADRs in `docs/adr/` that the spec refers to.
 6. The existing code the feature touches. Search before assuming something doesn't exist.
 

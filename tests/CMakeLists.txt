@@ -19,10 +19,12 @@ ks_add_test(ks_core_tests
 
 ks_add_test(ks_dsp_tests
     SOURCES dsp/sine_oscillator_test.cpp
+            dsp/frequency_meter_test.cpp
     LIBRARIES ks::dsp)
 
 ks_add_test(ks_tone_tests
     SOURCES
+        tone/options_test.cpp
         tone/tone_generator_test.cpp
         tone/tone_player_test.cpp
     LIBRARIES ks::tone)
@@ -34,6 +36,9 @@ set_tests_properties(ks-tone.plays_on_null_backend PROPERTIES
 add_test(NAME ks-tone.rejects_unknown_arguments COMMAND ks-tone --bogus)
 set_tests_properties(ks-tone.rejects_unknown_arguments PROPERTIES
     PASS_REGULAR_EXPRESSION "unexpected argument '--bogus'")
+
+# Acceptance tests, one directory per feature, labeled 'acceptance'.
+add_subdirectory(acceptance)
 
 # Guardrail: prove the protected-path hook and CI check work (docs/process.md).
 add_test(NAME guardrail.protected_paths
