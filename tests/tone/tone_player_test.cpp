@@ -76,6 +76,37 @@ TEST_CASE("play_tone rejects a device number past the end", "[tone][audio]") {
     CHECK_FALSE(started);
 }
 
+TEST_CASE("check_frequency accepts frequencies below half the sample rate", "[tone]") {
+    CHECK_FALSE(ks::tone::check_frequency(20000.0, 44100).has_value());
+    CHECK_FALSE(ks::tone::check_frequency(440.0, 48000).has_value());
+}
+
+TEST_CASE("check_frequency rejects frequencies at or above half the sample rate", "[tone]") {
+    CHECK(ks::tone::check_frequency(22050.0, 44100) ==
+          "--frequency 22050 Hz is too high for the device's 44100 Hz sample rate");
+    CHECK(ks::tone::check_frequency(20000.0, 32000) ==
+          "--frequency 20000 Hz is too high for the device's 32000 Hz sample rate");
+    CHECK(ks::tone::check_frequency(20000.0, 16000) ==
+          "--frequency 20000 Hz is too high for the device's 16000 Hz sample rate");
+    CHECK(ks::tone::check_frequency(16000.5, 32000) ==
+          "--frequency 16000.5 Hz is too high for the device's 32000 Hz sample rate");
+}
+
+// The option parser caps --frequency at 20000 Hz, so this can only be reached
+// through the library, with a frequency above half the null device's rate.
+TEST_CASE("play_tone rejects a frequency the device can't play", "[tone][audio]") {
+    bool started = false;
+    const ks::tone::ToneSettings settings{.frequency_hz = 30000.0, .level_dbfs = -20.0};
+    const auto report =
+        ks::tone::play_tone("null", settings, std::chrono::duration<double>{0.1}, {},
+                            [&started](const ks::tone::DeviceInfo& /*info*/) { started = true; });
+
+    REQUIRE_FALSE(report.has_value());
+    CHECK(report.error().kind == ks::tone::PlayError::Kind::Usage);
+    CHECK(report.error().message.starts_with("--frequency 30000 Hz is too high for the device's "));
+    CHECK_FALSE(started);
+}
+
 TEST_CASE("list_devices lists the null backend's one device", "[tone][audio]") {
     const auto list = ks::tone::list_devices("null");
 

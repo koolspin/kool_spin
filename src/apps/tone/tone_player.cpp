@@ -91,6 +91,14 @@ std::span<const std::string_view> backend_names() noexcept {
     return kBackendNames;
 }
 
+std::optional<std::string> check_frequency(double frequency_hz, std::uint32_t sample_rate) {
+    if (frequency_hz < static_cast<double>(sample_rate) / 2.0) {
+        return std::nullopt;
+    }
+    return std::format("--frequency {} Hz is too high for the device's {} Hz sample rate",
+                       frequency_hz, sample_rate);
+}
+
 std::expected<DeviceList, std::string> list_devices(std::string_view backend) {
     ma_context context;
     if (auto opened = open_context(backend, context); !opened) {
@@ -169,6 +177,12 @@ play_tone(std::string_view backend, const ToneSettings& settings,
             std::format("could not open the output device: {}", ma_result_description(result)));
     }
     const ScopeExit uninit_device{[&device] { ma_device_uninit(&device); }};
+
+    // Before the generator exists: its oscillator asserts the frequency is below Nyquist.
+    if (auto too_high = check_frequency(settings.frequency_hz, device.sampleRate)) {
+        return std::unexpected{
+            PlayError{.kind = PlayError::Kind::Usage, .message = std::move(*too_high)}};
+    }
 
     generator.emplace(settings, static_cast<double>(device.sampleRate), device.playback.channels);
     device.pUserData = &*generator;

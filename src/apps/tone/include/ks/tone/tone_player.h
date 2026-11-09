@@ -63,13 +63,20 @@ struct PlayError {
 /// Returns an error message if the backend can't be opened or queried.
 [[nodiscard]] std::expected<DeviceList, std::string> list_devices(std::string_view backend);
 
+/// Checks that a device running at `sample_rate` can play `frequency_hz`: it
+/// must be below half the sample rate. Returns the error message (without the
+/// "ks-tone: " prefix) if it can't, or nothing if it can.
+[[nodiscard]] std::optional<std::string> check_frequency(double frequency_hz,
+                                                         std::uint32_t sample_rate);
+
 /// Plays a tone for `duration`, then fades it out.
 ///
 /// `backend` is one of backend_names(); "null" needs no audio hardware and is
 /// meant for tests. An empty `backend` uses the first backend that works.
 /// `device_index` is an index into list_devices()' devices; unset plays on
 /// the system default device. An index past the end is a usage error,
-/// reported before any device is opened.
+/// reported before any device is opened. A frequency the opened device can't
+/// play (see check_frequency()) is also a usage error, and nothing plays.
 /// `on_start`, if set, is called with the device details once playback starts.
 /// Returns an error if the backend or device can't be opened.
 [[nodiscard]] std::expected<PlaybackReport, PlayError>
