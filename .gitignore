@@ -2,6 +2,9 @@
 /build/
 /vcpkg_installed/
 
+# Build loop pass logs (tools/loop/run.sh)
+/.loop/
+
 # Machine-specific CMake presets
 /CMakeUserPresets.json
 
