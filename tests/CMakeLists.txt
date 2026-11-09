@@ -23,6 +23,7 @@ ks_add_test(ks_dsp_tests
 
 ks_add_test(ks_tone_tests
     SOURCES
+        tone/options_test.cpp
         tone/tone_generator_test.cpp
         tone/tone_player_test.cpp
     LIBRARIES ks::tone)
