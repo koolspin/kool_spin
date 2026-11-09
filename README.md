@@ -1,5 +1,7 @@
 # kool_spin
 
+[![CI](https://github.com/koolspin/kool_spin/actions/workflows/ci.yml/badge.svg)](https://github.com/koolspin/kool_spin/actions/workflows/ci.yml)
+
 DJ Software - 30 years later.
 
 An open-source DJ application for Linux and macOS, designed so the music keeps playing no matter what fails. It's in early development; see the [roadmap](docs/roadmap.md) and the [design decisions](docs/adr/).

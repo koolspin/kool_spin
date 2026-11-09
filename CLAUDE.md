@@ -7,7 +7,7 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 ## Status
 
-Phase 0 in progress: steps 1 (build skeleton), 2 (RealtimeSanitizer guardrail), and 3 (`ks-tone`) are done. Update this section as phases land.
+Phase 0 in progress: steps 1 (build skeleton), 2 (RealtimeSanitizer guardrail), 3 (`ks-tone`), and 4 (CI) are done. Update this section as phases land.
 
 ## Build and test
 
@@ -18,6 +18,8 @@ Needs `VCPKG_ROOT` set to a vcpkg checkout. On Linux, Clang 21 is picked automat
 - Formatting and clang-tidy: `tools/lint.sh` (reads `build/debug/compile_commands.json`, so configure `debug` first). `KS_LINT_FIX=1 tools/lint.sh` applies formatting fixes.
 
 Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/lint.sh` is clean. Warnings are errors.
+
+CI (`.github/workflows/ci.yml`) runs every preset on Linux, `debug`/`release`/`asan`/`tsan` on macOS arm64, and lint, on every pull request and on pushes to `main`. The LLVM version is pinned in three places that must agree: `cmake/KsToolchain.cmake`, `tools/lint.sh`, and `ci.yml`. vcpkg is pinned by `builtin-baseline` in `vcpkg.json`; CI checks out exactly that commit.
 
 ## Code conventions
 

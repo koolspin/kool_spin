@@ -37,7 +37,7 @@ kool_spin runs as several processes (supervisor, engine, UI, workers), and each 
 | Controller scripting | QuickJS-ng, in the engine process, with Mixxx-compatible mapping format and control names | Reuses Mixxx's controller mappings. Controllers keep working without Qt or the UI. |
 | Inter-process communication | POSIX shared memory and Unix domain sockets | Our own SPSC ring buffer and seqlock, designed to live in shared memory. |
 | Tests | Catch2 v3; golden-file tests that render the engine offline; chaos tests that kill processes | |
-| Checks | clang-format, clang-tidy, ASan + UBSan, TSan, RealtimeSanitizer with `[[clang::nonblocking]]`, libFuzzer | RT checks run in Linux CI with Clang ≥ 20. |
+| Checks | clang-format, clang-tidy, ASan + UBSan, TSan, RealtimeSanitizer with `[[clang::nonblocking]]`, libFuzzer | Compile-time `nonblocking` checks run on Linux (Clang ≥ 20) and macOS (AppleClang ≥ 17). RealtimeSanitizer and libFuzzer run in Linux CI. |
 | CI | GitHub Actions: Ubuntu 24.04 (Clang), macOS arm64 (AppleClang) | |
 
 ### Real-time safety
