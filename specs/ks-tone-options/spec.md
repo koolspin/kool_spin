@@ -1,6 +1,6 @@
 # Feature: ks-tone options
 
-- **Status:** Draft, awaiting the maintainer's review. Protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-09. Protected: build loops can't change it.
 - **Roadmap:** Phase 0, step 6 (the trial loop)
 - **Built by:** loop
 
