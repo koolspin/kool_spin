@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Checks formatting with clang-format and runs clang-tidy on kool_spin's own sources.
 #
-# Usage: tools/lint.sh [build-dir]
+# Usage: tools/lint.sh [--fix] [build-dir]
+#   --fix       reformat files in place instead of only checking them
 #   build-dir   a configured preset build directory (default: build/debug);
 #               clang-tidy reads its compile_commands.json.
 #
-# KS_LINT_FIX=1 reformats files in place instead of only checking them.
 # CLANG_FORMAT, CLANG_TIDY, and RUN_CLANG_TIDY override the tool paths.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fix=0
+if [[ "${1:-}" == "--fix" ]]; then
+    fix=1
+    shift
+fi
 build_dir="${1:-$root/build/debug}"
 
 # Prefer the pinned LLVM version (apt.llvm.org names), then unversioned names (Homebrew).
@@ -40,7 +45,7 @@ list_sources() {
 status=0
 
 echo "== clang-format ($clang_format)"
-if [[ "${KS_LINT_FIX:-0}" == 1 ]]; then
+if ((fix)); then
     list_sources | xargs -0 "$clang_format" -i || status=1
 else
     list_sources | xargs -0 "$clang_format" --dry-run --Werror || status=1

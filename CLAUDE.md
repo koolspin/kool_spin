@@ -4,10 +4,15 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 - Decisions: `docs/adr/`. ADR 0001 covers the stack; ADR 0002 covers reliability and the process model. Read both before adding a dependency or crossing a process boundary.
 - Plan and exit criteria: `docs/roadmap.md`.
+- How features get built (specs, acceptance tests, build loops): `docs/process.md`.
+
+## Protected paths
+
+`tools/loop/protected-paths` lists files that define "done", the checks themselves, and decisions the maintainer owns: acceptance and guardrail tests, build and lint configuration, `vcpkg.json`, this file, the ADRs, approved specs, the loop machinery, and CI. Build loops can't edit them. Any pull request that changes one needs the maintainer's `protected-paths-approved` label. In an interactive session, change them only when the maintainer asks.
 
 ## Status
 
-Phase 0 in progress: steps 1 (build skeleton), 2 (RealtimeSanitizer guardrail), 3 (`ks-tone`), and 4 (CI) are done. Update this section as phases land.
+Phase 0 in progress: steps 1 (build skeleton), 2 (RealtimeSanitizer guardrail), 3 (`ks-tone`), 4 (CI), and 5 (agent workflow) are done. Step 6, the trial loop, is next. Update this section as phases land.
 
 ## Build and test
 
@@ -15,7 +20,7 @@ Needs `VCPKG_ROOT` set to a vcpkg checkout. On Linux, Clang 21 is picked automat
 
 - Configure, build, and test: `cmake --workflow --preset <preset>`. Presets: `debug`, `release`, `asan`, `tsan`, `rtsan`, `fuzz` (the last two Linux only).
 - Step by step: `cmake --preset debug`, `cmake --build --preset debug`, `ctest --preset debug`.
-- Formatting and clang-tidy: `tools/lint.sh` (reads `build/debug/compile_commands.json`, so configure `debug` first). `KS_LINT_FIX=1 tools/lint.sh` applies formatting fixes.
+- Formatting and clang-tidy: `tools/lint.sh` (reads `build/debug/compile_commands.json`, so configure `debug` first). `tools/lint.sh --fix` applies formatting fixes.
 
 Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/lint.sh` is clean. Warnings are errors.
 

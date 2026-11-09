@@ -1,0 +1,31 @@
+# Protected paths: files a build loop must not change. A Claude Code hook blocks
+# loop edits to them, and CI fails any pull request that changes them until a
+# maintainer adds the 'protected-paths-approved' label. See docs/process.md.
+#
+# One shell glob per line, relative to the repository root. '*' also matches '/'.
+
+# Tests that define "done", and tests that prove the checks themselves work
+tests/acceptance/*
+tests/guardrails/*
+tests/*/golden/*
+
+# Build, warning, sanitizer, and lint configuration
+CMakePresets.json
+cmake/*
+.clang-format
+.clang-tidy
+tools/lint.sh
+vcpkg.json
+
+# Decisions, rules, and approved specs
+CLAUDE.md
+docs/adr/*
+docs/process.md
+docs/roadmap.md
+specs/*/spec.md
+specs/_template/*
+
+# The loop's own machinery, agent settings, and CI
+tools/loop/*
+.claude/*
+.github/*

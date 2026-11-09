@@ -1,0 +1,30 @@
+name: Protected paths
+
+# Fails a pull request that changes a protected path (tools/loop/protected-paths)
+# until a maintainer reviews the change and adds the 'protected-paths-approved'
+# label. Runs again whenever labels change. See docs/process.md.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Protected paths
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check for changes to protected paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          KS_PROTECTED_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'protected-paths-approved') }}
+        run: tools/loop/check-protected.sh --diff "$BASE_SHA"
