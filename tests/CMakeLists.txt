@@ -35,6 +35,9 @@ add_test(NAME ks-tone.rejects_unknown_arguments COMMAND ks-tone --bogus)
 set_tests_properties(ks-tone.rejects_unknown_arguments PROPERTIES
     PASS_REGULAR_EXPRESSION "unexpected argument '--bogus'")
 
+# Acceptance tests, one directory per feature, labeled 'acceptance'.
+add_subdirectory(acceptance)
+
 # Guardrail: prove the protected-path hook and CI check work (docs/process.md).
 add_test(NAME guardrail.protected_paths
     COMMAND bash "${PROJECT_SOURCE_DIR}/tests/guardrails/protected_paths_test.sh")

@@ -13,19 +13,26 @@ You are one pass of an unattended build loop for one kool_spin feature. Each pas
 
 1. Take the first unchecked task in the plan. If none are left, go to "Finish the feature".
 2. Search the code before writing any: an earlier pass may have done part of the task.
-3. Implement it, with unit tests for new behavior. Follow `CLAUDE.md`: the real-time rules, `KS_NONBLOCKING`, naming, and SPDX headers.
-4. Run the checks. All of them must pass:
-   - `cmake --workflow --preset debug`
-   - `cmake --workflow --preset asan`
-   - `cmake --workflow --preset rtsan` (Linux only)
-   - `tools/lint.sh` (`tools/lint.sh --fix` fixes formatting)
-5. If they pass:
+3. Note which acceptance tests pass before you change anything:
+
+       cmake --preset debug && cmake --build --preset debug && ctest --preset debug -L acceptance
+
+   Acceptance tests (CTest label `acceptance`) describe the finished feature, so some fail until the last task is done. None that pass now may fail after your change.
+4. Implement the task, with unit tests for new behavior. Follow `CLAUDE.md`: the real-time rules, `KS_NONBLOCKING`, naming, and SPDX headers.
+5. Run the checks. All of them must pass:
+   - For each of the `debug`, `asan`, and `rtsan` presets (`rtsan` on Linux only), every test except the acceptance tests:
+
+         cmake --preset <preset> && cmake --build --preset <preset> && ctest --preset <preset> -LE acceptance
+
+   - `ctest --preset debug -L acceptance`: every acceptance test that passed in step 3 still passes.
+   - `tools/lint.sh` (`tools/lint.sh --fix` fixes formatting).
+6. If they pass:
    - tick the task in the plan;
-   - add a one-line note under it saying what you did and anything the next pass should know;
+   - add a one-line note under it saying what you did, how many acceptance tests now pass, and anything the next pass should know;
    - commit everything, the plan included.
 
    The commit message is a short summary line, a blank line, what changed and why, and then the line `Loop: {{FEATURE}} pass {{PASS}}`.
-6. If you can't make them pass in this pass:
+7. If you can't make them pass in this pass:
    - revert your changes with `git restore --staged --worktree .` and `git clean -fd`;
    - add a note under the task: `Attempt failed (pass {{PASS}}): <what you tried and what failed>`;
    - commit only the plan.
@@ -53,7 +60,14 @@ Commit it.
 
 ## Finish the feature
 
-When every task is ticked, run all the checks above; every `[auto]` acceptance test must pass. Then write `specs/{{FEATURE}}/pr-description.md` for the maintainer, covering:
+When every task is ticked, run the complete suite, acceptance tests included. Every test must pass:
+
+- `cmake --workflow --preset debug`
+- `cmake --workflow --preset asan`
+- `cmake --workflow --preset rtsan` (Linux only)
+- `tools/lint.sh`
+
+If something fails, fix it as one more task: add it to the plan, then follow "Do one task". Once everything passes, write `specs/{{FEATURE}}/pr-description.md` for the maintainer, covering:
 - a summary;
 - what was built, task by task;
 - any deviations from the spec or plan, and why;

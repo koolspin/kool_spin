@@ -22,7 +22,7 @@ Needs `VCPKG_ROOT` set to a vcpkg checkout. On Linux, Clang 21 is picked automat
 - Step by step: `cmake --preset debug`, `cmake --build --preset debug`, `ctest --preset debug`.
 - Formatting and clang-tidy: `tools/lint.sh` (reads `build/debug/compile_commands.json`, so configure `debug` first). `tools/lint.sh --fix` applies formatting fixes.
 
-Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/lint.sh` is clean. Warnings are errors.
+Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/lint.sh` is clean. Warnings are errors. On a feature branch whose acceptance tests aren't all passing yet, run `ctest --preset <preset> -LE acceptance` instead of the full workflow (see `docs/process.md`).
 
 CI (`.github/workflows/ci.yml`) runs every preset on Linux, `debug`/`release`/`asan`/`tsan` on macOS arm64, and lint, on every pull request and on pushes to `main`. The LLVM version is pinned in three places that must agree: `cmake/KsToolchain.cmake`, `tools/lint.sh`, and `ci.yml`. vcpkg is pinned by `builtin-baseline` in `vcpkg.json`; CI checks out exactly that commit.
 

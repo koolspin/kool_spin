@@ -64,10 +64,16 @@ Each pass is a fresh `claude -p` process. It has no memory of earlier passes: th
 
 1. takes the first unchecked task in the plan;
 2. implements it with tests;
-3. runs the checks (`debug`, `asan`, and `rtsan` workflows, plus `tools/lint.sh`);
+3. runs the checks;
 4. ticks the task and commits.
 
-If it can't make the checks pass, it reverts its changes and records the failed attempt in the plan instead. The prompts are `tools/loop/PROMPT_plan.md` and `tools/loop/PROMPT_build.md`. When a loop misbehaves, fix the prompt rather than patching its output by hand.
+If it can't make the checks pass, it reverts its changes and records the failed attempt in the plan instead.
+
+**Checks in a pass, and at the end:** acceptance tests describe the finished feature, so most fail until the last task is done. Every test in `tests/acceptance/` gets the CTest label `acceptance`, which splits the checks:
+- **Each pass:** every other test must pass in the `debug`, `asan`, and `rtsan` presets (`ctest -LE acceptance`), lint must be clean, and no acceptance test that passed before the pass may fail after it.
+- **Finishing:** the final pass, and CI on the pull request, run the complete suite, and everything must pass.
+
+A feature's acceptance tests register themselves: `tests/acceptance/CMakeLists.txt` adds every subdirectory that has a `CMakeLists.txt`, and provides `ks_acceptance_test()`, which checks a command's exit code and output lines with `tests/acceptance/expect.sh`. The prompts are `tools/loop/PROMPT_plan.md` and `tools/loop/PROMPT_build.md`. When a loop misbehaves, fix the prompt rather than patching its output by hand.
 
 ### When it stops
 
