@@ -19,6 +19,7 @@ ks_add_test(ks_core_tests
 
 ks_add_test(ks_dsp_tests
     SOURCES dsp/sine_oscillator_test.cpp
+            dsp/frequency_meter_test.cpp
     LIBRARIES ks::dsp)
 
 ks_add_test(ks_tone_tests
