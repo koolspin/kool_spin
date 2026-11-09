@@ -12,7 +12,7 @@
 - how tracks are held in memory;
 - how the engine restarts.
 
-It also settles the roadmap's open design questions and splits Phase 1 in two.
+It also settles the roadmap's open design questions and splits Phase 1 in two. It amends ADR 0001's inter-process communication entry (section 7) and ADR 0002's supervisor-crash behavior (section 12).
 
 Constraints:
 

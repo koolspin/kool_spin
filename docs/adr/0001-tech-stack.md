@@ -1,6 +1,6 @@
 # ADR 0001: Language, frameworks, and license
 
-- **Status:** Accepted; amended by [ADR 0002](0002-reliability-and-process-model.md) (reliability and process model)
+- **Status:** Accepted; amended by [ADR 0002](0002-reliability-and-process-model.md) (reliability and process model) and [ADR 0003](0003-engine-threading-ipc-and-memory.md) (engine threading, IPC, and memory)
 - **Date:** 2026-11-08
 
 ## Context
@@ -35,7 +35,7 @@ kool_spin runs as several processes (supervisor, engine, UI, workers), and each 
 | MIDI | libremidi, in the engine process | Hot-plug support. |
 | HID (later) | hidapi; libusb for bulk-transfer devices | |
 | Controller scripting | QuickJS-ng, in the engine process, with Mixxx-compatible mapping format and control names | Reuses Mixxx's controller mappings. Controllers keep working without Qt or the UI. |
-| Inter-process communication | POSIX shared memory and Unix domain sockets | Our own SPSC ring buffer and seqlock, designed to live in shared memory. |
+| Inter-process communication | Shared memory (`memfd_create` on Linux, POSIX `shm_open` on macOS), passed as file descriptors over Unix domain sockets | Our own SPSC ring buffer and seqlock, designed to live in shared memory. Details in ADR 0003. |
 | Tests | Catch2 v3; golden-file tests that render the engine offline; chaos tests that kill processes | |
 | Checks | clang-format, clang-tidy, ASan + UBSan, TSan, RealtimeSanitizer with `[[clang::nonblocking]]`, libFuzzer | Compile-time `nonblocking` checks run on Linux (Clang ≥ 20) and macOS (AppleClang ≥ 17). RealtimeSanitizer and libFuzzer run in Linux CI. |
 | CI | GitHub Actions: Ubuntu 24.04 (Clang), macOS arm64 (AppleClang) | |
