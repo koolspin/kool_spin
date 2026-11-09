@@ -52,3 +52,19 @@ TEST_CASE("play_tone rejects an unknown backend", "[tone][audio]") {
     REQUIRE_FALSE(report.has_value());
     CHECK(report.error() == "unknown backend 'nonexistent'");
 }
+
+TEST_CASE("list_devices lists the null backend's one device", "[tone][audio]") {
+    const auto list = ks::tone::list_devices("null");
+
+    REQUIRE(list.has_value());
+    CHECK(list->backend == "Null");
+    REQUIRE(list->devices.size() == 1);
+    CHECK(list->devices[0].name == "NULL Playback Device");
+    CHECK(list->devices[0].is_default);
+}
+
+TEST_CASE("list_devices rejects an unknown backend", "[tone][audio]") {
+    const auto list = ks::tone::list_devices("nonexistent");
+    REQUIRE_FALSE(list.has_value());
+    CHECK(list.error() == "unknown backend 'nonexistent'");
+}

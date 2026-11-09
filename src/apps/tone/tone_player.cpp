@@ -41,6 +41,27 @@ std::optional<ma_backend> find_backend(std::string_view name) {
     return found->id;
 }
 
+/// Initializes `context` for `backend`, or for the first backend that works
+/// when `backend` is empty. play_tone() and list_devices() both use this, so
+/// they pick the same backend. On success, the caller uninitializes `context`.
+std::expected<void, std::string> open_context(std::string_view backend, ma_context& context) {
+    std::optional<ma_backend> requested;
+    if (!backend.empty()) {
+        requested = find_backend(backend);
+        if (!requested) {
+            return std::unexpected{std::format("unknown backend '{}'", backend)};
+        }
+    }
+
+    const ma_uint32 backend_count = requested ? 1 : 0;
+    if (ma_context_init(requested ? &*requested : nullptr, backend_count, nullptr, &context) !=
+        MA_SUCCESS) {
+        return std::unexpected{std::format("could not initialize the {} audio backend",
+                                           backend.empty() ? "default" : backend)};
+    }
+    return {};
+}
+
 /// Runs a callable when the scope exits.
 template <typename F>
 class ScopeExit {
@@ -70,24 +91,38 @@ std::span<const std::string_view> backend_names() noexcept {
     return kBackendNames;
 }
 
+std::expected<DeviceList, std::string> list_devices(std::string_view backend) {
+    ma_context context;
+    if (auto opened = open_context(backend, context); !opened) {
+        return std::unexpected{std::move(opened.error())};
+    }
+    const ScopeExit uninit_context{[&context] { ma_context_uninit(&context); }};
+
+    ma_device_info* infos = nullptr;
+    ma_uint32 count = 0;
+    if (const ma_result result = ma_context_get_devices(&context, &infos, &count, nullptr, nullptr);
+        result != MA_SUCCESS) {
+        return std::unexpected{
+            std::format("could not list the output devices: {}", ma_result_description(result))};
+    }
+
+    DeviceList list{.backend = ma_get_backend_name(context.backend), .devices = {}};
+    const std::span playback{infos, std::size_t{count}};
+    list.devices.reserve(playback.size());
+    for (const ma_device_info& info : playback) {
+        list.devices.push_back(OutputDevice{.name = std::string{std::data(info.name)},
+                                            .is_default = info.isDefault != MA_FALSE});
+    }
+    return list;
+}
+
 std::expected<PlaybackReport, std::string>
 play_tone(std::string_view backend, const ToneSettings& settings,
           std::chrono::duration<double> duration,
           const std::function<void(const DeviceInfo&)>& on_start) {
-    std::optional<ma_backend> requested;
-    if (!backend.empty()) {
-        requested = find_backend(backend);
-        if (!requested) {
-            return std::unexpected{std::format("unknown backend '{}'", backend)};
-        }
-    }
-
     ma_context context;
-    const ma_uint32 backend_count = requested ? 1 : 0;
-    if (ma_context_init(requested ? &*requested : nullptr, backend_count, nullptr, &context) !=
-        MA_SUCCESS) {
-        return std::unexpected{std::format("could not initialize the {} audio backend",
-                                           backend.empty() ? "default" : backend)};
+    if (auto opened = open_context(backend, context); !opened) {
+        return std::unexpected{std::move(opened.error())};
     }
     const ScopeExit uninit_context{[&context] { ma_context_uninit(&context); }};
 

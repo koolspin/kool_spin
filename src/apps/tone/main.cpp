@@ -56,6 +56,15 @@ void print_start(const ks::tone::Options& options, const ks::tone::DeviceInfo& i
               << std::flush;
 }
 
+void print_devices(const ks::tone::DeviceList& list) {
+    std::cout << std::format("Output devices on {}:\n", list.backend);
+    for (std::size_t i = 0; i < list.devices.size(); ++i) {
+        const auto& device = list.devices[i];
+        std::cout << std::format("  {}: {}{}\n", i, device.name,
+                                 device.is_default ? " (default)" : "");
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -72,7 +81,16 @@ int main(int argc, char* argv[]) {
         print_usage(std::cout);
         return 0;
     }
-    // --list-devices and --device are parsed but not acted on yet.
+    if (options->list_devices) {
+        const auto list = ks::tone::list_devices(options->backend);
+        if (!list) {
+            std::cerr << std::format("ks-tone: {}\n", list.error());
+            return 1;
+        }
+        print_devices(*list);
+        return 0;
+    }
+    // --device is parsed but not acted on yet.
 
     const auto report = ks::tone::play_tone(
         options->backend, options->settings, options->duration,

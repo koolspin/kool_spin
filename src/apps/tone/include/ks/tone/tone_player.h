@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ks::tone {
 
@@ -31,8 +32,25 @@ struct PlaybackReport {
     double measured_hz = 0.0; ///< Frequency measured from the samples played.
 };
 
+/// One output device, as --list-devices shows it.
+struct OutputDevice {
+    std::string name;
+    bool is_default = false; ///< The system default output device.
+};
+
+/// A backend's output devices, in miniaudio's order.
+struct DeviceList {
+    std::string backend; ///< As miniaudio names it, for example "PulseAudio" or "Null".
+    std::vector<OutputDevice> devices;
+};
+
 /// Backend names accepted by play_tone().
 [[nodiscard]] std::span<const std::string_view> backend_names() noexcept;
+
+/// Lists the output devices of `backend`, chosen the same way play_tone()
+/// chooses it: an empty `backend` uses the first backend that works.
+/// Returns an error message if the backend can't be opened or queried.
+[[nodiscard]] std::expected<DeviceList, std::string> list_devices(std::string_view backend);
 
 /// Plays a tone on the default output device for `duration`, then fades it out.
 ///
