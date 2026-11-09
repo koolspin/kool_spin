@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in sync with cmake/KsToolchain.cmake and tools/lint.sh.
+  LLVM_VERSION: "21"
+
+jobs:
+  linux:
+    name: Linux / ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release, asan, tsan, rtsan, fuzz]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+      - name: Configure, build, and test
+        run: cmake --workflow --preset ${{ matrix.preset }}
+
+  macos:
+    # Apple Silicon: its weaker memory ordering exposes threading bugs that x86 hides.
+    name: macOS / ${{ matrix.preset }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release, asan, tsan]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+      - name: Configure, build, and test
+        run: cmake --workflow --preset ${{ matrix.preset }}
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+      - name: Configure (for compile_commands.json)
+        run: cmake --preset debug
+      - name: clang-format and clang-tidy
+        run: tools/lint.sh build/debug

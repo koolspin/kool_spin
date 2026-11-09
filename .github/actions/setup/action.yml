@@ -1,0 +1,49 @@
+name: Set up the build environment
+description: >
+  Installs the compiler toolchain and Ninja, and vcpkg at the commit pinned by
+  vcpkg.json's builtin-baseline, with a cache for vcpkg's built packages.
+
+inputs:
+  llvm-version:
+    description: LLVM major version to install on Linux. Must match cmake/KsToolchain.cmake.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM ${{ inputs.llvm-version }} and Ninja (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        # The same script developers use; it adds apt.llvm.org and installs clang.
+        sudo tools/llvm.sh "${{ inputs.llvm-version }}"
+        sudo apt-get install -y --no-install-recommends \
+          "clang-tidy-${{ inputs.llvm-version }}" \
+          "clang-format-${{ inputs.llvm-version }}" \
+          "libclang-rt-${{ inputs.llvm-version }}-dev" \
+          ninja-build
+
+    - name: Install Ninja (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: command -v ninja >/dev/null || brew install ninja
+
+    - name: Fetch vcpkg at the vcpkg.json baseline
+      shell: bash
+      run: |
+        baseline="$(jq -r '."builtin-baseline"' vcpkg.json)"
+        root="$RUNNER_TEMP/vcpkg"
+        git init -q "$root"
+        git -C "$root" fetch -q --depth 1 https://github.com/microsoft/vcpkg "$baseline"
+        git -C "$root" checkout -q FETCH_HEAD
+        "$root/bootstrap-vcpkg.sh" -disableMetrics
+        mkdir -p "$RUNNER_TEMP/vcpkg-cache"
+        echo "VCPKG_ROOT=$root" >> "$GITHUB_ENV"
+        echo "VCPKG_BINARY_SOURCES=clear;files,$RUNNER_TEMP/vcpkg-cache,readwrite" >> "$GITHUB_ENV"
+
+    - name: Cache vcpkg packages
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/vcpkg-cache
+        key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: vcpkg-${{ runner.os }}-${{ runner.arch }}-
