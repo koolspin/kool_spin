@@ -124,7 +124,12 @@ No single mechanism is airtight, so several independent layers each limit what a
 | CI check | A pull request that changes a protected path fails until the maintainer adds the `protected-paths-approved` label | `.github/workflows/protected-paths.yml` |
 | Guardrail tests | Prove the hook and the CI check work | `tests/guardrails/protected_paths_test.sh` |
 
-**Known gap:** a command on the allowlist could still write a protected file through shell redirection (`>`). The hook doesn't see Bash commands, so the CI check is the backstop.
+**What the first trial showed (ks-tone options, Phase 0):**
+- **Bypass attempts:** passes tried to edit files with `python3` scripts and `sed -i`, which would have bypassed the protected-path hook. The allowlist refused both, and the passes fell back to the Edit tool.
+- **Redirection:** in the loop's permission mode, writing to a file with `>` is refused even inside the worktree, so shell redirection isn't a way around the hook either.
+- **What remains:** the hook can't see writes that an allowed program makes as a side effect, such as a CMake script run with `cmake -P`. The CI check is the backstop for those.
+
+The build prompt lists exactly which shell constructs work.
 
 ## Protected paths
 

@@ -57,11 +57,14 @@ std::expected<double, std::string> parse_number(std::string_view option, std::st
         return error();
     }
     // Floating-point std::from_chars is missing from macOS's libc++, so the
-    // syntax is checked above and the conversion is left to std::strtod. Every
-    // string that passes the check is one strtod consumes completely.
+    // syntax is checked above and the conversion is left to std::strtod. The
+    // check means strtod should consume the whole string, but strtod follows
+    // the locale's decimal point, so confirm it did rather than assume it.
     const std::string terminated{text};
-    const double value = std::strtod(terminated.c_str(), nullptr);
-    if (!std::isfinite(value) || value < min || value > max) {
+    char* end = nullptr; // NOLINT(misc-const-correctness): std::strtod's out-parameter is char**
+    const double value = std::strtod(terminated.c_str(), &end);
+    if (end != std::to_address(terminated.end()) || !std::isfinite(value) || value < min ||
+        value > max) {
         return error();
     }
     return value;

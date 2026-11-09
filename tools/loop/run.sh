@@ -87,6 +87,13 @@ fi
 # The loop's settings, plus write access for vcpkg's build trees in the sandbox.
 settings="$(jq -c --arg vcpkg "$VCPKG_ROOT" '.sandbox.filesystem.allowWrite += [$vcpkg]' tools/loop/settings.json)"
 mkdir -p "$log_dir"
+# A private runtime directory for the passes. In the sandbox the usual
+# XDG_RUNTIME_DIR (/run/user/<uid>) is read-only, and Catch2's test discovery
+# writes a temporary file there. The real one also holds the user's audio and
+# D-Bus sockets, which sandboxed code shouldn't get write access to.
+runtime_dir="$root/$log_dir/runtime"
+mkdir -p "$runtime_dir"
+chmod 700 "$runtime_dir"
 total_cost=0
 pass_status=""
 
@@ -118,7 +125,7 @@ run_pass() {
     say "$kind pass $pass: running (log: $log.jsonl)"
     started=$SECONDS
     # stdin from /dev/null: a pass never reads from, or waits on, the terminal.
-    claude "${args[@]}" </dev/null >"$log.jsonl" 2>"$log.stderr" || true
+    XDG_RUNTIME_DIR="$runtime_dir" claude "${args[@]}" </dev/null >"$log.jsonl" 2>"$log.stderr" || true
 
     result="$(jq -rR 'fromjson? | select(.type == "result") | .result // ""' "$log.jsonl")"
     pass_status="$(grep -oE 'KS_LOOP_STATUS: (progress|done|blocked)' <<<"$result" | tail -n 1 | cut -d' ' -f2)" || true

@@ -45,7 +45,11 @@ You are one pass of an unattended build loop for one kool_spin feature. Each pas
 - **Never weaken a check.** Don't disable or skip tests, loosen tolerances, add a NOLINT without a written reason, or suppress a sanitizer report. If a check seems wrong, write `BLOCKED.md` and stop.
 - **Don't add dependencies.** That needs an ADR change, which is protected.
 - **Stay inside this repository.** Don't push, open pull requests, or reach the network except through the build.
-- **Commands not on the loop's allowlist are refused.** Use the Read, Grep, and Glob tools to explore.
+- **Shell commands:** the loop's permission mode refuses anything not on its allowlist in `tools/loop/settings.json`.
+  - **Works:** the allowlisted commands (`cmake`, `ctest`, `tools/lint.sh`, programs under `build/`, `git status`/`diff`/`log`/`show`/`add`/`commit`/`restore`, `ls`, `head`, `tail`, `grep`, `wc`), joined with `&&`, `;`, or pipes, and `cmake -E env NAME=value <command>`.
+  - **Refused:** redirecting output to a file (`>`), `$VARIABLE` expansion, subshells `( … )`, and every other program, including `python3`, `sed`, `cat`, and `echo`.
+  - **Files:** read them with the Read, Grep, and Glob tools, and change them only with Edit and Write.
+  - **Environment:** the runner gives each pass a writable `XDG_RUNTIME_DIR`, which Catch2's test discovery needs inside the sandbox. No workaround is needed.
 - **Ambiguity:** if a requirement is ambiguous, choose the most conservative reading, record the choice in the plan, and carry on. If no reading is safe, write `BLOCKED.md`.
 
 ## Writing BLOCKED.md
