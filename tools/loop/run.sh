@@ -73,6 +73,11 @@ if [[ "$(uname -s)" == Linux ]]; then
     for tool in bwrap socat; do
         command -v "$tool" >/dev/null || die "the sandbox needs '$tool': sudo apt install bubblewrap socat"
     done
+    # Ubuntu 24.04 and later block the user namespaces bubblewrap needs, unless an
+    # AppArmor profile allows them. Check now, rather than fail inside the first pass.
+    if ! bwrap --ro-bind / / --dev /dev --unshare-all --die-with-parent /bin/true 2>/dev/null; then
+        die "bubblewrap can't create a sandbox here; on Ubuntu, add an AppArmor profile for it (see 'Prerequisites' in docs/process.md)"
+    fi
 fi
 if [[ -f "$spec_dir/BLOCKED.md" ]]; then
     say "blocked: resolve $spec_dir/BLOCKED.md, delete it, commit, and run again"
@@ -112,7 +117,8 @@ run_pass() {
 
     say "$kind pass $pass: running (log: $log.jsonl)"
     started=$SECONDS
-    claude "${args[@]}" >"$log.jsonl" 2>"$log.stderr" || true
+    # stdin from /dev/null: a pass never reads from, or waits on, the terminal.
+    claude "${args[@]}" </dev/null >"$log.jsonl" 2>"$log.stderr" || true
 
     result="$(jq -rR 'fromjson? | select(.type == "result") | .result // ""' "$log.jsonl")"
     pass_status="$(grep -oE 'KS_LOOP_STATUS: (progress|done|blocked)' <<<"$result" | tail -n 1 | cut -d' ' -f2)" || true

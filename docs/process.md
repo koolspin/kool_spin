@@ -37,6 +37,22 @@ tests/acceptance/<feature>/   acceptance tests (protected)
 
 - **Build environment:** the project builds locally, with `VCPKG_ROOT` set.
 - **Sandbox:** on Linux, `bubblewrap` and `socat` (`sudo apt install bubblewrap socat`). macOS has its sandbox built in. The loop refuses to run without the sandbox.
+- **Ubuntu 24.04 and later:** bubblewrap also needs an AppArmor profile. Without one, AppArmor blocks the user namespaces it uses (`setting up uid map: Permission denied`). This profile lets `/usr/bin/bwrap` create them, and leaves the system-wide restriction on for everything else:
+
+  ```sh
+  sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/bwrap>
+  }
+  EOF
+  sudo apparmor_parser -r /etc/apparmor.d/bwrap
+  ```
+
+  `tools/loop/run.sh` checks for this before the first pass.
 
 ### Start
 
