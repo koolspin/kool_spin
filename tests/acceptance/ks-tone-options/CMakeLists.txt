@@ -6,17 +6,24 @@ set(ks_tone $<TARGET_FILE:ks-tone>)
 
 # ---- Playing (requirements 1-4 and 13) -------------------------------------
 
+# Frame counts measure how long the device ran: the duration, then the 10 ms
+# fade-out, then the time it takes to stop the device. That last part depends
+# on the machine: about 30 ms on Linux, and 100-140 ms on GitHub's macOS
+# runners. So each range starts just below the duration (2 s is 96000 frames
+# at 48 kHz, 0.5 s is 24000) and allows about half a second over it. The
+# ranges still tell 2 s and 0.5 s apart, so an ignored --duration fails.
+
 ks_acceptance_test(ks-tone-options.defaults EXIT 0
     EXPECT
         [[^Playing on Null: NULL Playback Device$]]
         [[^  440 Hz at -20 dBFS for 2 s$]]
-        [[^Done: 9[4-9][0-9]{3} frames, peak -20\.0 dBFS, 440 Hz$]]
+        [[^Done: (9[4-9]|1[01][0-9])[0-9]{3} frames, peak -20\.0 dBFS, 440 Hz$]]
     COMMAND ${ks_tone} --backend null)
 
 ks_acceptance_test(ks-tone-options.options EXIT 0
     EXPECT
         [[^  1000 Hz at -12 dBFS for 0\.5 s$]]
-        [[^Done: 2[2-7][0-9]{3} frames, peak -12\.0 dBFS, (999|1000|1001) Hz$]]
+        [[^Done: (2[2-9]|3[0-9]|4[0-7])[0-9]{3} frames, peak -12\.0 dBFS, (999|1000|1001) Hz$]]
     COMMAND ${ks_tone} --backend null --frequency 1000 --level -12 --duration 0.5)
 
 ks_acceptance_test(ks-tone-options.lowest EXIT 0
