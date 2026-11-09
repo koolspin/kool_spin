@@ -1,6 +1,6 @@
 # ADR 0003: Engine threading, IPC, and memory
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-09
 
 ## Context
