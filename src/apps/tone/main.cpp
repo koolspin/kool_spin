@@ -81,7 +81,8 @@ int main(int argc, char* argv[]) {
         std::cerr << std::format("ks-tone: {}\n", report.error());
         return 1;
     }
-    std::cout << std::format("Done: {} frames, peak {:.1f} dBFS\n", report->frames_rendered,
-                             20.0 * std::log10(static_cast<double>(report->peak)));
+    std::cout << std::format("Done: {} frames, peak {:.1f} dBFS, {} Hz\n", report->frames_rendered,
+                             20.0 * std::log10(static_cast<double>(report->peak)),
+                             std::lround(report->measured_hz));
     return 0;
 }

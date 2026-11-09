@@ -2,6 +2,7 @@
 #pragma once
 
 #include <ks/core/realtime.h>
+#include <ks/dsp/frequency_meter.h>
 #include <ks/dsp/sine_oscillator.h>
 
 #include <atomic>
@@ -46,6 +47,10 @@ public:
     /// Largest absolute sample value rendered so far.
     [[nodiscard]] float peak() const noexcept;
 
+    /// Frequency of the tone rendered so far, measured from the rendered
+    /// samples, in Hz. 0 until at least two cycles have been rendered.
+    [[nodiscard]] double measured_frequency_hz() const noexcept;
+
 private:
     // Used only by the audio thread.
     dsp::SineOscillator oscillator_;
@@ -54,12 +59,15 @@ private:
     float gain_step_; // gain change per frame while fading
     float gain_ = 0.0F;
     bool fading_out_ = false;
+    dsp::FrequencyMeter meter_;
 
     // Shared with other threads.
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> finished_{false};
     std::atomic<std::uint64_t> frames_rendered_{0};
     std::atomic<float> peak_{0.0F};
+    std::atomic<double> measured_hz_{0.0};
+    static_assert(std::atomic<double>::is_always_lock_free);
 };
 
 } // namespace ks::tone

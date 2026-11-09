@@ -28,6 +28,7 @@ TEST_CASE("play_tone plays through the null backend", "[tone][audio]") {
 
     const auto amplitude = static_cast<float>(std::pow(10.0, -20.0 / 20.0));
     CHECK(report->peak == Catch::Approx(amplitude).epsilon(1e-3));
+    CHECK(report->measured_hz == Catch::Approx(440.0).epsilon(1e-3));
 }
 
 TEST_CASE("play_tone plays the given settings for a fractional duration", "[tone][audio]") {
@@ -42,6 +43,7 @@ TEST_CASE("play_tone plays the given settings for a fractional duration", "[tone
 
     const auto amplitude = static_cast<float>(std::pow(10.0, -12.0 / 20.0));
     CHECK(report->peak == Catch::Approx(amplitude).epsilon(1e-3));
+    CHECK(report->measured_hz == Catch::Approx(1000.0).epsilon(1e-3));
 }
 
 TEST_CASE("play_tone rejects an unknown backend", "[tone][audio]") {

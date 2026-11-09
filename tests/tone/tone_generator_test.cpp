@@ -75,6 +75,34 @@ TEST_CASE("ToneGenerator fades out after request_stop, then plays silence", "[to
     REQUIRE(peak_of(after) == 0.0F);
 }
 
+TEST_CASE("ToneGenerator measures the frequency it renders", "[tone]") {
+    struct Case {
+        double frequency_hz;
+        double level_dbfs;
+    };
+    for (const Case c : {Case{.frequency_hz = 440.0, .level_dbfs = -20.0},
+                         Case{.frequency_hz = 20.0, .level_dbfs = -60.0},
+                         Case{.frequency_hz = 440.5, .level_dbfs = -12.0},
+                         Case{.frequency_hz = 1000.0, .level_dbfs = -60.0},
+                         Case{.frequency_hz = 20000.0, .level_dbfs = -6.0}}) {
+        CAPTURE(c.frequency_hz, c.level_dbfs);
+        const ks::tone::ToneSettings settings{.frequency_hz = c.frequency_hz,
+                                              .level_dbfs = c.level_dbfs};
+        ks::tone::ToneGenerator generator{settings, kSampleRate, kChannels};
+        REQUIRE(generator.measured_frequency_hz() == 0.0);
+
+        // 0.5 s in 480-frame periods, then the fade-out, as play_tone() does.
+        for (int period = 0; period < 50; ++period) {
+            static_cast<void>(render(generator, 480));
+        }
+        generator.request_stop();
+        static_cast<void>(render(generator, 1024));
+        REQUIRE(generator.finished());
+
+        CHECK(generator.measured_frequency_hz() == Catch::Approx(c.frequency_hz).epsilon(0.001));
+    }
+}
+
 TEST_CASE("ToneGenerator counts the frames it renders", "[tone]") {
     ks::tone::ToneGenerator generator{ks::tone::ToneSettings{}, kSampleRate, kChannels};
     static_cast<void>(render(generator, 100));

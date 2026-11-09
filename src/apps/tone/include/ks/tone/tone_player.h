@@ -27,7 +27,8 @@ struct DeviceInfo {
 struct PlaybackReport {
     DeviceInfo device;
     std::uint64_t frames_rendered = 0;
-    float peak = 0.0F; ///< Largest absolute sample value played.
+    float peak = 0.0F;        ///< Largest absolute sample value played.
+    double measured_hz = 0.0; ///< Frequency measured from the samples played.
 };
 
 /// Backend names accepted by play_tone().

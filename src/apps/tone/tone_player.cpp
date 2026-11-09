@@ -141,6 +141,7 @@ play_tone(std::string_view backend, const ToneSettings& settings,
         .device = info,
         .frames_rendered = generator->frames_rendered(),
         .peak = generator->peak(),
+        .measured_hz = generator->measured_frequency_hz(),
     };
 }
 
