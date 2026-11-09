@@ -12,7 +12,9 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 ## Status
 
-Phase 0 in progress: steps 1 (build skeleton), 2 (RealtimeSanitizer guardrail), 3 (`ks-tone`), 4 (CI), and 5 (agent workflow) are done. Step 6, the trial loop, is next. Update this section as phases land.
+Phase 0 is complete (2026-11-09). It delivered the build, the checks and guardrails, CI on Linux and macOS, and the build-loop workflow, proven on its first feature (`ks-tone` options). Still open: listening to `ks-tone` through JACK and on macOS.
+
+Next is Phase 1, the headless engine and process model. It starts interactively with ADR 0003 (engine threading, IPC, and memory); see `docs/roadmap.md`. Update this section as phases land.
 
 ## Build and test
 

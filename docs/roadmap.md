@@ -17,6 +17,8 @@ Exit criteria are tagged `[auto]` (CI or a loop can verify it) or `[manual]` (ne
 
 Goal: a repo where AI-written code is checked automatically before a human reads it, and where build loops can run safely.
 
+**Status:** complete on 2026-11-09. One manual check is still open: listening to `ks-tone` through JACK and on macOS (see the exit criteria).
+
 **How it's built:** interactively. It creates the guardrails the loops depend on.
 
 Build and checks:
@@ -41,11 +43,11 @@ Agent workflow:
 
 Exit criteria:
 
-- [ ] `[auto]` CI is green on Linux and macOS.
-- [ ] `[auto]` A test that allocates inside a `KS_NONBLOCKING` function fails under the `rtsan` preset. This proves the guardrail fires; the test then becomes an expected failure.
-- [ ] `[auto]` A loop's attempt to edit a protected file is blocked by the hook, and a branch that changes a protected file fails CI.
-- [ ] `[manual]` `ks-tone` plays on Linux (PipeWire through the JACK API, and ALSA) and on macOS.
-- [ ] `[manual]` A trial loop on a small feature (such as `ks-tone` command-line options) runs end to end: it plans, builds, stops when its criteria pass, and writes a pull request description. A deliberately impossible task ends in `BLOCKED.md`.
+- [x] `[auto]` CI is green on Linux and macOS. *Every pull request since #3.*
+- [x] `[auto]` A test that allocates inside a `KS_NONBLOCKING` function fails under the `rtsan` preset. This proves the guardrail fires; the test then becomes an expected failure. *`tests/guardrails/rtsan_canary.cpp` also covers locking a mutex.*
+- [x] `[auto]` A loop's attempt to edit a protected file is blocked by the hook, and a branch that changes a protected file fails CI. *`tests/guardrails/protected_paths_test.sh`, a real `claude -p` run, and pull requests #4 and #5.*
+- [ ] `[manual]` `ks-tone` plays on Linux (PipeWire through the JACK API, and ALSA) and on macOS. *Confirmed by the maintainer on 2026-11-09 on Linux with the PulseAudio and ALSA backends, including the Inpulse 500 via `--device`. Still open: JACK through PipeWire (needs `pipewire-jack`) and macOS (needs a Mac build environment).*
+- [x] `[manual]` A trial loop on a small feature (such as `ks-tone` command-line options) runs end to end: it plans, builds, stops when its criteria pass, and writes a pull request description. A deliberately impossible task ends in `BLOCKED.md`. *`ks-tone` options: 1 plan pass and 8 build passes, $6.76, pull request #5. A spec requiring a new library ended in `BLOCKED.md` after one planning pass.*
 
 ## Phase 1: Headless engine and process model
 
