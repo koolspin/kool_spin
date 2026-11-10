@@ -24,6 +24,7 @@ using ks::ipc::Seqlock;
 using ks::ipc::SeqlockReader;
 using ks::ipc::SeqlockWriter;
 using ks::ipc::test::is_consistent;
+using ks::ipc::test::JoiningThread;
 using ks::ipc::test::make_value;
 using ks::ipc::test::StallWatch;
 using ks::ipc::test::Value;
@@ -84,7 +85,7 @@ TEST_CASE("Seqlock: readers never see a torn value across threads", "[seqlock]")
     };
 
     {
-        std::vector<std::jthread> readers;
+        std::vector<JoiningThread> readers;
         readers.reserve(kReaders);
         for (std::size_t r = 0; r < kReaders; ++r) {
             readers.emplace_back([&lock, &writing, &reads, &reader_errors, &reader_failed, r] {

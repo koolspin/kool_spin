@@ -19,6 +19,7 @@ using ks::ipc::RingProducer;
 using ks::ipc::SpscRing;
 using ks::ipc::test::is_item;
 using ks::ipc::test::Item;
+using ks::ipc::test::JoiningThread;
 using ks::ipc::test::make_item;
 using ks::ipc::test::StallWatch;
 
@@ -32,7 +33,7 @@ TEST_CASE("Ring: every item arrives once, in order, across threads", "[ring]") {
     std::string producer_error;
     std::string consumer_error;
     {
-        const std::jthread producer_thread{[&ring, &producer_error] {
+        const JoiningThread producer_thread{[&ring, &producer_error] {
             RingProducer producer{ring};
             StallWatch watch;
             for (std::uint64_t n = 0; n < kItems;) {
@@ -47,7 +48,7 @@ TEST_CASE("Ring: every item arrives once, in order, across threads", "[ring]") {
                 }
             }
         }};
-        const std::jthread consumer_thread{[&ring, &consumer_error] {
+        const JoiningThread consumer_thread{[&ring, &consumer_error] {
             RingConsumer consumer{ring};
             StallWatch watch;
             for (std::uint64_t n = 0; n < kItems;) {

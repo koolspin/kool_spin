@@ -2,12 +2,17 @@
 #pragma once
 
 // Shared by the shm-primitives acceptance tests: the values they pass through
-// rings and seqlocks, and a watchdog that turns a hang into a failure.
+// rings and seqlocks, a watchdog that turns a hang into a failure, and a
+// thread that joins when destroyed.
 
 #include <array>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
+#include <type_traits>
+#include <utility>
 
 namespace ks::ipc::test {
 
@@ -85,6 +90,29 @@ private:
     using Clock = std::chrono::steady_clock;
 
     Clock::time_point last_progress_ = Clock::now();
+};
+
+/// A thread that joins when destroyed: the part of std::jthread these tests
+/// use. AppleClang 17's libc++ doesn't provide std::jthread.
+class JoiningThread {
+public:
+    template <typename F>
+        requires(!std::same_as<std::remove_cvref_t<F>, JoiningThread>)
+    explicit JoiningThread(F&& function) : thread_{std::forward<F>(function)} {}
+
+    JoiningThread(const JoiningThread&) = delete;
+    JoiningThread& operator=(const JoiningThread&) = delete;
+    JoiningThread(JoiningThread&&) noexcept = default;
+    JoiningThread& operator=(JoiningThread&&) = delete;
+
+    ~JoiningThread() {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    std::thread thread_;
 };
 
 } // namespace ks::ipc::test
