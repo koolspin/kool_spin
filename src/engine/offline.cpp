@@ -39,7 +39,7 @@ std::size_t render_offline(RenderCore& core, const OfflineConfig& config,
                 .sample_rate = config.sample_rate,
                 .host_time = config.start_time + frames_to_duration(offset, config.sample_rate),
             };
-            if (core.try_render(block) == RenderResult::Rendered) {
+            if (core.try_render(block, config.driver) == RenderResult::Rendered) {
                 rendered += count;
             }
             offset += count;

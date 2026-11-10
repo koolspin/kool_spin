@@ -65,6 +65,25 @@ public:
 private:
     using Clock = std::chrono::steady_clock;
 
+    /// A DriverId never given out before.
+    DriverId next_driver() noexcept;
+
+    /// Opens the device as `driver`, not started, or returns null if the
+    /// source doesn't have it.
+    std::unique_ptr<AudioBackend> open_device(DriverId driver);
+
+    /// Makes `device` the controller's device, remembering its format, and
+    /// restarts the stall timer.
+    void adopt_device(std::unique_ptr<AudioBackend> device, DriverId driver,
+                      Clock::time_point started);
+
+    /// Opens, activates, and starts the freewheel driver, with its first
+    /// period at `start_time`.
+    void start_freewheel(Clock::time_point start_time);
+
+    /// Stops and destroys `backend`, if there is one.
+    static void close(std::unique_ptr<AudioBackend>& backend) noexcept;
+
     RenderCore* core_;
     DeviceSource* source_;
     OutputConfig config_;

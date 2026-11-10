@@ -34,8 +34,7 @@ void silence(const Block& block) noexcept KS_NONBLOCKING {
 
 RenderCore::RenderCore(Graph& graph) noexcept : graph_{&graph} {}
 
-RenderResult RenderCore::try_render(const Block& block,
-                                    DriverId /*driver*/) noexcept KS_NONBLOCKING {
+RenderResult RenderCore::try_render(const Block& block, DriverId driver) noexcept KS_NONBLOCKING {
     if (!is_valid(block)) {
         return RenderResult::Rejected;
     }
@@ -44,11 +43,29 @@ RenderResult RenderCore::try_render(const Block& block,
         silence(block);
         return RenderResult::Skipped;
     }
+    // Checked while holding the token, so blocks from two drivers never
+    // overlap, even while the control thread switches between them.
+    if (driver != active_.load(std::memory_order_acquire)) {
+        token_.store(false, std::memory_order_release);
+        silence(block);
+        return RenderResult::Skipped;
+    }
+
     silence(block);
-    graph_->process(block);
-    // Only the token's holder writes the count; other threads only read it.
+    Block rendered = block;
+    rendered.resumed = !rendered_any_ || driver != last_driver_;
+    graph_->process(rendered);
+    rendered_any_ = true;
+    last_driver_ = driver;
+
+    // Only the token's holder writes these; other threads only read them.
     frames_rendered_.store(frames_rendered_.load(std::memory_order_relaxed) + block.frames,
                            std::memory_order_relaxed);
+    const auto end = block.host_time + frames_to_duration(block.frames, block.sample_rate);
+    rendered_until_ns_.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count(),
+        std::memory_order_relaxed);
+
     // Release: the next holder sees everything this render did.
     token_.store(false, std::memory_order_release);
     return RenderResult::Rendered;
@@ -58,23 +75,18 @@ std::uint64_t RenderCore::frames_rendered() const noexcept KS_NONBLOCKING {
     return frames_rendered_.load(std::memory_order_relaxed);
 }
 
-// Stubs: the device-loss acceptance tests compile against this API before
-// it's implemented (specs/device-loss/spec.md). try_render() ignores the
-// driver and never sets Block::resumed, so those tests fail.
-
-void RenderCore::activate(DriverId /*driver*/) noexcept KS_NONBLOCKING {
-    static_cast<void>(last_driver_);
-    static_cast<void>(rendered_any_);
+void RenderCore::activate(DriverId driver) noexcept KS_NONBLOCKING {
+    active_.store(driver, std::memory_order_release);
 }
 
 DriverId RenderCore::active_driver() const noexcept KS_NONBLOCKING {
-    static_cast<void>(active_);
-    return kDefaultDriver;
+    return active_.load(std::memory_order_acquire);
 }
 
 std::chrono::steady_clock::time_point RenderCore::rendered_until() const noexcept KS_NONBLOCKING {
-    static_cast<void>(rendered_until_ns_);
-    return {};
+    const std::chrono::nanoseconds since_epoch{rendered_until_ns_.load(std::memory_order_relaxed)};
+    return std::chrono::steady_clock::time_point{
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(since_epoch)};
 }
 
 } // namespace ks::engine
