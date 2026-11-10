@@ -56,7 +56,7 @@ Make sure a bug never becomes a full-scale blast or a click through a PA (ADR 00
    - **A sample rate change:** if the rate changes so that p would exceed n, p becomes n.
 7. **The limiter.**
    - **Attack:** the frame's peak is the largest absolute value across channels, after the fade gain. If the peak exceeds the ceiling, the target gain is ceiling / peak, and otherwise 1. If the target is below the current limiter gain, the gain drops to it at once.
-   - **Release:** otherwise the gain moves toward the target by (target − gain) × (1 − e^(−1 / (release × sample rate))). Once it's within 10⁻⁴ of 1, it becomes 1.
+   - **Release:** otherwise the gain moves toward the target by (target − gain) × (1 − e^(−1 / (release × sample rate))). Once the target is 1 and the gain is within 10⁻⁴ of it, the gain becomes 1. (Snapping while the target is just below 1 would flip the gain between the two on every frame.)
    - **Counting:** frames in which the limiter gain is below 1 are counted.
 8. **Denormals.**
    - While a block is rendered (the graph and the stage), the core sets the floating-point mode to flush denormals to zero: FTZ and DAZ on x86-64, and FZ on arm64.
