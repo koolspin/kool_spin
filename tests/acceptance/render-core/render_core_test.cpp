@@ -4,6 +4,7 @@
 #include <ks/engine/render_core.h>
 
 #include <ks/engine/block.h>
+#include <ks/engine/safety.h>
 
 #include "test_support.h"
 #include <catch2/catch_test_macros.hpp>
@@ -39,6 +40,11 @@ Block block_of(const Planar& buffers, std::size_t frames, std::uint32_t sample_r
         .host_time = {},
     };
 }
+
+/// Passes in-range samples through unchanged, so the samples can be checked
+/// exactly. The safety stage still runs (specs/safety-stage/spec.md, req. 18).
+const ks::engine::SafetyConfig kTransparent{.fade = std::chrono::milliseconds{0},
+                                            .ceiling_dbfs = 0.0};
 
 } // namespace
 
@@ -129,7 +135,7 @@ TEST_CASE("Render core: only one driver renders at a time", "[render-core]") {
     constexpr float kRendered = 1.0F;
 
     ConstantGraph graph{kRendered};
-    RenderCore core{graph};
+    RenderCore core{graph, kTransparent};
 
     struct Report {
         std::uint64_t rendered_frames = 0;

@@ -3,6 +3,7 @@
 
 #include <ks/engine/block.h>
 #include <ks/engine/render_core.h>
+#include <ks/engine/safety.h>
 
 #include "test_support.h"
 #include <catch2/catch_test_macros.hpp>
@@ -45,13 +46,18 @@ Block block_of(const Planar& buffers, std::size_t frames, TimePoint host_time = 
     };
 }
 
+/// Passes in-range samples through unchanged, so the samples can be checked
+/// exactly. The safety stage still runs (specs/safety-stage/spec.md, req. 18).
+const ks::engine::SafetyConfig kTransparent{.fade = std::chrono::milliseconds{0},
+                                            .ceiling_dbfs = 0.0};
+
 } // namespace
 
 TEST_CASE("Active driver: only the active driver renders", "[active-driver]") {
     constexpr DriverId kA{7};
     constexpr DriverId kB{8};
     CountingGraph graph;
-    RenderCore core{graph};
+    RenderCore core{graph, kTransparent};
     REQUIRE(core.active_driver() == kDefaultDriver);
 
     Planar buffers{2, 64, 5.0F};
@@ -135,7 +141,7 @@ TEST_CASE("Active driver: handovers under load", "[active-driver]") {
     constexpr std::array<DriverId, 2> kDrivers{DriverId{1}, DriverId{2}};
 
     CountingGraph graph;
-    RenderCore core{graph};
+    RenderCore core{graph, kTransparent};
     core.activate(kDrivers[0]);
 
     std::atomic<bool> done{false};
