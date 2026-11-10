@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <type_traits>
 
 namespace ks::ipc {
@@ -101,16 +102,53 @@ private:
     bool corrupt_ = false;
 };
 
-// ---- Stubs ------------------------------------------------------------------
-// The acceptance tests compile against this API before it's implemented
-// (specs/shm-primitives/spec.md). These stubs make every test fail.
+// ---- Implementation -----------------------------------------------------------
+//
+// The counters count items, so `head - tail` is the number of items in the
+// ring, in unsigned 64-bit arithmetic. Anything above Capacity is corruption.
+//
+// Ordering: the producer writes a slot, then publishes the head with release;
+// the consumer loads the head with acquire, so it sees the slot's contents.
+// The consumer copies a slot out, then publishes the tail with release; the
+// producer loads the tail with acquire before reusing the slot.
+
+namespace detail {
+
+/// The slot that holds item `n`.
+template <typename T, std::size_t Capacity>
+T& slot(SpscRing<T, Capacity>& ring, std::uint64_t n) noexcept KS_NONBLOCKING {
+    return std::span{ring.slots}[n % Capacity];
+}
+
+} // namespace detail
 
 template <typename T, std::size_t Capacity>
-RingProducer<T, Capacity>::RingProducer(SpscRing<T, Capacity>& ring) noexcept : ring_{&ring} {}
+RingProducer<T, Capacity>::RingProducer(SpscRing<T, Capacity>& ring) noexcept
+    : ring_{&ring}, head_{load_shared(ring.head, std::memory_order_relaxed)},
+      tail_{load_shared(ring.tail, std::memory_order_acquire)}, corrupt_{head_ - tail_ > Capacity} {
+}
 
 template <typename T, std::size_t Capacity>
-bool RingProducer<T, Capacity>::try_push(const T& /*value*/) noexcept KS_NONBLOCKING {
-    return ring_ == nullptr && head_ == tail_;
+bool RingProducer<T, Capacity>::try_push(const T& value) noexcept KS_NONBLOCKING {
+    if (corrupt_) {
+        return false;
+    }
+    if (head_ - tail_ == Capacity) {
+        // Full as of the last tail we read: see whether the consumer has
+        // moved on since.
+        tail_ = load_shared(ring_->tail, std::memory_order_acquire);
+        if (head_ - tail_ > Capacity) {
+            corrupt_ = true;
+            return false;
+        }
+        if (head_ - tail_ == Capacity) {
+            return false;
+        }
+    }
+    detail::slot(*ring_, head_) = value;
+    ++head_;
+    store_shared(ring_->head, head_, std::memory_order_release);
+    return true;
 }
 
 template <typename T, std::size_t Capacity>
@@ -119,14 +157,28 @@ bool RingProducer<T, Capacity>::corrupt() const noexcept KS_NONBLOCKING {
 }
 
 template <typename T, std::size_t Capacity>
-RingConsumer<T, Capacity>::RingConsumer(SpscRing<T, Capacity>& ring) noexcept : ring_{&ring} {}
+RingConsumer<T, Capacity>::RingConsumer(SpscRing<T, Capacity>& ring) noexcept
+    : ring_{&ring}, tail_{load_shared(ring.tail, std::memory_order_relaxed)},
+      corrupt_{load_shared(ring.head, std::memory_order_acquire) - tail_ > Capacity} {}
 
 template <typename T, std::size_t Capacity>
 std::optional<T> RingConsumer<T, Capacity>::try_pop() noexcept KS_NONBLOCKING {
-    if (ring_ == nullptr) {
-        ++tail_;
+    if (corrupt_) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    const std::uint64_t head = load_shared(ring_->head, std::memory_order_acquire);
+    const std::uint64_t available = head - tail_;
+    if (available > Capacity) {
+        corrupt_ = true;
+        return std::nullopt;
+    }
+    if (available == 0) {
+        return std::nullopt;
+    }
+    const T value = detail::slot(*ring_, tail_);
+    ++tail_;
+    store_shared(ring_->tail, tail_, std::memory_order_release);
+    return value;
 }
 
 template <typename T, std::size_t Capacity>

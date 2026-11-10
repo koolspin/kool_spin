@@ -1,6 +1,6 @@
 # Feature: Shared-memory primitives
 
-- **Status:** Draft. Once the maintainer approves it, this file is protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-09. Protected: build loops can't change it.
 - **Roadmap:** Phase 1a
 - **Built by:** interactive
 
@@ -153,8 +153,4 @@ Everywhere:
 
 ## Open questions
 
-1. **`std::atomic` or `std::atomic_ref`?** ADR 0003 contradicts itself here:
-   - §5 describes the seqlock payload as `std::atomic<std::uint64_t>`;
-   - §7 requires shared structs to be trivially copyable, which `std::atomic` isn't.
-
-   This spec uses plain `std::uint64_t`, accessed only through `std::atomic_ref` (requirement 3). That satisfies both sections in substance, and keeps zero-filled memory a valid value without constructing anything in shared memory. If approved, §5's wording changes to match. AppleClang 17's libc++ must provide `std::atomic_ref`; CI on macOS will confirm it does.
+None. The maintainer chose plain `std::uint64_t` accessed through `std::atomic_ref` (requirement 3) over `std::atomic`, and ADR 0003 §5 and §7 now say so.

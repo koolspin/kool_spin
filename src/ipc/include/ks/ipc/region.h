@@ -89,19 +89,31 @@ public:
 private:
     Region(std::byte* data, std::size_t size) noexcept;
 
-    std::byte* data_ = nullptr;
+    void unmap() noexcept;
+
+    std::byte* data_ = nullptr; ///< Page-aligned.
     std::size_t size_ = 0;
 };
 
-// ---- Stubs ------------------------------------------------------------------
-// The acceptance tests compile against this API before it's implemented
-// (specs/shm-primitives/spec.md). These stubs make every test fail.
-
 template <typename T>
-T* Region::at(std::size_t /*offset*/) const noexcept {
+T* Region::at(std::size_t offset) const noexcept {
     static_assert(std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
                   "only shared layouts live in a region");
-    return nullptr;
+    static_assert(alignof(T) <= 4096, "regions are page-aligned, and pages are at least 4 KiB");
+
+    // Written so that nothing overflows.
+    if (offset > size_ || sizeof(T) > size_ - offset) {
+        return nullptr;
+    }
+    // The region starts on a page boundary, so the offset decides alignment.
+    if (offset % alignof(T) != 0) {
+        return nullptr;
+    }
+    // A shared layout is trivially copyable, so the bytes can be used as a T
+    // directly. C++23's std::start_lifetime_as says so to the compiler, but
+    // neither standard library we build with provides it yet.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): see above
+    return reinterpret_cast<T*>(bytes().subspan(offset).data());
 }
 
 } // namespace ks::ipc

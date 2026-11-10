@@ -15,9 +15,13 @@
 #include <ks/ipc/layout.h>
 
 #include <array>
+#include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
+#include <span>
 #include <type_traits>
 
 namespace ks::ipc {
@@ -82,18 +86,37 @@ private:
     Seqlock<T>* lock_;
 };
 
-// ---- Stubs ------------------------------------------------------------------
-// The acceptance tests compile against this API before it's implemented
-// (specs/shm-primitives/spec.md). These stubs make every test fail.
+// ---- Implementation -----------------------------------------------------------
+//
+// Why the fences are where they are (Boehm, "Can seqlocks get along with
+// programming language memory models?", 2012):
+// - If a reader's relaxed load sees a payload word from a write, the writer's
+//   release fence and the reader's acquire fence synchronize. The writer's odd
+//   store, which comes before its fence, then happens before the reader's
+//   recheck, so the recheck can't still see the even number from before.
+// - If the reader's first load sees the even number a write ended with, the
+//   writer's final release store synchronizes with that acquire load, so the
+//   payload loads see that write's words or later ones.
 
 template <typename T>
-SeqlockWriter<T>::SeqlockWriter(Seqlock<T>& lock) noexcept : lock_{&lock} {}
+SeqlockWriter<T>::SeqlockWriter(Seqlock<T>& lock) noexcept
+    : lock_{&lock},
+      sequence_{(load_shared(lock.sequence, std::memory_order_relaxed) + 1) & ~std::uint64_t{1}} {}
 
 template <typename T>
-void SeqlockWriter<T>::write(const T& /*value*/) noexcept KS_NONBLOCKING {
-    if (lock_ == nullptr) {
-        ++sequence_;
+void SeqlockWriter<T>::write(const T& value) noexcept KS_NONBLOCKING {
+    std::array<std::uint64_t, Seqlock<T>::kWords> words{};
+    std::memcpy(words.data(), &value, sizeof(T));
+    const std::span<const std::uint64_t, Seqlock<T>::kWords> local{words};
+    const std::span<std::uint64_t, Seqlock<T>::kWords> shared{lock_->words};
+
+    store_shared(lock_->sequence, sequence_ + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    for (std::size_t i = 0; i < Seqlock<T>::kWords; ++i) {
+        store_shared(shared[i], local[i], std::memory_order_relaxed);
     }
+    sequence_ += 2;
+    store_shared(lock_->sequence, sequence_, std::memory_order_release);
 }
 
 template <typename T>
@@ -101,9 +124,25 @@ SeqlockReader<T>::SeqlockReader(Seqlock<T>& lock) noexcept : lock_{&lock} {}
 
 template <typename T>
 std::optional<T>
-SeqlockReader<T>::try_read(std::size_t /*max_attempts*/) const noexcept KS_NONBLOCKING {
-    if (lock_ == nullptr) {
-        return T{};
+SeqlockReader<T>::try_read(std::size_t max_attempts) const noexcept KS_NONBLOCKING {
+    std::array<std::uint64_t, Seqlock<T>::kWords> words{};
+    const std::span<std::uint64_t, Seqlock<T>::kWords> local{words};
+    const std::span<std::uint64_t, Seqlock<T>::kWords> shared{lock_->words};
+
+    for (std::size_t attempt = 0; attempt < max_attempts; ++attempt) {
+        const std::uint64_t before = load_shared(lock_->sequence, std::memory_order_acquire);
+        if (before % 2 != 0) {
+            continue; // a write is in progress
+        }
+        for (std::size_t i = 0; i < Seqlock<T>::kWords; ++i) {
+            local[i] = load_shared(shared[i], std::memory_order_relaxed);
+        }
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (load_shared(lock_->sequence, std::memory_order_relaxed) == before) {
+            std::array<std::byte, sizeof(T)> bytes{};
+            std::memcpy(bytes.data(), words.data(), sizeof(T));
+            return std::bit_cast<T>(bytes);
+        }
     }
     return std::nullopt;
 }

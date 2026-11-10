@@ -10,6 +10,8 @@
 /// trivially copyable, so zero-filled memory is a valid value and nothing has
 /// to be constructed in shared memory.
 
+#include <ks/core/realtime.h>
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -23,5 +25,17 @@ inline constexpr std::size_t kSharedAlignment = 128;
 
 static_assert(std::atomic_ref<std::uint64_t>::is_always_lock_free,
               "shared memory needs lock-free 64-bit atomics");
+
+/// Loads a word that another process may be writing.
+[[nodiscard]] inline std::uint64_t load_shared(std::uint64_t& word,
+                                               std::memory_order order) noexcept KS_NONBLOCKING {
+    return std::atomic_ref{word}.load(order);
+}
+
+/// Stores a word that another process may be reading.
+inline void store_shared(std::uint64_t& word, std::uint64_t value,
+                         std::memory_order order) noexcept KS_NONBLOCKING {
+    std::atomic_ref{word}.store(value, order);
+}
 
 } // namespace ks::ipc

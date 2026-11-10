@@ -83,7 +83,7 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   - one for engine status: device state, underrun and NaN counts, callback load, heartbeat, and the last sequence number applied for each client;
   - the resume state (section 11).
 - **Writers and readers.** The audio thread is the only writer. No real-time thread ever reads a seqlock.
-- **Memory model.** A seqlock over plain memory is a data race, which is undefined behavior in C++ and which TSan reports. Payloads are therefore arrays of `std::atomic<std::uint64_t>` accessed with relaxed ordering, and fences order them:
+- **Memory model.** A seqlock over plain memory is a data race, which is undefined behavior in C++ and which TSan reports. Payloads are therefore arrays of `std::uint64_t`, read and written only through `std::atomic_ref` with relaxed ordering (section 7), and fences order them:
   - **writer:** store `seq + 1` (relaxed); release fence; store the payload; store `seq + 2` (release);
   - **reader:** load `seq` (acquire), retrying while it's odd; load the payload into a local copy; acquire fence; load `seq` again (relaxed), and retry if it changed.
 - **What checks it.** TSan doesn't understand standalone fences, so it can't catch an ordering mistake here. The stress tests on macOS arm64 are the check: arm64's weaker memory ordering exposes bugs that x86 hides.
@@ -126,8 +126,8 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 - **Layout:**
   - Each segment starts with a header: magic number, layout version, kind, and sizes.
   - Shared structs are standard-layout and trivially copyable, and use fixed-width types. They hold offsets, never pointers. `static_assert` checks their sizes and offsets.
-  - Every shared atomic is `is_always_lock_free`.
-  - Fields written by different processes are on separate cache lines.
+  - Words that two processes access at the same time are plain `std::uint64_t`, read and written only through `std::atomic_ref<std::uint64_t>`, which must be always lock-free. Plain integers keep the structs trivially copyable, so zero-filled memory is a valid value and nothing has to be constructed in shared memory.
+  - Fields written by different processes are at least 128 bytes apart, so they never share a cache line: Apple Silicon's cache lines are 128 bytes.
   - A process refuses a segment whose magic number, version, or kind doesn't match.
 
 ### 8. Reading shared memory
@@ -251,6 +251,7 @@ The [roadmap](../roadmap.md) lists each part's contents and exit criteria.
 - **An engine-owned render thread feeding the device through a FIFO:** device switches would be seamless, but it adds a buffer of latency, and a second clock that drifts from the device's.
 - **Rendering decks in parallel:** unnecessary at Phase 1's load. Revisit with key lock.
 - **A seqlock over plain memory:** a data race under the C++ memory model, and TSan reports it.
+- **`std::atomic` in shared structs:** not trivially copyable, so zero-filled memory isn't a valid value, and every atomic would have to be constructed in shared memory before any process used it.
 - **Triple buffering for state:** supports only one reader, and state blocks have several.
 - **Variable-length ring messages:** more framing to validate and fuzz. Bulk data doesn't belong in rings anyway.
 - **Sockets between every pair of processes, or a client socket in the engine:** more parsing of untrusted input in the engine, and what's running would be known to two processes instead of one.
