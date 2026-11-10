@@ -34,6 +34,11 @@ struct Block {
     /// The monotonic time of the block's first frame: when the device asked
     /// for it, or a synthetic time when rendering offline.
     std::chrono::steady_clock::time_point host_time;
+    /// Set by the render core, on the block it passes to the graph: true for
+    /// the first block it renders, and for the first block from a driver
+    /// other than the one that rendered last. The output fades in there.
+    /// Drivers leave it false; the core ignores what they set.
+    bool resumed = false;
 };
 
 /// The duration of `frames` frames at `sample_rate`: floor(frames × 10⁹ /

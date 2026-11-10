@@ -9,6 +9,7 @@
 #include <miniaudio.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -61,6 +62,7 @@ public:
         if (config.channels > kMaxOutputChannels) {
             return failure(BackendError::Kind::TooManyChannels, too_many_channels(config.channels));
         }
+        driver_ = config.driver;
 
         std::array<ma_backend, 1> null_backend{ma_backend_null};
         const bool use_null = config.backends == MiniaudioBackends::Null;
@@ -125,16 +127,24 @@ public:
 
     [[nodiscard]] const StreamInfo& info() const noexcept override { return info_; }
 
+    // miniaudio's notifications aren't handled until step 2c.
+    [[nodiscard]] bool lost() const noexcept override { return false; }
+
+    [[nodiscard]] std::uint64_t callbacks() const noexcept override {
+        return callbacks_.load(std::memory_order_relaxed);
+    }
+
 private:
     // The audio thread's entry point.
     static void callback(ma_device* device, void* output, const void* /*input*/,
                          ma_uint32 frames) noexcept KS_NONBLOCKING {
         const auto host_time = core::monotonic_now();
         auto* const self = static_cast<MiniaudioBackend*>(device->pUserData);
+        self->callbacks_.fetch_add(1, std::memory_order_relaxed);
         const std::span<float> out{static_cast<float*>(output),
                                    std::size_t{frames} * self->channels_};
         static_cast<void>(render_interleaved(*self->core_, self->scratch_, out, self->channels_,
-                                             self->sample_rate_, host_time));
+                                             self->sample_rate_, host_time, self->driver_));
     }
 
     RenderCore* core_;
@@ -142,6 +152,8 @@ private:
     std::array<std::span<float>, kMaxOutputChannels> scratch_{};
     std::size_t channels_ = 0;
     std::uint32_t sample_rate_ = 0;
+    DriverId driver_ = kDefaultDriver;
+    std::atomic<std::uint64_t> callbacks_{0};
     ma_context context_{};
     ma_device device_{};
     bool context_open_ = false;

@@ -25,7 +25,7 @@ Constraints:
 
 ### 1. One render function, several drivers
 
-The engine's real-time work is one function, `render(Block&) noexcept KS_NONBLOCKING`. A block carries the frame count, the output buffers, the block's host time, and status flags. Four drivers call it:
+The engine's real-time work is one function, `render(Block&) noexcept KS_NONBLOCKING`. A block carries the frame count, the sample rate, the output buffers, the block's host time, and status flags. Four drivers call it:
 
 | Driver | Used for | Thread |
 |---|---|---|
@@ -36,7 +36,13 @@ The engine's real-time work is one function, `render(Block&) noexcept KS_NONBLOC
 
 The freewheel driver is the paced offline driver without the recording, so device loss runs code the tests already exercise.
 
-Only one driver renders at a time. Each driver takes an atomic render token at the start of every block and releases it at the end. A driver that can't take the token skips the block; a device driver outputs silence instead. A late callback from a failing device therefore can't race the freewheel thread.
+Only the active driver renders, and only one driver renders at a time:
+
+- **The active driver.** The control thread chooses which driver is active. A block from any other driver is skipped.
+- **The render token.** Each driver also takes an atomic render token at the start of every block and releases it at the end, so two drivers never render at once, even while the control thread is switching between them. A driver that can't take the token skips the block.
+- **Skipped blocks are silent.**
+- **What this guarantees.** A late callback from a failing device can't race the freewheel thread, and handing over between drivers never renders the same stretch of time twice.
+- **Fading in.** The first block after a handover, or after the engine starts, is flagged, so the output safety stage fades in.
 
 ### 2. Engine threads
 
@@ -217,10 +223,10 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 - **Headphone cue:** in Phase 1, the main and cue buses go to channels of one multi-channel device. That covers controllers with built-in audio, including the Inpulse 500 (outputs 1–2 and 3–4). Cue on a second device needs clock-drift compensation, and comes later.
 - **Fallback device** (ADR 0002 §4): after Phase 1.
 - **Device loss:**
-  1. The control thread starts the freewheel driver when miniaudio reports that the device stopped, or when callbacks stop without a report.
+  1. The control thread starts the freewheel driver when miniaudio reports that the device stopped, or when callbacks stop for 100 ms without a report. The freewheel driver starts where the device's last block ended and catches up, so the clock doesn't lose the time it took to notice.
   2. It polls the device list for the device's return, because miniaudio doesn't report arrivals.
   3. When the device is back, it reopens it.
-  4. The freewheel driver stops once device callbacks hold the render token, and the output fades back in.
+  4. Once the device is calling back, the control thread makes it the active driver and stops the freewheel driver, and the output fades back in.
 - **Real-time priority:** no rtkit, which would bring D-Bus into the engine.
   - Device threads get whatever priority their backend gives them. PipeWire's JACK layer manages its own.
   - The freewheel thread asks for `SCHED_FIFO` on Linux, which needs `RLIMIT_RTPRIO`, and for a time-constraint policy on macOS.
@@ -250,6 +256,7 @@ The [roadmap](../roadmap.md) lists each part's contents and exit criteria.
 
 - **An engine-owned render thread feeding the device through a FIFO:** device switches would be seamless, but it adds a buffer of latency, and a second clock that drifts from the device's.
 - **Rendering decks in parallel:** unnecessary at Phase 1's load. Revisit with key lock.
+- **The render token alone, without an active driver:** while the freewheel thread and a returning device both call back, they render in turn, so the clock runs ahead by up to a block, and a late callback from a dying device can still render.
 - **A seqlock over plain memory:** a data race under the C++ memory model, and TSan reports it.
 - **`std::atomic` in shared structs:** not trivially copyable, so zero-filled memory isn't a valid value, and every atomic would have to be constructed in shared memory before any process used it.
 - **Triple buffering for state:** supports only one reader, and state blocks have several.

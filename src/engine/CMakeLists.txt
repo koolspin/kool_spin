@@ -6,6 +6,8 @@ add_library(ks_engine STATIC
     interleave.cpp
     miniaudio_backend.cpp
     offline.cpp
+    output_controller.cpp
+    paced_backend.cpp
     render_core.cpp)
 add_library(ks::engine ALIAS ks_engine)
 
@@ -18,6 +20,8 @@ target_sources(ks_engine PUBLIC
         include/ks/engine/interleave.h
         include/ks/engine/miniaudio_backend.h
         include/ks/engine/offline.h
+        include/ks/engine/output_controller.h
+        include/ks/engine/paced_backend.h
         include/ks/engine/render_core.h)
 
 target_link_libraries(ks_engine

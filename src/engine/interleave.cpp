@@ -41,10 +41,11 @@ bool consistent(std::span<const std::span<float>> scratch, std::span<const float
 
 } // namespace
 
-std::size_t
-render_interleaved(RenderCore& core, std::span<const std::span<float>> scratch,
-                   std::span<float> interleaved, std::size_t channels, std::uint32_t sample_rate,
-                   std::chrono::steady_clock::time_point host_time) noexcept KS_NONBLOCKING {
+std::size_t render_interleaved(RenderCore& core, std::span<const std::span<float>> scratch,
+                               std::span<float> interleaved, std::size_t channels,
+                               std::uint32_t sample_rate,
+                               std::chrono::steady_clock::time_point host_time,
+                               DriverId driver) noexcept KS_NONBLOCKING {
     if (!consistent(scratch, interleaved, channels, sample_rate)) {
         std::ranges::fill(interleaved, 0.0F);
         return 0;
@@ -69,7 +70,7 @@ render_interleaved(RenderCore& core, std::span<const std::span<float>> scratch,
         };
         const std::span<float> destination =
             interleaved.subspan(offset * channels, count * channels);
-        switch (core.try_render(block)) {
+        switch (core.try_render(block, driver)) {
         case RenderResult::Rendered:
             rendered += count;
             [[fallthrough]];
