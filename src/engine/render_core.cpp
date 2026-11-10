@@ -32,7 +32,8 @@ void silence(const Block& block) noexcept KS_NONBLOCKING {
 
 } // namespace
 
-RenderCore::RenderCore(Graph& graph) noexcept : graph_{&graph} {}
+RenderCore::RenderCore(Graph& graph, const SafetyConfig& safety) noexcept
+    : graph_{&graph}, safety_{safety} {}
 
 RenderResult RenderCore::try_render(const Block& block, DriverId driver) noexcept KS_NONBLOCKING {
     if (!is_valid(block)) {
@@ -87,6 +88,26 @@ std::chrono::steady_clock::time_point RenderCore::rendered_until() const noexcep
     const std::chrono::nanoseconds since_epoch{rendered_until_ns_.load(std::memory_order_relaxed)};
     return std::chrono::steady_clock::time_point{
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(since_epoch)};
+}
+
+// Stubs: the safety-stage acceptance tests compile against this API before
+// it's implemented (specs/safety-stage/spec.md). The stage changes nothing
+// yet, so those tests fail.
+
+void RenderCore::set_muted(bool muted) noexcept KS_NONBLOCKING {
+    muted_.store(muted, std::memory_order_relaxed);
+}
+
+bool RenderCore::silenced() const noexcept KS_NONBLOCKING {
+    return silenced_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t RenderCore::non_finite_samples() const noexcept KS_NONBLOCKING {
+    return non_finite_samples_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t RenderCore::limited_frames() const noexcept KS_NONBLOCKING {
+    return limited_frames_.load(std::memory_order_relaxed);
 }
 
 } // namespace ks::engine
