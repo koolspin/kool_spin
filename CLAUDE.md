@@ -28,6 +28,8 @@ Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/l
 
 CI (`.github/workflows/ci.yml`) runs every preset on Linux, `debug`/`release`/`asan`/`tsan` on macOS arm64, and lint, on every pull request and on pushes to `main`. The LLVM version is pinned in three places that must agree: `cmake/KsToolchain.cmake`, `tools/lint.sh`, and `ci.yml`. vcpkg is pinned by `builtin-baseline` in `vcpkg.json`; CI checks out exactly that commit.
 
+macOS `tsan` doesn't report data races in struct copies, by assignment or `memcpy`, only in scalar accesses, so Linux `tsan` is the check for data races.
+
 ## Code conventions
 
 - Types, enumerators, and template parameters are `CamelCase`. Functions, variables, and namespaces are `snake_case`. Private and protected members end in `_`. Constants are `kCamelCase`. Macros are `KS_UPPER_CASE`. clang-tidy enforces all of these.
