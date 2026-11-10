@@ -22,6 +22,10 @@ ks_add_test(ks_dsp_tests
             dsp/frequency_meter_test.cpp
     LIBRARIES ks::dsp)
 
+ks_add_test(ks_engine_tests
+    SOURCES engine/render_core_test.cpp
+    LIBRARIES ks::engine)
+
 ks_add_test(ks_ipc_tests
     SOURCES
         ipc/region_test.cpp
