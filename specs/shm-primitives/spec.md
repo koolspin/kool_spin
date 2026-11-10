@@ -136,11 +136,11 @@ Layouts and real-time safety (`layout_test.cpp`):
 Everywhere:
 
 - [ ] `[auto]` All of the above pass in every CI configuration: every preset on Linux, and `debug`, `release`, `asan`, and `tsan` on macOS arm64. That covers Phase 1a's exit criterion for stress tests on arm64.
-- [ ] `[manual]` The stress tests catch real ordering bugs. On a throwaway branch, CI on macOS arm64 fails with each of these changes:
-  - (a) the acquire fence removed from the seqlock reader;
-  - (b) the ring's head published with relaxed instead of release ordering.
+- [x] `[manual]` The stress tests catch real ordering bugs. On a throwaway branch, CI fails with each of these changes:
+  - (a) the acquire fence removed from the seqlock reader: CI on macOS arm64 fails. Tsan can't detect this: every access is atomic.
+  - (b) the ring's head published with relaxed instead of release ordering: `tsan` on Linux fails. arm64 hardware shows this reordering only sometimes (macOS `release` failed in 2 of 4 CI runs), and macOS tsan doesn't report it.
 
-  (b) should also fail under `tsan` on Linux. If either change passes, the tests need strengthening before this feature is done.
+  If either change passes, the tests need strengthening before this feature is done. Checked by the maintainer on 2026-11-10 (PR #8): (a) failed macOS `release` in both of its CI runs, and both stress tests failed 20 of 20 times when repeated; (b) failed Linux `tsan` in all 5 of its CI runs.
 
 ## Out of scope
 
