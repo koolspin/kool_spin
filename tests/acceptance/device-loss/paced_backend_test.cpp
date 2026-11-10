@@ -106,7 +106,12 @@ TEST_CASE("Paced: renders in real time", "[paced]") {
     for (const BlockRecord& record : records) {
         CAPTURE(offset);
         REQUIRE(record.frames <= kMaxBlockFrames);
-        REQUIRE(record.host_time == first + frames_to_duration(offset, kRate));
+        // Period n starts at frames_to_duration(n × period); each block in it
+        // at the period's time + frames_to_duration(frames before it).
+        const std::uint64_t whole_periods = offset / kPeriod * kPeriod;
+        const std::uint64_t within_period = offset % kPeriod;
+        REQUIRE(record.host_time == first + frames_to_duration(whole_periods, kRate) +
+                                        frames_to_duration(within_period, kRate));
         offset += record.frames;
     }
 }
