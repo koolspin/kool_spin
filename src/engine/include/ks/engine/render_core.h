@@ -51,8 +51,8 @@ enum class RenderResult : std::uint8_t {
 /// Renders blocks through a graph, for the active driver, one block at a time.
 ///
 /// Every driver calls try_render() for each block. The control thread chooses
-/// the active driver with activate(). The output safety stage (step 3) will
-/// run here, after the graph, so no driver can bypass it.
+/// the active driver with activate(). The output safety stage runs here,
+/// after the graph, so no driver can bypass it.
 class RenderCore {
 public:
     /// The graph must outlive the core. Production code uses the default
@@ -102,6 +102,9 @@ public:
     /// Frames in which the safety stage's limiter reduced the output. Any
     /// thread may call it.
     [[nodiscard]] std::uint64_t limited_frames() const noexcept KS_NONBLOCKING;
+
+    /// The safety stage's configuration. Any thread may call it.
+    [[nodiscard]] const SafetyConfig& safety_config() const noexcept KS_NONBLOCKING;
 
 private:
     Graph* graph_;

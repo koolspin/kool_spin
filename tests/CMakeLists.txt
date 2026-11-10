@@ -26,6 +26,7 @@ ks_add_test(ks_engine_tests
     SOURCES
         engine/device_loss_test.cpp
         engine/render_core_test.cpp
+        engine/safety_test.cpp
     LIBRARIES ks::engine)
 
 ks_add_test(ks_ipc_tests

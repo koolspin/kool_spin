@@ -48,16 +48,18 @@ public:
     OutputController& operator=(const OutputController&) = delete;
     OutputController(OutputController&&) = delete;
     OutputController& operator=(OutputController&&) = delete;
-    /// Stops whatever is running.
+    /// Stops whatever is running, as stop() does.
     ~OutputController();
 
-    /// Opens and starts the device, or freewheels if it can't.
+    /// Unmutes the core, then opens and starts the device, or freewheels if
+    /// it can't.
     void start();
 
     /// Notices a lost device, looks for its return, and hands back to it.
     void poll();
 
-    /// Stops and closes whatever is running.
+    /// Mutes the core, waits for the fade out (at most the fade time plus
+    /// 100 ms), then stops and closes whatever is running.
     void stop();
 
     [[nodiscard]] OutputState state() const noexcept;

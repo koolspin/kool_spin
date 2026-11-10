@@ -2,7 +2,14 @@
 #include <ks/engine/render_core.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <span>
+
+#ifdef __x86_64__
+#include <xmmintrin.h>
+#elifndef __aarch64__
+#error "Flushing denormals is implemented for x86-64 and arm64 only"
+#endif
 
 namespace ks::engine {
 
@@ -30,6 +37,45 @@ void silence(const Block& block) noexcept KS_NONBLOCKING {
     }
 }
 
+// Flushing denormals (spec requirement 8): flush_denormals() sets the calling
+// thread's floating-point mode to flush them to zero and returns the mode it
+// replaced, for restore_mode().
+#ifdef __x86_64__
+
+using FpMode = unsigned int;
+
+/// MXCSR's flush-to-zero (FTZ) and denormals-are-zero (DAZ) bits.
+constexpr FpMode kFlushDenormals = (1U << 15U) | (1U << 6U);
+
+FpMode flush_denormals() noexcept KS_NONBLOCKING {
+    const FpMode saved = _mm_getcsr();
+    _mm_setcsr(saved | kFlushDenormals);
+    return saved;
+}
+
+void restore_mode(FpMode saved) noexcept KS_NONBLOCKING {
+    _mm_setcsr(saved);
+}
+
+#else // __aarch64__
+
+using FpMode = std::uint64_t;
+
+/// FPCR's flush-to-zero (FZ) bit, which flushes inputs and results.
+constexpr FpMode kFlushDenormals = std::uint64_t{1} << 24U;
+
+FpMode flush_denormals() noexcept KS_NONBLOCKING {
+    const FpMode saved = __builtin_arm_rsr64("fpcr");
+    __builtin_arm_wsr64("fpcr", saved | kFlushDenormals);
+    return saved;
+}
+
+void restore_mode(FpMode saved) noexcept KS_NONBLOCKING {
+    __builtin_arm_wsr64("fpcr", saved);
+}
+
+#endif
+
 } // namespace
 
 RenderCore::RenderCore(Graph& graph, const SafetyConfig& safety) noexcept
@@ -52,10 +98,15 @@ RenderResult RenderCore::try_render(const Block& block, DriverId driver) noexcep
         return RenderResult::Skipped;
     }
 
+    // Read once, so a mute takes effect at a block boundary.
+    const bool muted = muted_.load(std::memory_order_acquire);
     silence(block);
     Block rendered = block;
     rendered.resumed = !rendered_any_ || driver != last_driver_;
+    const FpMode saved_mode = flush_denormals();
     graph_->process(rendered);
+    safety_.process(rendered, muted);
+    restore_mode(saved_mode);
     rendered_any_ = true;
     last_driver_ = driver;
 
@@ -66,6 +117,11 @@ RenderResult RenderCore::try_render(const Block& block, DriverId driver) noexcep
     rendered_until_ns_.store(
         std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count(),
         std::memory_order_relaxed);
+    non_finite_samples_.store(safety_.non_finite_samples(), std::memory_order_relaxed);
+    limited_frames_.store(safety_.limited_frames(), std::memory_order_relaxed);
+    // Last, and release: whoever sees the fade finished also sees the frames
+    // that finished it.
+    silenced_.store(safety_.silenced(), std::memory_order_release);
 
     // Release: the next holder sees everything this render did.
     token_.store(false, std::memory_order_release);
@@ -90,16 +146,13 @@ std::chrono::steady_clock::time_point RenderCore::rendered_until() const noexcep
         std::chrono::duration_cast<std::chrono::steady_clock::duration>(since_epoch)};
 }
 
-// Stubs: the safety-stage acceptance tests compile against this API before
-// it's implemented (specs/safety-stage/spec.md). The stage changes nothing
-// yet, so those tests fail.
-
 void RenderCore::set_muted(bool muted) noexcept KS_NONBLOCKING {
-    muted_.store(muted, std::memory_order_relaxed);
+    muted_.store(muted, std::memory_order_release);
 }
 
 bool RenderCore::silenced() const noexcept KS_NONBLOCKING {
-    return silenced_.load(std::memory_order_relaxed);
+    // silenced_ is from the last rendered block, which may predate an unmute.
+    return muted_.load(std::memory_order_acquire) && silenced_.load(std::memory_order_acquire);
 }
 
 std::uint64_t RenderCore::non_finite_samples() const noexcept KS_NONBLOCKING {
@@ -108,6 +161,10 @@ std::uint64_t RenderCore::non_finite_samples() const noexcept KS_NONBLOCKING {
 
 std::uint64_t RenderCore::limited_frames() const noexcept KS_NONBLOCKING {
     return limited_frames_.load(std::memory_order_relaxed);
+}
+
+const SafetyConfig& RenderCore::safety_config() const noexcept KS_NONBLOCKING {
+    return safety_.config();
 }
 
 } // namespace ks::engine
