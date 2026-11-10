@@ -22,6 +22,13 @@ ks_add_test(ks_dsp_tests
             dsp/frequency_meter_test.cpp
     LIBRARIES ks::dsp)
 
+ks_add_test(ks_ipc_tests
+    SOURCES
+        ipc/region_test.cpp
+        ipc/seqlock_test.cpp
+        ipc/spsc_ring_test.cpp
+    LIBRARIES ks::ipc)
+
 ks_add_test(ks_tone_tests
     SOURCES
         tone/options_test.cpp

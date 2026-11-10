@@ -28,6 +28,8 @@ Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/l
 
 CI (`.github/workflows/ci.yml`) runs every preset on Linux, `debug`/`release`/`asan`/`tsan` on macOS arm64, and lint, on every pull request and on pushes to `main`. The LLVM version is pinned in three places that must agree: `cmake/KsToolchain.cmake`, `tools/lint.sh`, and `ci.yml`. vcpkg is pinned by `builtin-baseline` in `vcpkg.json`; CI checks out exactly that commit.
 
+macOS `tsan` doesn't report data races in struct copies, by assignment or `memcpy`, only in scalar accesses, so Linux `tsan` is the check for data races.
+
 ## Code conventions
 
 - Types, enumerators, and template parameters are `CamelCase`. Functions, variables, and namespaces are `snake_case`. Private and protected members end in `_`. Constants are `kCamelCase`. Macros are `KS_UPPER_CASE`. clang-tidy enforces all of these.
@@ -35,7 +37,7 @@ CI (`.github/workflows/ci.yml`) runs every preset on Linux, `debug`/`release`/`a
 - Out-of-line definitions repeat `noexcept KS_NONBLOCKING`: the attribute is part of the function's type, and the build fails if a definition doesn't match its declaration.
 - Executables live in `src/apps/<app>/`, split into a library (everything except argument handling, so tests can use it) and a thin `main.cpp`. `ks-tone` is a standalone diagnostic tool, outside the process model.
 - `third_party/` compiles third-party code that vcpkg ships as headers only (such as miniaudio). It isn't linted and doesn't use `ks::warnings`.
-- Code must also compile on macOS with AppleClang 17 and its libc++. Build loops only build on Linux, so macOS problems surface only in CI. Known gaps in that libc++: no floating-point `std::from_chars` (parse with a strict syntax check, then `std::strtod`). Integer `std::from_chars` is fine.
+- Code must also compile on macOS with AppleClang 17 and its libc++. Build loops only build on Linux, so macOS problems surface only in CI. Known gaps in that libc++: no floating-point `std::from_chars` (parse with a strict syntax check, then `std::strtod`; integer `std::from_chars` is fine), and no `std::jthread` (use a `std::thread` and join it).
 - Every source file starts with `// SPDX-License-Identifier: GPL-3.0-or-later`.
 - Tests: `<name>_test.cpp`, registered with `ks_add_test()` in `tests/CMakeLists.txt`.
 - `tests/guardrails/` holds tests proving that the checks themselves work (for example, that RealtimeSanitizer reports an allocation in a `KS_NONBLOCKING` function). Never weaken, skip, or delete them.
