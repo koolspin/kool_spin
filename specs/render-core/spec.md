@@ -141,7 +141,9 @@ Real-time safety (`realtime_test.cpp`):
 Everywhere:
 
 - [ ] `[auto]` All of the above pass in every CI configuration: every preset on Linux, and `debug`, `release`, `asan`, and `tsan` on macOS arm64.
-- [ ] `[manual]` On Linux, the hidden test case "Listen: a tone through the default device" plays a 440 Hz tone at −20 dBFS for 3 seconds through the engine's miniaudio backend, with a 128-frame period. It sounds clean, without clicks or dropouts, through the laptop's output and through the Inpulse 500. macOS waits until there's a Mac build environment.
+- [x] `[manual]` On Linux, the hidden test case "Listen: a tone through the default device" plays a 440 Hz tone at −20 dBFS for 3 seconds through the engine's miniaudio backend, with a 128-frame period. It sounds clean, without clicks or dropouts, through the laptop's output and through the Inpulse 500. macOS waits until there's a Mac build environment.
+
+  Checked by the maintainer on 2026-11-10 (PR #9): clean through both on Linux. macOS not checked yet.
 
 ## Out of scope
 
