@@ -46,13 +46,13 @@ Make sure a bug never becomes a full-scale blast or a click through a PA (ADR 00
    5. the fade gain takes one step toward its target.
 5. **NaN and Inf.**
    - Each NaN or infinite sample becomes 0 and is counted.
-   - A frame with any non-finite sample sets the fade position to 0 (requirement 6) before its gain is applied. Its output is therefore silent on every channel, and the output fades back in afterwards.
+   - A frame with any non-finite sample is silent on every channel, even when there's no fade. It sets the fade position to 0 (requirement 6) before its gain is applied, so the output fades back in afterwards.
 6. **Fades.**
    - The fade gain is p / n, where p is an integer fade position from 0 to n, and n is `fade` in frames at the block's sample rate, rounded to the nearest frame.
    - **The target** is 0 while muted (requirement 9), and n otherwise. After each frame, p moves one step toward it.
    - **Resets.** p becomes 0 at the start of a block marked `resumed`, and on a frame with a non-finite sample.
    - **Gain before the first block:** p starts at 0.
-   - **No fade:** if n is 0, the gain is 1 when not muted and 0 when muted.
+   - **No fade:** if n is 0, the gain is 0 while muted and on a frame with a non-finite sample (requirement 5), and 1 otherwise.
    - **A sample rate change:** if the rate changes so that p would exceed n, p becomes n.
 7. **The limiter.**
    - **Attack:** the frame's peak is the largest absolute value across channels, after the fade gain. If the peak exceeds the ceiling, the target gain is ceiling / peak, and otherwise 1. If the target is below the current limiter gain, the gain drops to it at once.
