@@ -5,8 +5,11 @@
 /// The interface for drivers that render on their own thread, such as a
 /// device (ADR 0003 §1).
 
+#include <ks/engine/render_core.h>
+
 #include <cstdint>
 #include <expected>
+#include <memory>
 #include <string>
 
 namespace ks::engine {
@@ -56,6 +59,34 @@ public:
     virtual void stop() noexcept = 0;
 
     [[nodiscard]] virtual const StreamInfo& info() const noexcept = 0;
+
+    /// True once the backend knows its device has gone. Any thread may call
+    /// it.
+    [[nodiscard]] virtual bool lost() const noexcept = 0;
+
+    /// How many times it has asked the core to render (device callbacks, or
+    /// paced periods), whether or not anything rendered. Any thread may call
+    /// it.
+    [[nodiscard]] virtual std::uint64_t callbacks() const noexcept = 0;
+};
+
+/// How the output controller reaches the device: whether it's there, and
+/// opening it.
+class DeviceSource {
+public:
+    DeviceSource() = default;
+    DeviceSource(const DeviceSource&) = delete;
+    DeviceSource& operator=(const DeviceSource&) = delete;
+    DeviceSource(DeviceSource&&) = delete;
+    DeviceSource& operator=(DeviceSource&&) = delete;
+    virtual ~DeviceSource() = default;
+
+    /// Whether the device is there to open.
+    [[nodiscard]] virtual bool available() = 0;
+
+    /// Opens the device, not started, to render through `core` as `driver`.
+    virtual std::expected<std::unique_ptr<AudioBackend>, BackendError> open(RenderCore& core,
+                                                                            DriverId driver) = 0;
 };
 
 } // namespace ks::engine

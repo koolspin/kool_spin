@@ -24,18 +24,19 @@ namespace ks::engine {
 /// Renders `interleaved.size() / channels` frames into `interleaved`, as a
 /// device driver does for one callback: in blocks of at most kMaxBlockFrames,
 /// each rendered into the first `channels` scratch buffers and interleaved
-/// into place. The block that starts at frame k has host time `host_time` +
-/// frames_to_duration(k, sample_rate). Returns the number of frames in
-/// rendered blocks.
+/// into place, as `driver`. The block that starts at frame k has host time
+/// `host_time` + frames_to_duration(k, sample_rate). Returns the number of
+/// frames in rendered blocks.
 ///
 /// If the arguments are inconsistent, fills `interleaved` with silence and
 /// returns 0. They're inconsistent when `channels` is 0 or more than
 /// kMaxOutputChannels, `scratch` has fewer than `channels` buffers or one of
 /// them holds fewer than kMaxBlockFrames samples, `interleaved.size()` isn't a
 /// multiple of `channels`, or the sample rate is 0.
-std::size_t
-render_interleaved(RenderCore& core, std::span<const std::span<float>> scratch,
-                   std::span<float> interleaved, std::size_t channels, std::uint32_t sample_rate,
-                   std::chrono::steady_clock::time_point host_time) noexcept KS_NONBLOCKING;
+std::size_t render_interleaved(RenderCore& core, std::span<const std::span<float>> scratch,
+                               std::span<float> interleaved, std::size_t channels,
+                               std::uint32_t sample_rate,
+                               std::chrono::steady_clock::time_point host_time,
+                               DriverId driver = kDefaultDriver) noexcept KS_NONBLOCKING;
 
 } // namespace ks::engine

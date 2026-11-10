@@ -125,6 +125,10 @@ public:
 
     [[nodiscard]] const StreamInfo& info() const noexcept override { return info_; }
 
+    // Stubs (specs/device-loss/spec.md).
+    [[nodiscard]] bool lost() const noexcept override { return false; }
+    [[nodiscard]] std::uint64_t callbacks() const noexcept override { return 0; }
+
 private:
     // The audio thread's entry point.
     static void callback(ma_device* device, void* output, const void* /*input*/,

@@ -34,7 +34,8 @@ void silence(const Block& block) noexcept KS_NONBLOCKING {
 
 RenderCore::RenderCore(Graph& graph) noexcept : graph_{&graph} {}
 
-RenderResult RenderCore::try_render(const Block& block) noexcept KS_NONBLOCKING {
+RenderResult RenderCore::try_render(const Block& block,
+                                    DriverId /*driver*/) noexcept KS_NONBLOCKING {
     if (!is_valid(block)) {
         return RenderResult::Rejected;
     }
@@ -55,6 +56,25 @@ RenderResult RenderCore::try_render(const Block& block) noexcept KS_NONBLOCKING 
 
 std::uint64_t RenderCore::frames_rendered() const noexcept KS_NONBLOCKING {
     return frames_rendered_.load(std::memory_order_relaxed);
+}
+
+// Stubs: the device-loss acceptance tests compile against this API before
+// it's implemented (specs/device-loss/spec.md). try_render() ignores the
+// driver and never sets Block::resumed, so those tests fail.
+
+void RenderCore::activate(DriverId /*driver*/) noexcept KS_NONBLOCKING {
+    static_cast<void>(last_driver_);
+    static_cast<void>(rendered_any_);
+}
+
+DriverId RenderCore::active_driver() const noexcept KS_NONBLOCKING {
+    static_cast<void>(active_);
+    return kDefaultDriver;
+}
+
+std::chrono::steady_clock::time_point RenderCore::rendered_until() const noexcept KS_NONBLOCKING {
+    static_cast<void>(rendered_until_ns_);
+    return {};
 }
 
 } // namespace ks::engine

@@ -22,6 +22,8 @@ struct OfflineConfig {
     /// The host time of the first frame. Later frames follow at exactly the
     /// sample rate.
     std::chrono::steady_clock::time_point start_time;
+    /// The driver it renders as.
+    DriverId driver = kDefaultDriver;
 };
 
 /// Renders every frame of `output`, one buffer per channel, in order, in

@@ -30,6 +30,8 @@ struct MiniaudioConfig {
     std::uint32_t sample_rate = 0;
     /// 0: the backend's choice.
     std::uint32_t period_frames = 0;
+    /// The driver it renders as.
+    DriverId driver = kDefaultDriver;
 };
 
 /// Opens the default playback device, rendering through `core`, which must
