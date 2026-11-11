@@ -169,7 +169,7 @@ case "$mode" in
             before="$(git rev-parse HEAD)"
             run_pass build "$pass"
             check_clean
-            git log --format='loop:   %h %s' "$before..HEAD"
+            git --no-pager log --format='loop:   %h %s' "$before..HEAD"
             stop_if_blocked
 
             if [[ "$pass_status" == done ]]; then
