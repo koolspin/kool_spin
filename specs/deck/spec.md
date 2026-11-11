@@ -208,7 +208,7 @@ Real-time safety (`realtime_test.cpp`):
 Everywhere:
 
 - [ ] `[auto]` All of the above pass in every CI configuration: every preset on Linux, and `debug`, `release`, `asan`, and `tsan` on macOS arm64.
-- [ ] `[manual]` **Listening.** The hidden test "Listen: a deck through the default device" plays the file named by `KS_LISTEN_TRACK` (a WAV file: 16- or 24-bit PCM or 32-bit float, mono or stereo, at any rate), or the synthetic track if it's unset. It plays through the default device, with the default safety stage, and runs this script:
+- [x] `[manual]` **Listening.** The hidden test "Listen: a deck through the default device" plays the file named by `KS_LISTEN_TRACK` (a WAV file: 16- or 24-bit PCM or 32-bit float, mono or stereo, at any rate), or the synthetic track if it's unset. It plays through the default device, with the default safety stage, and runs this script:
   - 10 s at rate 1;
   - 5 s each at rates 1.08, 0.92, and 1.5;
   - 3 s in reverse;
