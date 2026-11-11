@@ -8,13 +8,15 @@ State before the loop: the stubs compile, and all 8 mixer acceptance tests fail 
 
 ## Tasks
 
-- [ ] 1. **Controls, validation, and `settings()`.** Implement every setter in `mixer.cpp` so it updates `settings_` only (no audio yet):
+- [x] 1. **Controls, validation, and `settings()`.** Implement every setter in `mixer.cpp` so it updates `settings_` only (no audio yet):
   - per-deck controls return early when `deck >= kDecks`; `double` controls return early on NaN (`std::isnan`);
   - trim: `std::min(db, kMaxTrimDb)` (−∞ is kept); fader, crossfader, cue mix: `std::clamp(v, 0.0, 1.0)`; transition: `std::clamp(v, kMinCrossfaderTransition, 1.0)`; main and headphone levels: `std::min(db, 0.0)` (−∞ kept);
   - `set_crossfader_assign` stores the side as is (an out-of-range enum value can't be produced by the API; if clang-tidy or the reviewer wants it, treat anything other than `A`/`B` as `Thru`);
   - a private `static bool valid(const BusMap&) noexcept KS_NONBLOCKING`: both even, both `< kMaxOutputChannels`, different. The constructor stores `map` if valid, else `BusMap{}`; `set_bus_map()` ignores an invalid map.
 
   Add `tests/engine/mixer_test.cpp` to `ks_engine_tests`: defaults equal `MixerSettings{}`; each clamp at and past its bounds (including +∞ and −∞ for each `double` control: +∞ trim becomes 12, −∞ fader becomes 0, and so on); NaN and deck index 4 change nothing; every valid and invalid bus map shape (odd, equal, 8, `{4, 6}`, `{6, 4}`) through both the constructor and `set_bus_map()`. (passes: "Mixer: controls are validated"; advances: "Mixer: buses go to their channel pairs" (its invalid-maps section))
+
+  Done (pass 1): setters, `valid(BusMap)`, and 6 unit tests in `tests/engine/mixer_test.cpp`. Mixer acceptance: 1 of 8 passes ("controls are validated"); all other acceptance tests still pass. `set_crossfader_assign` stores the side as is (clang-tidy didn't object). Per-deck access uses `std::span{...}[i]` after the bounds check, like `deck()`. `process()` is still the empty stub; the stub comment in `mixer.cpp` now says so.
 
 - [ ] 2. **Mixing and routing, with gains jumping straight to their targets.** Add private state to `Mixer`:
   - deck buffers: `std::array<std::array<float, kMaxBlockFrames>, kDecks * 2>` (or left/right arrays per deck), members of the mixer so nothing allocates;

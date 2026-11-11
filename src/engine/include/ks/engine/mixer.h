@@ -131,6 +131,10 @@ public:
     void process(const Block& block) noexcept KS_NONBLOCKING override;
 
 private:
+    /// Whether `map` is valid: both channels even, below kMaxOutputChannels,
+    /// and different.
+    [[nodiscard]] static bool valid(const BusMap& map) noexcept KS_NONBLOCKING;
+
     std::array<Deck, kDecks> decks_;
     MixerSettings settings_;
 };
