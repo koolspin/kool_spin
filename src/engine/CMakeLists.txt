@@ -3,7 +3,9 @@
 
 add_library(ks_engine STATIC
     block.cpp
+    command.cpp
     deck.cpp
+    engine.cpp
     interleave.cpp
     interpolator.cpp
     miniaudio_backend.cpp
@@ -22,7 +24,9 @@ target_sources(ks_engine PUBLIC
     FILES
         include/ks/engine/audio_backend.h
         include/ks/engine/block.h
+        include/ks/engine/command.h
         include/ks/engine/deck.h
+        include/ks/engine/engine.h
         include/ks/engine/interleave.h
         include/ks/engine/interpolator.h
         include/ks/engine/miniaudio_backend.h
@@ -35,5 +39,5 @@ target_sources(ks_engine PUBLIC
         include/ks/engine/track.h)
 
 target_link_libraries(ks_engine
-    PUBLIC ks::core
+    PUBLIC ks::core ks::ipc
     PRIVATE ks::miniaudio ks::warnings)

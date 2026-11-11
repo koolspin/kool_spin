@@ -20,6 +20,9 @@ function(ks_acceptance_test name)
                 -- ${arg_COMMAND})
 endfunction()
 
+# ks_add_fuzz_target(), for features whose input is fuzzed.
+include(KsFuzz)
+
 # Each feature's directory registers its own tests.
 file(GLOB entries LIST_DIRECTORIES true CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*")
 foreach(entry IN LISTS entries)
