@@ -159,7 +159,7 @@ Earlier tests:
 Everywhere:
 
 - [ ] `[auto]` All of the above pass in every CI configuration: every preset on Linux, and `debug`, `release`, `asan`, and `tsan` on macOS arm64.
-- [ ] `[manual]` The listening test from the render-core spec ("Listen: a tone through the default device") now runs through the stage with its defaults. It still sounds clean through the laptop's output and the Inpulse 500, with no click at the start.
+- [x] `[manual]` The listening test from the render-core spec ("Listen: a tone through the default device") now runs through the stage with its defaults. It still sounds clean through the laptop's output and the Inpulse 500, with no click at the start.
 
 ## Out of scope
 
