@@ -55,9 +55,10 @@ Make sure a bug never becomes a full-scale blast or a click through a PA (ADR 00
    - **No fade:** if n is 0, the gain is 0 while muted and on a frame with a non-finite sample (requirement 5), and 1 otherwise.
    - **A sample rate change:** if the rate changes so that p would exceed n, p becomes n.
 7. **The limiter.**
-   - **Attack:** the frame's peak is the largest absolute value across channels, after the fade gain. If the peak exceeds the ceiling, the target gain is ceiling / peak, and otherwise 1. If the target is below the current limiter gain, the gain drops to it at once.
+   - **Groups:** each stereo pair of channels is limited separately: channels 0 and 1, 2 and 3, and so on. A last, unpaired channel is a group of its own. Each group has its own limiter gain, so a bus on one pair (such as the headphones) never turns down a bus on another (the main output). (Amended for the mixer, `specs/mixer/spec.md`.)
+   - **Attack:** a group's peak is the largest absolute value across its channels, after the fade gain. If the peak exceeds the ceiling, the target gain is ceiling / peak, and otherwise 1. If the target is below the group's current limiter gain, the gain drops to it at once.
    - **Release:** otherwise the gain moves toward the target by (target − gain) × (1 − e^(−1 / (release × sample rate))). Once the target is 1 and the gain is within 10⁻⁴ of it, the gain becomes 1. (Snapping while the target is just below 1 would flip the gain between the two on every frame.)
-   - **Counting:** frames in which the limiter gain is below 1 are counted.
+   - **Counting:** frames in which any group's limiter gain is below 1 are counted.
 8. **Denormals.**
    - While a block is rendered (the graph and the stage), the core sets the floating-point mode to flush denormals to zero: FTZ and DAZ on x86-64, and FZ on arm64.
    - It restores the previous mode before `try_render()` returns, so the calling thread's mode is otherwise unchanged.
@@ -122,6 +123,12 @@ The stage (`safety_stage_test.cpp`):
   - **Another ceiling:** a −6 dBFS ceiling is held the same way.
 
   (test: "Safety: the limiter holds the ceiling and recovers")
+- [ ] `[auto]` **Each stereo pair has its own limiter.** A graph writing 0.5 on 4 channels, with 2.0 on channels 2 and 3 from frame 1,000 to 2,000:
+  - channels 0 and 1 are exactly 0.5 from frame 480 on, so the burst never touches them;
+  - channels 2 and 3 are the ceiling, within 10⁻⁶, during the burst;
+  - `limited_frames()` counts each frame once, however many groups are limited in it.
+
+  (test: "Safety: each stereo pair has its own limiter")
 - [ ] `[auto]` **Denormals:**
   - inside the graph, `FLT_MIN × 0.5` comes out as 0;
   - a denormal the graph writes reaches the output as 0;

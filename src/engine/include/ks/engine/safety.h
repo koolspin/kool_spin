@@ -9,9 +9,11 @@
 #include <ks/core/realtime.h>
 #include <ks/engine/block.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace ks::engine {
 
@@ -60,12 +62,14 @@ private:
     /// The fade gain, p / n, or with no fade, 0 or 1.
     [[nodiscard]] float fade_gain(bool muted, bool non_finite) const noexcept KS_NONBLOCKING;
 
-    /// Multiplies the frame's samples by `gain`. Returns their peak.
-    static float scale(const Block& block, std::size_t frame, float gain) noexcept KS_NONBLOCKING;
+    /// Multiplies the frame's samples in `channels` by `gain`. Returns their
+    /// peak.
+    static float scale(std::span<const std::span<float>> channels, std::size_t frame,
+                       float gain) noexcept KS_NONBLOCKING;
 
-    /// Moves the limiter gain for a frame whose peak is `peak`, counts the
-    /// frame if it's below 1, and returns it.
-    float limit(float peak) noexcept KS_NONBLOCKING;
+    /// Moves the limiter gain of stereo pair `group` for a frame whose peak
+    /// is `peak`, and returns it.
+    float limit(std::size_t group, float peak) noexcept KS_NONBLOCKING;
 
     SafetyConfig config_;
     /// The ceiling as a gain.
@@ -81,9 +85,14 @@ private:
     /// The fade position, p: the fade gain is p / n.
     std::uint64_t fade_position_ = 0;
     bool muted_ = false;
-    /// In double: in float, a release step near 1 is smaller than the
-    /// spacing between floats, and the gain would stall short of 1.
-    double limiter_gain_ = 1.0;
+    /// One limiter gain per stereo pair of channels (requirement 7). In
+    /// double: in float, a release step near 1 is smaller than the spacing
+    /// between floats, and the gain would stall short of 1.
+    std::array<double, (kMaxOutputChannels + 1) / 2> limiter_gains_ = [] {
+        std::array<double, (kMaxOutputChannels + 1) / 2> gains{};
+        gains.fill(1.0);
+        return gains;
+    }();
 
     std::uint64_t non_finite_samples_ = 0;
     std::uint64_t limited_frames_ = 0;

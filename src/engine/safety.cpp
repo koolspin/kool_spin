@@ -75,13 +75,22 @@ void SafetyStage::process(const Block& block, bool muted) noexcept KS_NONBLOCKIN
         if (non_finite) {
             fade_position_ = 0;
         }
-        // 2. The fade gain.
-        const float peak = scale(block, i, fade_gain(muted, non_finite));
-        // 3 and 4. The limiter gain, then the clamp.
-        const float limiter_gain = limit(peak);
-        for (const std::span<float> channel : block.channels) {
-            float& sample = channel[i];
-            sample = std::clamp(sample * limiter_gain, -ceiling_, ceiling_);
+        // 2 to 4, for each stereo pair: the fade gain, the pair's limiter
+        // gain, and the clamp.
+        const float fade = fade_gain(muted, non_finite);
+        bool limited = false;
+        for (std::size_t first = 0; first < block.channels.size(); first += 2) {
+            const std::span<const std::span<float>> pair = block.channels.subspan(
+                first, std::min<std::size_t>(2, block.channels.size() - first));
+            const float limiter_gain = limit(first / 2, scale(pair, i, fade));
+            limited = limited || limiter_gain < 1.0F;
+            for (const std::span<float> channel : pair) {
+                float& sample = channel[i];
+                sample = std::clamp(sample * limiter_gain, -ceiling_, ceiling_);
+            }
+        }
+        if (limited) {
+            ++limited_frames_;
         }
         // 5. The fade takes one step toward its target.
         if (fade_position_ < target) {
@@ -112,10 +121,10 @@ float SafetyStage::fade_gain(bool muted, bool non_finite) const noexcept KS_NONB
     return muted || non_finite ? 0.0F : 1.0F;
 }
 
-float SafetyStage::scale(const Block& block, std::size_t frame,
+float SafetyStage::scale(std::span<const std::span<float>> channels, std::size_t frame,
                          float gain) noexcept KS_NONBLOCKING {
     float peak = 0.0F;
-    for (const std::span<float> channel : block.channels) {
+    for (const std::span<float> channel : channels) {
         float& sample = channel[frame];
         sample *= gain;
         peak = std::max(peak, std::abs(sample));
@@ -123,23 +132,21 @@ float SafetyStage::scale(const Block& block, std::size_t frame,
     return peak;
 }
 
-float SafetyStage::limit(float peak) noexcept KS_NONBLOCKING {
+float SafetyStage::limit(std::size_t group, float peak) noexcept KS_NONBLOCKING {
+    double& gain = std::span{limiter_gains_}[group];
     const double target =
         peak > ceiling_ ? static_cast<double>(ceiling_) / static_cast<double>(peak) : 1.0;
-    if (target < limiter_gain_) {
-        limiter_gain_ = target; // instant attack
+    if (target < gain) {
+        gain = target; // instant attack
     } else {
-        limiter_gain_ += (target - limiter_gain_) * release_step_;
+        gain += (target - gain) * release_step_;
         // Only when releasing to 1: snapping to 1 while the target is below
         // it would flip between the two on every frame.
-        if (target == 1.0 && 1.0 - limiter_gain_ <= kReleaseSnap) {
-            limiter_gain_ = 1.0;
+        if (target == 1.0 && 1.0 - gain <= kReleaseSnap) {
+            gain = 1.0;
         }
     }
-    if (limiter_gain_ < 1.0) {
-        ++limited_frames_;
-    }
-    return static_cast<float>(limiter_gain_);
+    return static_cast<float>(gain);
 }
 
 bool SafetyStage::silenced() const noexcept KS_NONBLOCKING {
