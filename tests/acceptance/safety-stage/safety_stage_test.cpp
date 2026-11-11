@@ -205,6 +205,40 @@ TEST_CASE("Safety: the limiter holds the ceiling and recovers", "[safety]") {
     }
 }
 
+TEST_CASE("Safety: each stereo pair has its own limiter", "[safety]") {
+    constexpr std::size_t kTotal = 4'000;
+    const double ceiling = default_ceiling();
+    const auto in_burst = [](std::uint64_t frame) { return frame >= 1'000 && frame < 2'000; };
+
+    // A burst on channels 2 and 3 only.
+    FunctionGraph graph{[in_burst](std::uint64_t frame, std::size_t channel) {
+        return channel >= 2 && in_burst(frame) ? 2.0F : 0.5F;
+    }};
+    RenderCore core{graph};
+    const Channels output = render(core, kTotal, ks::engine::kDefaultDriver, 64, 4);
+
+    for (std::size_t c = 0; c < 2; ++c) {
+        for (std::size_t f = kFadeFrames; f < kTotal; ++f) {
+            CAPTURE(c, f);
+            REQUIRE(output.at(c).at(f) == 0.5F);
+        }
+    }
+    const Channels limited{output.at(2), output.at(3)};
+    const std::string held =
+        first_mismatch(limited, 1'000, 2'000, [ceiling](std::size_t) { return ceiling; });
+    CAPTURE(held);
+    REQUIRE(held.empty());
+    REQUIRE(core.limited_frames() > 1'000);
+
+    // The same burst on both pairs counts the same frames: each frame once.
+    FunctionGraph everywhere{[in_burst](std::uint64_t frame, std::size_t /*channel*/) {
+        return in_burst(frame) ? 2.0F : 0.5F;
+    }};
+    RenderCore both{everywhere};
+    static_cast<void>(render(both, kTotal, ks::engine::kDefaultDriver, 64, 4));
+    REQUIRE(both.limited_frames() == core.limited_frames());
+}
+
 namespace {
 
 /// Checks flush-to-zero from inside the graph, and writes a denormal.
