@@ -140,7 +140,7 @@ Real-time safety (`realtime_test.cpp`):
 Everywhere:
 
 - [ ] `[auto]` All of the above pass in every CI configuration: every preset on Linux, and `debug`, `release`, `asan`, and `tsan` on macOS arm64.
-- [ ] `[manual]` **Listening.** The hidden test "Listen: the mixer through the default device" plays two tracks through the default device, with the default safety stage: `KS_LISTEN_TRACK_A` and `KS_LISTEN_TRACK_B`, or the synthetic tracks if they're unset. The main bus goes to channels 1–2, and the headphones to 3–4 when the device has them. The script:
+- [x] `[manual]` **Listening.** The hidden test "Listen: the mixer through the default device" plays two tracks through the default device, with the default safety stage: `KS_LISTEN_TRACK_A` and `KS_LISTEN_TRACK_B`, or the synthetic tracks if they're unset. The main bus goes to channels 1–2, and the headphones to 3–4 when the device has them. The script:
   - a 10 s constant-power crossfade;
   - cue toggles, with the cue mix swept from cue to main;
   - fader rides;
