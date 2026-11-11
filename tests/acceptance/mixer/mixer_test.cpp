@@ -4,16 +4,26 @@
 #include <ks/engine/mixer.h>
 
 #include <ks/engine/interpolator.h>
+#include <ks/engine/offline.h>
+#include <ks/engine/render_core.h>
+#include <ks/engine/safety.h>
 
+#include "../deck/wav.h"
 #include "test_support.h"
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <limits>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -361,6 +371,112 @@ TEST_CASE("Mixer: output doesn't depend on block size", "[mixer]") {
                     FAIL("channel " << c << ", frame " << f << " differs");
                 }
             }
+        }
+    }
+}
+
+TEST_CASE("Mixer: the crossfade matches its golden file", "[mixer][golden]") {
+    using enum MixerAction;
+    using ks::engine::test::kRate;
+    using ks::engine::test::kTrackRate;
+    constexpr std::uint64_t kSecond = kRate;
+    constexpr std::uint64_t kFrames = 3 * kSecond;
+
+    // Deck 0 on side A at rate 1, and deck 1 on side B at rate 1.06, with the
+    // crossfader on A.
+    std::vector<MixerControl> script{
+        {.frame = 0, .action = Side, .deck = 0, .value = 0.0},
+        {.frame = 0, .action = Side, .deck = 1, .value = 1.0},
+        {.frame = 0, .action = Crossfader, .deck = 0, .value = 0.0},
+        {.frame = 0, .action = Rate, .deck = 1, .value = 1.06},
+        {.frame = 0, .action = Play, .deck = 0, .value = 0.0},
+        {.frame = 0, .action = Play, .deck = 1, .value = 0.0},
+    };
+    // From 0.25 s to 1.25 s, a constant-power sweep from A to B, in steps of
+    // 5 ms, as a controller sends it.
+    constexpr std::uint64_t kSweepStart = kSecond / 4;
+    constexpr std::uint64_t kSweepSteps = 200;
+    for (std::uint64_t step = 1; step <= kSweepSteps; ++step) {
+        script.push_back({.frame = kSweepStart + (step * kSecond / kSweepSteps),
+                          .action = Crossfader,
+                          .deck = 0,
+                          .value = static_cast<double>(step) / kSweepSteps});
+    }
+    // From 1.5 s, scratch cuts at transition 0.05: A, B, A, ... every 0.125 s.
+    constexpr std::uint64_t kCutStart = 3 * kSecond / 2;
+    constexpr std::uint64_t kCutEvery = kSecond / 8;
+    script.push_back({.frame = kCutStart, .action = Curve, .deck = 0, .value = 0.05});
+    for (std::uint64_t cut = 0; kCutStart + (cut * kCutEvery) < kFrames; ++cut) {
+        script.push_back({.frame = kCutStart + (cut * kCutEvery),
+                          .action = Crossfader,
+                          .deck = 0,
+                          .value = cut % 2 == 0 ? 0.0 : 1.0});
+    }
+
+    // The synthetic deck-test tracks, the second starting 0.125 s in.
+    const auto music = [](std::uint64_t offset) {
+        return [offset](std::uint64_t frame, std::size_t channel) {
+            return ks::engine::test::synthetic(frame + offset, channel, kTrackRate);
+        };
+    };
+    OwnedTrack first{4ULL * kTrackRate, kTrackRate, music(0)};
+    OwnedTrack second{4ULL * kTrackRate, kTrackRate, music(kTrackRate / 8)};
+    const Interpolator interpolator;
+    Mixer mixer{interpolator};
+    REQUIRE(mixer.deck(0).load(first.track()));
+    REQUIRE(mixer.deck(1).load(second.track()));
+    ks::engine::test::ScriptedMixer graph{mixer, script};
+    ks::engine::RenderCore core{
+        graph, ks::engine::SafetyConfig{.fade = std::chrono::milliseconds{0}, .ceiling_dbfs = 0.0}};
+
+    // The offline driver, one call between each pair of controls, so each
+    // applies at its frame.
+    std::vector<float> left(kFrames, 5.0F);
+    std::vector<float> right(kFrames, 5.0F);
+    std::uint64_t frame = 0;
+    for (std::size_t next = 0; frame < kFrames;) {
+        while (next < script.size() && script.at(next).frame <= frame) {
+            ++next;
+        }
+        const std::uint64_t until = next < script.size() ? script.at(next).frame : kFrames;
+        const std::array<std::span<float>, 2> views{std::span{left}.subspan(frame, until - frame),
+                                                    std::span{right}.subspan(frame, until - frame)};
+        const ks::engine::OfflineConfig config{.sample_rate = kRate,
+                                               .block_frames = 64,
+                                               .start_time =
+                                                   std::chrono::steady_clock::time_point{} +
+                                                   ks::engine::frames_to_duration(frame, kRate),
+                                               .driver = ks::engine::kDefaultDriver};
+        REQUIRE(ks::engine::render_offline(core, config, views) == until - frame);
+        frame = until;
+    }
+    // It played.
+    REQUIRE(std::ranges::any_of(left, [](float sample) { return sample != 0.0F; }));
+
+    const std::filesystem::path golden =
+        std::filesystem::path{KS_MIXER_GOLDEN_DIR} / "crossfade.wav";
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): nothing in the tests sets the environment
+    const char* const update = std::getenv("KS_UPDATE_GOLDEN");
+    if (update != nullptr && std::string_view{update} == "1") {
+        std::filesystem::create_directories(golden.parent_path());
+        REQUIRE(ks::engine::test::write_wav(golden, kRate, left, right));
+        SKIP("Wrote " << golden.string() << ": listen to it, review it, and commit it.");
+    }
+
+    const auto read = ks::engine::test::read_wav(golden);
+    CAPTURE(golden.string());
+    REQUIRE(read.has_value());
+    const ks::engine::test::WavAudio audio = read.value_or(ks::engine::test::WavAudio{});
+    REQUIRE(audio.sample_rate == kRate);
+    REQUIRE(audio.samples.size() == 2 * kFrames);
+    for (std::size_t f = 0; f < kFrames; ++f) {
+        const double left_error = std::abs(static_cast<double>(left.at(f)) -
+                                           static_cast<double>(audio.samples.at(2 * f)));
+        const double right_error = std::abs(static_cast<double>(right.at(f)) -
+                                            static_cast<double>(audio.samples.at((2 * f) + 1)));
+        if (left_error > 1e-5 || right_error > 1e-5) {
+            FAIL("frame " << f << " differs from the golden file by " << left_error << ", "
+                          << right_error);
         }
     }
 }
