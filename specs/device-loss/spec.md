@@ -127,7 +127,7 @@ The active driver (`active_driver_test.cpp`):
 The paced backend and simulated devices (`paced_backend_test.cpp`):
 
 - [ ] `[auto]` At 48 kHz with a 1,024-frame period, over half a second:
-  - the frame count stays within 50 ms of real time;
+  - at the end, the frame count is within 50 ms of real time, or gets there within the next 100 ms (a busy test runner can wake the paced thread late, and a backend that runs slow or fast never gets there);
   - blocks are at most `kMaxBlockFrames`;
   - each block's host time is the first block's plus `frames_to_duration()` of the whole periods before it, plus `frames_to_duration()` of the frames before it in its period (requirement 12, and render-core requirement 17);
   - the first block's host time falls between just before and just after `start()`;

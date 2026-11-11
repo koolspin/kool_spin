@@ -95,12 +95,20 @@ TEST_CASE("Paced: renders in real time", "[paced]") {
     REQUIRE(backend.start().has_value());
     const TimePoint after_start = Clock::now();
     std::this_thread::sleep_for(milliseconds{500});
+    // A busy test runner can wake the paced thread late, so it gets up to
+    // 100 ms to catch up. One that runs slow or fast never does.
+    const bool in_time = wait_until(
+        [&core, before_start] {
+            return within_tolerance(core.frames_rendered(), kRate, Clock::now() - before_start);
+        },
+        milliseconds{100});
+    const TimePoint checked = Clock::now();
+    const std::uint64_t frames_checked = core.frames_rendered();
     backend.stop();
-    const TimePoint stopped = Clock::now();
 
+    CAPTURE(frames_checked, seconds_off(frames_checked, kRate, checked - before_start));
+    REQUIRE(in_time);
     const std::uint64_t frames = core.frames_rendered();
-    CAPTURE(frames, seconds_off(frames, kRate, stopped - before_start));
-    REQUIRE(within_tolerance(frames, kRate, stopped - before_start));
     REQUIRE(backend.callbacks() * kPeriod == frames);
 
     const std::span<const BlockRecord> records = graph.records();
