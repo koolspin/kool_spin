@@ -7,6 +7,7 @@ add_library(ks_engine STATIC
     interleave.cpp
     interpolator.cpp
     miniaudio_backend.cpp
+    mixer.cpp
     offline.cpp
     output_controller.cpp
     paced_backend.cpp
@@ -25,6 +26,7 @@ target_sources(ks_engine PUBLIC
         include/ks/engine/interleave.h
         include/ks/engine/interpolator.h
         include/ks/engine/miniaudio_backend.h
+        include/ks/engine/mixer.h
         include/ks/engine/offline.h
         include/ks/engine/output_controller.h
         include/ks/engine/paced_backend.h
