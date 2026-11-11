@@ -9,7 +9,9 @@
 #include <ks/engine/interpolator.h>
 #include <ks/engine/track.h>
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -92,13 +94,82 @@ public:
     [[nodiscard]] double cue() const noexcept KS_NONBLOCKING;
 
 private:
+    /// A read position in a track (spec requirement 12).
+    struct Head {
+        const Track* track = nullptr;
+        TrackPosition position = 0;
+        /// p: the gain is p / ramp_frames_.
+        std::uint64_t gain = 0;
+    };
+
+    /// A track's decoding progress, read once per block (requirement 18).
+    struct Ready {
+        const Track* track = nullptr;
+        TrackReady ready;
+    };
+
+    /// Works out the per-rate values for `sample_rate`.
+    void set_sample_rate(std::uint32_t sample_rate) noexcept KS_NONBLOCKING;
+
+    /// Moves the main head to `position` in `track`, as a seek or load does:
+    /// at once if it's silent, or as a crossfade. Returns false, changing
+    /// nothing, if a crossfade is already running.
+    bool move_main(const Track* track, TrackPosition position) noexcept KS_NONBLOCKING;
+
+    /// Loads `track`, or makes the load wait for the current crossfade.
+    void request_load(const Track* track) noexcept KS_NONBLOCKING;
+
+    /// Applies a waiting load, then a waiting seek. Called once the outgoing
+    /// head is dropped.
+    void apply_waiting_controls() noexcept KS_NONBLOCKING;
+
+    /// The track that controls apply to: a waiting load's, or the main head's.
+    [[nodiscard]] const Track* control_track() const noexcept KS_NONBLOCKING;
+
+    /// One frame: the rate, the output, the heads' motion, and the gains.
+    [[nodiscard]] StereoSample render_frame() noexcept KS_NONBLOCKING;
+
+    /// The value at `head`'s position, at a step of `step` frames.
+    [[nodiscard]] StereoSample value_at(const Head& head, double step) noexcept KS_NONBLOCKING;
+
+    /// Moves the main head by `step`, applying the ends and the waiting
+    /// limit (requirement 17).
+    void advance_main(TrackPosition step) noexcept KS_NONBLOCKING;
+
+    /// The gain of the main head, or of the outgoing one.
+    [[nodiscard]] float gain_of(const Head& head, bool main) const noexcept KS_NONBLOCKING;
+
+    /// `track`'s decoding progress, read at most once per block.
+    [[nodiscard]] TrackReady ready_of(const Track& track) noexcept KS_NONBLOCKING;
+
     const Interpolator* interpolator_;
-    const Track* track_ = nullptr;
+    Head main_;
+    Head outgoing_;
+    bool has_outgoing_ = false;
+
+    /// Controls waiting for the current crossfade to finish.
+    bool load_pending_ = false;
+    const Track* pending_track_ = nullptr;
+    bool seek_pending_ = false;
+    TrackPosition pending_seek_ = 0;
+
     bool playing_ = false;
     bool waiting_ = false;
+    double target_rate_ = 1.0;
     double rate_ = 1.0;
-    TrackPosition position_ = 0;
     TrackPosition cue_ = 0;
+
+    /// The sample rate the values below are for.
+    std::uint32_t sample_rate_ = 0;
+    /// n: kDeclickTime in frames.
+    std::uint64_t ramp_frames_ = 0;
+    /// 1 − e^(−1 / (kRateSmoothing × sample rate)).
+    double smoothing_ = 1.0;
+
+    /// The tracks whose progress this block has read: at most the main
+    /// head's, the outgoing head's, and a waiting load's.
+    std::array<Ready, 3> ready_{};
+    std::size_t ready_count_ = 0;
 };
 
 } // namespace ks::engine
