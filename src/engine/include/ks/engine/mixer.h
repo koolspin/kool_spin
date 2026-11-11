@@ -135,8 +135,34 @@ private:
     /// and different.
     [[nodiscard]] static bool valid(const BusMap& map) noexcept KS_NONBLOCKING;
 
+    /// The mixer's gains (spec requirement 9).
+    struct Gains {
+        /// aᵢ: each channel's gain into the main bus.
+        std::array<double, kDecks> channel{};
+        /// cᵢ: each channel's gain into the cue bus.
+        std::array<double, kDecks> cue{};
+        /// m: the main level.
+        double main = 0.0;
+        /// h_c: the cue bus's gain into the headphones.
+        double headphone_cue = 0.0;
+        /// h_m: the main bus's gain into the headphones.
+        double headphone_main = 0.0;
+    };
+
+    /// One deck's output for the current block.
+    struct DeckBuffer {
+        std::array<float, kMaxBlockFrames> left{};
+        std::array<float, kMaxBlockFrames> right{};
+    };
+
+    /// The gains the controls in settings_ ask for.
+    [[nodiscard]] Gains targets() const noexcept KS_NONBLOCKING;
+
     std::array<Deck, kDecks> decks_;
     MixerSettings settings_;
+    /// The gains in use. Set to their targets at the start of each block.
+    Gains gains_;
+    std::array<DeckBuffer, kDecks> buffers_{};
 };
 
 } // namespace ks::engine

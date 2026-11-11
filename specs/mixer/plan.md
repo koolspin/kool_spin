@@ -18,7 +18,7 @@ State before the loop: the stubs compile, and all 8 mixer acceptance tests fail 
 
   Done (pass 1): setters, `valid(BusMap)`, and 6 unit tests in `tests/engine/mixer_test.cpp`. Mixer acceptance: 1 of 8 passes ("controls are validated"); all other acceptance tests still pass. `set_crossfader_assign` stores the side as is (clang-tidy didn't object). Per-deck access uses `std::span{...}[i]` after the bounds check, like `deck()`. `process()` is still the empty stub; the stub comment in `mixer.cpp` now says so.
 
-- [ ] 2. **Mixing and routing, with gains jumping straight to their targets.** Add private state to `Mixer`:
+- [x] 2. **Mixing and routing, with gains jumping straight to their targets.** Add private state to `Mixer`:
   - deck buffers: `std::array<std::array<float, kMaxBlockFrames>, kDecks * 2>` (or left/right arrays per deck), members of the mixer so nothing allocates;
   - the gains: aᵢ and cᵢ for each deck, plus m, h_c, h_m, each a `double` (a small private struct `Gains` with `std::array<double, kDecks> channel, cue; double main, headphone_cue, headphone_main;` keeps tasks 2 and 3 tidy).
 
@@ -33,6 +33,8 @@ State before the loop: the stubs compile, and all 8 mixer acceptance tests fail 
   - write the main pair only if `map.main + 1 < block.channels.size()`, and the cue pair likewise; write no other channel.
 
   Unit tests in `tests/engine/mixer_test.cpp`, with small constant tracks: an 8-channel block with map `{4, 6}` writes only channels 4–7 and leaves 0–3 untouched (prefill them with a sentinel to prove nothing is written); a 3-channel block with the default map writes only 0 and 1; an invalid block writes nothing; paused decks give silence; a −∞ main level silences main but not the headphones. (passes: "Mixer: buses go to their channel pairs", "Mixer: trim and fader", "Mixer: crossfader curves", "Mixer: cue bus and headphone mix", "Mixer is real-time safe")
+
+  Done (pass 2): private `Gains`, `DeckBuffer`, `targets()`, `gains_`, `buffers_`; `process()` mixes and routes with gains set to `targets()` at the top of each block; 5 new unit tests. Mixer acceptance: 7 of 8 pass; only "gain changes are smoothed" fails (task 3). "Output doesn't depend on block size" already passes, because the acceptance `perform()` splits blocks at each control's frame, so task 3 must keep it passing. `std::cos` passed function-effect analysis and rtsan. An invalid block (frames 0 or > kMaxBlockFrames, rate 0, or a bus whose channels both exist but one is shorter than `frames`) writes nothing and doesn't render the decks either, so they don't advance. For task 3: put the per-sample smoothing at the top of the frame loop in `process()`, before the deck sums, and replace `gains_ = targets()` with a local `const Gains target = targets();`.
 
 - [ ] 3. **Per-sample gain smoothing.** Replace the block-start jump with requirement 10:
   - a private `double smoothing_` and `std::uint32_t sample_rate_ = 0`; when the block's rate differs, `smoothing_ = -std::expm1(-1.0 / (std::chrono::duration<double>(kGainSmoothing).count() * rate))`, exactly as the acceptance smoothing test computes it (0.001 · 48000 = 48 either way);
