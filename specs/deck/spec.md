@@ -163,7 +163,7 @@ The deck (`deck_test.cpp`):
   (test: "Deck: rate changes are smoothed")
 - [ ] `[auto]` **The ends**, on a complete 48 kHz track of 1,000 frames:
   - playing from frame 900 at rate 1, the position is exactly 1,000 from frame 100 on, `playing()` becomes false, and the output is silent;
-  - playing in reverse from frame 100, the position is exactly 0 from frame 100 on, `playing()` becomes false, and the output fades on the held first sample: frame 100 + k is sample[0] × (240 − k) / 240, within 10⁻⁶;
+  - playing in reverse from frame 500, the position is exactly 0 from frame 500 on, `playing()` becomes false, and the output fades on the held first sample: frame 500 + k is sample[0] × (240 − k) / 240, within 10⁻⁶;
   - playing at the end stops at once, while reverse from the end plays;
   - a seek to frame 5,000 moves the position to 1,000.
 
