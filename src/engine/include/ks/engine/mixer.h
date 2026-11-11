@@ -158,10 +158,18 @@ private:
     /// The gains the controls in settings_ ask for.
     [[nodiscard]] Gains targets() const noexcept KS_NONBLOCKING;
 
+    /// Moves each gain one frame towards `target` (spec requirement 10).
+    void smooth_towards(const Gains& target) noexcept KS_NONBLOCKING;
+
     std::array<Deck, kDecks> decks_;
     MixerSettings settings_;
-    /// The gains in use. Set to their targets at the start of each block.
+    /// The gains in use, smoothed per sample towards targets() and carried
+    /// across blocks.
     Gains gains_;
+    /// The fraction of the remaining distance a gain moves each frame.
+    double smoothing_ = 0.0;
+    /// The sample rate smoothing_ was computed for; 0 before the first block.
+    std::uint32_t sample_rate_ = 0;
     std::array<DeckBuffer, kDecks> buffers_{};
 };
 

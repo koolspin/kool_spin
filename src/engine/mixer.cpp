@@ -2,15 +2,12 @@
 #include <ks/engine/mixer.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numbers>
 #include <span>
 
 namespace ks::engine {
-
-// The controls and mixing are implemented; gains still jump to their targets
-// at the start of each block instead of being smoothed per sample
-// (specs/mixer/plan.md, task 3).
 
 namespace {
 
@@ -40,6 +37,18 @@ double crossfader_gain(CrossfaderSide side, double position,
         return 1.0;
     }
     return 1.0;
+}
+
+/// How close a smoothed gain must be to its target to snap to it.
+constexpr double kSnap = 1e-6;
+
+/// Moves `gain` one frame towards `target`, snapping once within kSnap so a
+/// settled gain equals its target exactly.
+void smooth(double& gain, double target, double smoothing) noexcept KS_NONBLOCKING {
+    gain += (target - gain) * smoothing;
+    if (std::abs(gain - target) <= kSnap) {
+        gain = target;
+    }
 }
 
 /// The first `frames` samples of channels `first` and `first + 1`, or empty
@@ -95,6 +104,16 @@ Mixer::Gains Mixer::targets() const noexcept KS_NONBLOCKING {
     gains.headphone_cue = headphone * (1.0 - settings_.cue_mix);
     gains.headphone_main = headphone * settings_.cue_mix;
     return gains;
+}
+
+void Mixer::smooth_towards(const Gains& target) noexcept KS_NONBLOCKING {
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        smooth(std::span{gains_.channel}[i], std::span{target.channel}[i], smoothing_);
+        smooth(std::span{gains_.cue}[i], std::span{target.cue}[i], smoothing_);
+    }
+    smooth(gains_.main, target.main, smoothing_);
+    smooth(gains_.headphone_cue, target.headphone_cue, smoothing_);
+    smooth(gains_.headphone_main, target.headphone_main, smoothing_);
 }
 
 bool Mixer::valid(const BusMap& map) noexcept KS_NONBLOCKING {
@@ -202,11 +221,19 @@ void Mixer::process(const Block& block) noexcept KS_NONBLOCKING {
                                     std::span{buffer.right}.first(frames), block.sample_rate);
     }
 
-    gains_ = targets();
+    if (block.sample_rate != sample_rate_) {
+        sample_rate_ = block.sample_rate;
+        const double tau = std::chrono::duration<double>(kGainSmoothing).count();
+        smoothing_ = -std::expm1(-1.0 / (tau * static_cast<double>(sample_rate_)));
+    }
+
+    // Controls only change between blocks, so the targets hold for the block.
+    const Gains target = targets();
     const std::span<const double, kDecks> channel_gains{gains_.channel};
     const std::span<const double, kDecks> cue_gains{gains_.cue};
 
     for (std::size_t frame = 0; frame < frames; ++frame) {
+        smooth_towards(target);
         double main_left = 0.0;
         double main_right = 0.0;
         double cue_left = 0.0;

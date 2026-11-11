@@ -8,9 +8,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <span>
@@ -75,20 +77,82 @@ struct Rig {
 using Outputs = std::vector<std::vector<float>>;
 
 /// Renders `frames` frames of `channels` channels, prefilled with
-/// kSentinel, in blocks of 64.
-Outputs render(Mixer& mixer, std::size_t frames, std::size_t channels) {
+/// kSentinel, in blocks of `block_frames` at `rate`.
+Outputs render(Mixer& mixer, std::size_t frames, std::size_t channels,
+               std::size_t block_frames = 64, std::uint32_t rate = kRate) {
     Outputs out(channels, std::vector<float>(frames, kSentinel));
     std::vector<std::span<float>> views(channels);
     for (std::size_t done = 0; done < frames;) {
-        const std::size_t n = std::min<std::size_t>(64, frames - done);
+        const std::size_t n = std::min(block_frames, frames - done);
         for (std::size_t c = 0; c < channels; ++c) {
             views.at(c) = std::span{out.at(c)}.subspan(done, n);
         }
         mixer.process(Block{.channels = views,
                             .frames = n,
-                            .sample_rate = kRate,
+                            .sample_rate = rate,
                             .host_time = {},
                             .resumed = false});
+        done += n;
+    }
+    return out;
+}
+
+/// The smoothing coefficient at `rate`, as requirement 10 defines it.
+double smoothing_at(std::uint32_t rate) {
+    return -std::expm1(-1.0 / (0.001 * static_cast<double>(rate)));
+}
+
+/// One reference smoothing step, in double.
+double step_towards(double gain, double target, double smoothing) {
+    gain += (target - gain) * smoothing;
+    if (std::abs(gain - target) <= 1e-6) {
+        gain = target;
+    }
+    return gain;
+}
+
+/// The main bus's left sample with deck 0 at `gain` and the others at 1,
+/// summed in the mixer's order.
+double main_left_with(double gain) {
+    double sum = 0.0;
+    sum += gain * static_cast<double>(deck_value(0));
+    for (std::size_t i = 1; i < kDecks; ++i) {
+        sum += 1.0 * static_cast<double>(deck_value(i));
+    }
+    return sum;
+}
+
+/// A control applied before frame `frame` of a script.
+struct Event {
+    std::size_t frame;
+    std::function<void(Mixer&)> apply;
+};
+
+/// Plays all decks, then renders `frames` frames of 8 channels in blocks of
+/// at most `block_frames`, split at each event's frame.
+Outputs perform(std::size_t block_frames, std::size_t frames, const std::vector<Event>& events) {
+    Rig rig;
+    rig.play_all();
+    Outputs out(8, std::vector<float>(frames, kSentinel));
+    std::vector<std::span<float>> views(8);
+    std::size_t next = 0;
+    for (std::size_t done = 0; done < frames;) {
+        while (next < events.size() && events.at(next).frame <= done) {
+            events.at(next).apply(rig.mixer);
+            ++next;
+        }
+        std::size_t n = std::min(block_frames, frames - done);
+        if (next < events.size()) {
+            n = std::min(n, events.at(next).frame - done);
+        }
+        for (std::size_t c = 0; c < views.size(); ++c) {
+            views.at(c) = std::span{out.at(c)}.subspan(done, n);
+        }
+        rig.mixer.process(Block{.channels = views,
+                                .frames = n,
+                                .sample_rate = kRate,
+                                .host_time = {},
+                                .resumed = false});
         done += n;
     }
     return out;
@@ -172,20 +236,141 @@ TEST_CASE("Mixer: a main level of -inf silences main but not the headphones", "[
     rig.mixer.set_main_level(-kInfinity);
     rig.mixer.set_cue(0, true);
 
+    // The main level smooths down from its default of 0 dB, then is exactly
+    // 0 once it has settled.
+    const auto settled = [](const std::vector<float>& channel) {
+        return std::vector<float>(channel.begin() + (kSettle / 2), channel.end());
+    };
+
     SECTION("cue mix 0: the headphones carry the cued deck") {
         const Outputs out = render(rig.mixer, kSettle, 4);
-        REQUIRE(all_equal(out.at(0), 0.0F));
-        REQUIRE(all_equal(out.at(1), 0.0F));
+        REQUIRE(all_equal(settled(out.at(0)), 0.0F));
+        REQUIRE(all_equal(settled(out.at(1)), 0.0F));
         REQUIRE(near(out.at(2).back(), static_cast<double>(deck_value(0))));
         REQUIRE(near(out.at(3).back(), -static_cast<double>(deck_value(0))));
     }
     SECTION("cue mix 1: the headphones carry the main bus before the main level") {
         rig.mixer.set_cue_mix(1.0);
         const Outputs out = render(rig.mixer, kSettle, 4);
-        REQUIRE(all_equal(out.at(0), 0.0F));
+        REQUIRE(all_equal(settled(out.at(0)), 0.0F));
         REQUIRE(near(out.at(2).back(), 0.5));
         REQUIRE(near(out.at(3).back(), -0.5));
     }
+}
+
+TEST_CASE("Mixer: a fader move is smoothed per sample, whatever the block size", "[mixer]") {
+    for (const std::size_t block_frames : {std::size_t{1}, std::size_t{37}, std::size_t{64}}) {
+        CAPTURE(block_frames);
+        Rig rig;
+        rig.play_all();
+        static_cast<void>(render(rig.mixer, kSettle, 2, block_frames));
+
+        rig.mixer.set_fader(0, 0.5);
+        const Outputs out = render(rig.mixer, kSettle, 2, block_frames);
+
+        const double smoothing = smoothing_at(kRate);
+        double gain = 1.0;
+        for (std::size_t frame = 0; frame < kSettle; ++frame) {
+            gain = step_towards(gain, 0.25, smoothing);
+            CAPTURE(frame, gain);
+            REQUIRE(near(out.at(0).at(frame), main_left_with(gain)));
+        }
+        // Settled exactly on the target.
+        REQUIRE(gain == 0.25);
+        REQUIRE(out.at(0).back() == static_cast<float>(main_left_with(0.25)));
+    }
+}
+
+TEST_CASE("Mixer: a gain within 1e-6 of its target snaps to it", "[mixer]") {
+    // Deck 0 alone, so a gain difference near 1e-6 shows in a float sample.
+    Rig rig;
+    for (std::size_t i = 1; i < kDecks; ++i) {
+        rig.mixer.set_fader(i, 0.0);
+    }
+    rig.play_all();
+    static_cast<void>(render(rig.mixer, kSettle, 2));
+
+    // A trim whose gain is about 9e-7 below 1: the first step lands within
+    // 1e-6, so the very first frame uses the exact target.
+    const double db = 20.0 * std::log10(1.0 - 9e-7);
+    const double target = std::pow(10.0, db / 20.0);
+    const auto value = static_cast<double>(deck_value(0));
+    const auto snapped = static_cast<float>(target * value);
+    const double unsnapped = 1.0 + ((target - 1.0) * smoothing_at(kRate));
+    REQUIRE(static_cast<float>(unsnapped * value) != snapped);
+
+    rig.mixer.set_trim(0, db);
+    const Outputs out = render(rig.mixer, 4, 2);
+    for (const float sample : out.at(0)) {
+        REQUIRE(sample == snapped);
+    }
+}
+
+TEST_CASE("Mixer: a sample-rate change recomputes the smoothing and keeps the gains", "[mixer]") {
+    constexpr std::uint32_t kHigherRate = 96'000;
+    constexpr std::size_t kBefore = 10;
+    // The decks restart their play ramps at a new rate, all alike, so a
+    // reference rig without the fader move gives the decks' common level.
+    Rig rig;
+    Rig reference;
+    rig.play_all();
+    reference.play_all();
+    static_cast<void>(render(rig.mixer, kSettle, 2));
+    static_cast<void>(render(reference.mixer, kSettle, 2));
+
+    rig.mixer.set_fader(0, 0.0);
+    const Outputs before = render(rig.mixer, kBefore, 2);
+    const Outputs after = render(rig.mixer, 500, 2, 64, kHigherRate);
+    static_cast<void>(render(reference.mixer, kBefore, 2));
+    const Outputs level = render(reference.mixer, 500, 2, 64, kHigherRate);
+    const auto deck_level = [&level](std::size_t frame) {
+        return static_cast<double>(level.at(0).at(frame)) / main_left_with(1.0);
+    };
+
+    double gain = 1.0;
+    for (std::size_t frame = 0; frame < kBefore; ++frame) {
+        gain = step_towards(gain, 0.0, smoothing_at(kRate));
+        CAPTURE(frame, gain);
+        REQUIRE(near(before.at(0).at(frame), main_left_with(gain)));
+    }
+    // Had the coefficient not been recomputed, the first frame at the new
+    // rate would be here instead.
+    const double stale =
+        main_left_with(step_towards(gain, 0.0, smoothing_at(kRate))) * deck_level(0);
+    REQUIRE_FALSE(near(after.at(0).front(), stale));
+    for (std::size_t frame = 0; frame < after.at(0).size(); ++frame) {
+        gain = step_towards(gain, 0.0, smoothing_at(kHigherRate));
+        CAPTURE(frame, gain, deck_level(frame));
+        REQUIRE(near(after.at(0).at(frame), main_left_with(gain) * deck_level(frame)));
+    }
+}
+
+TEST_CASE("Mixer: a cue toggle and a bus map change keep block-size invariance", "[mixer]") {
+    const std::vector<Event> events{
+        {.frame = 100, .apply = [](Mixer& mixer) { mixer.set_cue(1, true); }},
+        {.frame = 100, .apply = [](Mixer& mixer) { mixer.set_cue_mix(0.3); }},
+        {.frame = 250,
+         .apply = [](Mixer& mixer) { mixer.set_bus_map(BusMap{.main = 4, .cue = 6}); }},
+        {.frame = 260, .apply = [](Mixer& mixer) { mixer.set_fader(2, 0.2); }},
+        {.frame = 400, .apply = [](Mixer& mixer) { mixer.set_cue(1, false); }},
+    };
+    constexpr std::size_t kFrames = 1'000;
+    const Outputs reference = perform(1, kFrames, events);
+    for (const std::size_t block_frames : {std::size_t{37}, std::size_t{64}}) {
+        const Outputs out = perform(block_frames, kFrames, events);
+        for (std::size_t c = 0; c < out.size(); ++c) {
+            for (std::size_t f = 0; f < kFrames; ++f) {
+                CAPTURE(block_frames, c, f);
+                REQUIRE(std::bit_cast<std::uint32_t>(out.at(c).at(f)) ==
+                        std::bit_cast<std::uint32_t>(reference.at(c).at(f)));
+            }
+        }
+    }
+    // The map change moved both buses at frame 250.
+    REQUIRE(reference.at(0).at(249) != kSentinel);
+    REQUIRE(reference.at(0).at(250) == kSentinel);
+    REQUIRE(reference.at(4).at(249) == kSentinel);
+    REQUIRE(reference.at(4).at(250) != kSentinel);
 }
 
 TEST_CASE("Mixer: the defaults are MixerSettings{}", "[mixer]") {
