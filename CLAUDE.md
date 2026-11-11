@@ -12,7 +12,7 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 ## Status
 
-Phase 0 is complete (2026-11-09). It delivered the build, the checks and guardrails, CI on Linux and macOS, and the build-loop workflow, proven on its first feature (`ks-tone` options). Still open: listening to `ks-tone` through JACK and on macOS.
+Phase 0 is complete (2026-11-09). It delivered the build, the checks and guardrails, CI on Linux and macOS, and the build-loop workflow, proven on its first feature (`ks-tone` options). Still open: listening to `ks-tone` through JACK.
 
 Next is Phase 1, the headless engine and process model. ADR 0003 splits it in two: Phase 1a builds the engine as a library in one process, and Phase 1b separates the processes and adds crash recovery. Phase 1a starts interactively with the shared-memory primitives; see `docs/roadmap.md`. Update this section as phases land.
 
