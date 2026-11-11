@@ -7,6 +7,7 @@
 
 #include <ks/core/realtime.h>
 #include <ks/engine/block.h>
+#include <ks/engine/safety.h>
 
 #include <atomic>
 #include <chrono>
@@ -50,12 +51,13 @@ enum class RenderResult : std::uint8_t {
 /// Renders blocks through a graph, for the active driver, one block at a time.
 ///
 /// Every driver calls try_render() for each block. The control thread chooses
-/// the active driver with activate(). The output safety stage (step 3) will
-/// run here, after the graph, so no driver can bypass it.
+/// the active driver with activate(). The output safety stage runs here,
+/// after the graph, so no driver can bypass it.
 class RenderCore {
 public:
-    /// The graph must outlive the core.
-    explicit RenderCore(Graph& graph) noexcept;
+    /// The graph must outlive the core. Production code uses the default
+    /// safety configuration.
+    explicit RenderCore(Graph& graph, const SafetyConfig& safety = {}) noexcept;
 
     RenderCore(const RenderCore&) = delete;
     RenderCore& operator=(const RenderCore&) = delete;
@@ -66,7 +68,8 @@ public:
     /// Renders `block` if it's valid, `driver` is the active driver, and no
     /// other driver is rendering: takes the render token, checks the driver,
     /// fills the block's channels with silence, runs the graph (with
-    /// Block::resumed set), counts the frames, and releases the token.
+    /// Block::resumed set) and the safety stage, counts the frames, and
+    /// releases the token. Denormals are flushed while it renders.
     RenderResult try_render(const Block& block,
                             DriverId driver = kDefaultDriver) noexcept KS_NONBLOCKING;
 
@@ -84,6 +87,25 @@ public:
     [[nodiscard]] std::chrono::steady_clock::time_point
     rendered_until() const noexcept KS_NONBLOCKING;
 
+    /// Mutes or unmutes the output, fading over the safety stage's fade time,
+    /// from the start of the next rendered block. Any thread may call it.
+    void set_muted(bool muted) noexcept KS_NONBLOCKING;
+
+    /// True when muted and the fade has reached silence by the end of the
+    /// last rendered block. Any thread may call it.
+    [[nodiscard]] bool silenced() const noexcept KS_NONBLOCKING;
+
+    /// NaN and infinite samples the safety stage has silenced. Any thread
+    /// may call it.
+    [[nodiscard]] std::uint64_t non_finite_samples() const noexcept KS_NONBLOCKING;
+
+    /// Frames in which the safety stage's limiter reduced the output. Any
+    /// thread may call it.
+    [[nodiscard]] std::uint64_t limited_frames() const noexcept KS_NONBLOCKING;
+
+    /// The safety stage's configuration. Any thread may call it.
+    [[nodiscard]] const SafetyConfig& safety_config() const noexcept KS_NONBLOCKING;
+
 private:
     Graph* graph_;
     /// True while a driver is rendering. Taken with acquire and released
@@ -97,6 +119,14 @@ private:
     DriverId last_driver_ = kDefaultDriver;
     /// Whether anything has rendered yet. Only the token's holder uses it.
     bool rendered_any_ = false;
+
+    /// Only the token's holder uses it.
+    SafetyStage safety_;
+    std::atomic<bool> muted_{false};
+    /// Published from safety_ after each rendered block.
+    std::atomic<bool> silenced_{false};
+    std::atomic<std::uint64_t> non_finite_samples_{0};
+    std::atomic<std::uint64_t> limited_frames_{0};
 };
 
 } // namespace ks::engine

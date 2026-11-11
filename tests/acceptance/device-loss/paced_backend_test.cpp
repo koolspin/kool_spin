@@ -7,6 +7,7 @@
 #include <ks/engine/audio_backend.h>
 #include <ks/engine/block.h>
 #include <ks/engine/render_core.h>
+#include <ks/engine/safety.h>
 
 #include "test_support.h"
 #include <catch2/catch_test_macros.hpp>
@@ -66,6 +67,11 @@ bool stays_still(const RenderCore& core, milliseconds period) {
     return core.frames_rendered() == before;
 }
 
+/// Passes in-range samples through unchanged, so the samples can be checked
+/// exactly. The safety stage still runs (specs/safety-stage/spec.md, req. 18).
+const ks::engine::SafetyConfig kTransparent{.fade = std::chrono::milliseconds{0},
+                                            .ceiling_dbfs = 0.0};
+
 } // namespace
 
 TEST_CASE("Paced: renders in real time", "[paced]") {
@@ -120,7 +126,7 @@ TEST_CASE("Paced: records what it plays", "[paced]") {
     constexpr std::size_t kRecorded = 4800;
     constexpr std::size_t kChannels = 2;
     RecordingGraph graph{0};
-    RenderCore core{graph};
+    RenderCore core{graph, kTransparent};
     const Opened opened = open_paced(core, PacedConfig{
                                                .sample_rate = kRate,
                                                .channels = kChannels,

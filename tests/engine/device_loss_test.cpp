@@ -172,6 +172,41 @@ TEST_CASE("A device that won't start leaves the controller freewheeling", "[engi
     REQUIRE(core.frames_rendered() > 0);
 }
 
+TEST_CASE("Stopping while freewheeling fades out first", "[engine][output]") {
+    NullGraph graph;
+    RenderCore core{graph};
+    ScriptedSource source;
+    OutputController controller{core, source, kQuickRetries};
+
+    controller.start();
+    REQUIRE(controller.state() == OutputState::Freewheeling);
+    std::this_thread::sleep_for(milliseconds{20});
+    const std::uint64_t before = core.frames_rendered();
+    controller.stop();
+    REQUIRE(core.silenced());
+    // The default 10 ms fade at the freewheel driver's 48 kHz.
+    REQUIRE(core.frames_rendered() - before >= 480);
+}
+
+TEST_CASE("Stopping gives up on the fade out if nothing renders it", "[engine][output]") {
+    NullGraph graph;
+    RenderCore core{graph};
+    ScriptedSource source;
+    source.next = ScriptedSource::Next::Silent;
+    OutputController controller{core, source, kQuickRetries};
+
+    controller.start();
+    REQUIRE(controller.state() == OutputState::Playing);
+    const Clock::time_point before = Clock::now();
+    controller.stop();
+    const Clock::duration took = Clock::now() - before;
+    REQUIRE(controller.state() == OutputState::Stopped);
+    REQUIRE_FALSE(core.silenced());
+    // The fade time, 10 ms, plus 100 ms, and not much more.
+    REQUIRE(took >= milliseconds{110});
+    REQUIRE(took < milliseconds{1000});
+}
+
 TEST_CASE("A paced backend opened on an unplugged device never renders", "[engine][paced]") {
     NullGraph graph;
     RenderCore core{graph};

@@ -4,9 +4,20 @@
 #include <ks/engine/paced_backend.h>
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <utility>
 
 namespace ks::engine {
+
+namespace {
+
+/// How long stop() waits for the fade out beyond the fade time.
+constexpr std::chrono::milliseconds kFadeOutMargin{100};
+/// How often stop() checks whether the fade out has finished.
+constexpr std::chrono::milliseconds kFadeOutPoll{1};
+
+} // namespace
 
 OutputController::OutputController(RenderCore& core, DeviceSource& source,
                                    const OutputConfig& config) noexcept
@@ -20,6 +31,7 @@ void OutputController::start() {
     if (state_ != OutputState::Stopped) {
         return;
     }
+    core_->set_muted(false);
     const Clock::time_point now = Clock::now();
     const DriverId driver = next_driver();
     if (std::unique_ptr<AudioBackend> device = open_device(driver)) {
@@ -92,6 +104,15 @@ void OutputController::poll() {
 }
 
 void OutputController::stop() {
+    core_->set_muted(true);
+    // Let the fade out finish, if anything is rendering it.
+    if (freewheel_ || device_) {
+        const Clock::time_point deadline =
+            Clock::now() + core_->safety_config().fade + kFadeOutMargin;
+        while (!core_->silenced() && Clock::now() < deadline) {
+            std::this_thread::sleep_for(kFadeOutPoll);
+        }
+    }
     close(freewheel_);
     close(device_);
     state_ = OutputState::Stopped;

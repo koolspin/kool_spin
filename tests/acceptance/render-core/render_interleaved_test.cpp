@@ -5,6 +5,7 @@
 #include <ks/engine/block.h>
 #include <ks/engine/interleave.h>
 #include <ks/engine/render_core.h>
+#include <ks/engine/safety.h>
 
 #include "test_support.h"
 #include <catch2/catch_test_macros.hpp>
@@ -31,6 +32,11 @@ using ks::engine::test::SignalGraph;
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
+/// Passes in-range samples through unchanged, so the samples can be checked
+/// exactly. The safety stage still runs (specs/safety-stage/spec.md, req. 18).
+const ks::engine::SafetyConfig kTransparent{.fade = std::chrono::milliseconds{0},
+                                            .ceiling_dbfs = 0.0};
+
 } // namespace
 
 TEST_CASE("Device render: blocks, host times, and interleaving", "[device-render]") {
@@ -40,7 +46,7 @@ TEST_CASE("Device render: blocks, host times, and interleaving", "[device-render
     const TimePoint host_time{std::chrono::seconds{50}};
 
     SignalGraph graph{100};
-    RenderCore core{graph};
+    RenderCore core{graph, kTransparent};
     // More scratch buffers than channels: the first kChannels are used.
     const Planar scratch{kMaxOutputChannels, kMaxBlockFrames, 0.0F};
     std::vector<float> interleaved(kFrames * kChannels, 5.0F);

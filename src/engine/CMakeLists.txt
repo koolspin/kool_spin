@@ -8,7 +8,8 @@ add_library(ks_engine STATIC
     offline.cpp
     output_controller.cpp
     paced_backend.cpp
-    render_core.cpp)
+    render_core.cpp
+    safety.cpp)
 add_library(ks::engine ALIAS ks_engine)
 
 target_sources(ks_engine PUBLIC
@@ -22,7 +23,8 @@ target_sources(ks_engine PUBLIC
         include/ks/engine/offline.h
         include/ks/engine/output_controller.h
         include/ks/engine/paced_backend.h
-        include/ks/engine/render_core.h)
+        include/ks/engine/render_core.h
+        include/ks/engine/safety.h)
 
 target_link_libraries(ks_engine
     PUBLIC ks::core
