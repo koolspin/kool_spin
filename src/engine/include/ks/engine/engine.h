@@ -146,20 +146,52 @@ private:
         ClientStats stats;
     };
 
-    /// A release waiting to be pushed to the retire ring. `ring` is set for a
-    /// detached client's ring.
+    /// A release waiting to be pushed to the retire ring: a detached client's
+    /// ring if `ring` is set, and otherwise reference slot `reference`.
     struct PendingRelease {
         ipc::CommandRing* ring = nullptr;
+        std::size_t reference = 0;
     };
 
-    /// Room for every reference slot (4 per deck) and every client ring, each
-    /// queued at most once.
-    static constexpr std::size_t kMaxPendingReleases = (kDecks * 4) + kMaxClients;
+    /// One reference to a track that a deck was given (requirement 11).
+    struct Reference {
+        enum class State : std::uint8_t {
+            Free,
+            /// The deck may hold the track.
+            Live,
+            /// The deck no longer holds the track; the release is queued.
+            LettingGo,
+        };
 
-    void apply_handover(const Handover& handover) noexcept KS_NONBLOCKING;
+        const Track* track = nullptr;
+        /// Duplicate references to the same track, waiting to be released.
+        std::uint64_t owed = 0;
+        State state = State::Free;
+        /// The slot is in the release queue.
+        bool queued = false;
+    };
+
+    /// Room for 4 references per deck (requirement 11).
+    static constexpr std::size_t kReferencesPerDeck = 4;
+    static constexpr std::size_t kReferences = kDecks * kReferencesPerDeck;
+
+    /// Room for every reference slot and every client ring, each queued at
+    /// most once.
+    static constexpr std::size_t kMaxPendingReleases = kReferences + kMaxClients;
+
+    /// Applies one handover. Returns false if it has to wait: a load for a
+    /// deck with no free reference slot.
+    [[nodiscard]] bool apply_handover(const Handover& handover) noexcept KS_NONBLOCKING;
+    [[nodiscard]] bool apply_load(std::size_t deck, const Track& track) noexcept KS_NONBLOCKING;
     void read_commands() noexcept KS_NONBLOCKING;
     void queue_release(const PendingRelease& release) noexcept KS_NONBLOCKING;
+    void queue_reference(std::size_t reference) noexcept KS_NONBLOCKING;
+    /// Queues the release of every live reference its deck no longer holds,
+    /// then pushes queued releases until the retire ring is full.
     void push_releases() noexcept KS_NONBLOCKING;
+    /// Pushes one pending release, as far as the retire ring has room.
+    /// Returns false if part of it is still waiting.
+    [[nodiscard]] bool drain(const PendingRelease& release) noexcept KS_NONBLOCKING;
     /// Pushes `handover` to the give ring. Control thread only.
     [[nodiscard]] bool give(const Handover& handover) noexcept;
 
@@ -179,6 +211,11 @@ private:
     ipc::RingConsumer<Handover, kHandoverCapacity> give_consumer_{give_ring_};
     ipc::RingProducer<Released, kHandoverCapacity> retire_producer_{retire_ring_};
     std::array<AudioClient, kMaxClients> audio_clients_{};
+    /// Deck d's reference slots are kReferencesPerDeck * d onwards.
+    std::array<Reference, kReferences> references_{};
+    /// A load that has to wait for a free reference slot; it's applied before
+    /// anything else is taken from the give ring.
+    std::optional<Handover> stalled_;
     /// A FIFO of releases waiting for room in the retire ring.
     std::array<PendingRelease, kMaxPendingReleases> pending_{};
     std::size_t pending_first_ = 0;

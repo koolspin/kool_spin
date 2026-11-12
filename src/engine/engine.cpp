@@ -10,21 +10,21 @@ Engine::Engine(const BusMap& map) : mixer_{interpolator_, map} {}
 
 // ---- The control thread --------------------------------------------------------
 
-// Stubs: loads and unloads come in the next task (specs/commands/plan.md,
-// task 4).
-
-// NOLINTBEGIN(readability-convert-member-functions-to-static): stubs; the
-// implementation uses the engine's members.
-
-bool Engine::load(std::size_t /*deck*/, const Track& /*track*/) noexcept {
-    return false;
+bool Engine::load(std::size_t deck, const Track& track) noexcept {
+    if (deck >= kDecks) {
+        return false;
+    }
+    return give(
+        Handover{.kind = Handover::Kind::Load, .index = deck, .track = &track, .ring = nullptr});
 }
 
-bool Engine::unload(std::size_t /*deck*/) noexcept {
-    return false;
+bool Engine::unload(std::size_t deck) noexcept {
+    if (deck >= kDecks) {
+        return false;
+    }
+    return give(
+        Handover{.kind = Handover::Kind::Unload, .index = deck, .track = nullptr, .ring = nullptr});
 }
-
-// NOLINTEND(readability-convert-member-functions-to-static)
 
 std::optional<std::size_t> Engine::attach(ipc::CommandRing& ring) noexcept {
     for (std::size_t i = 0; i < kMaxClients; ++i) {
@@ -83,37 +83,83 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     if (block.frames == 0 || block.frames > kMaxBlockFrames || block.sample_rate == 0) {
         return;
     }
-    while (const std::optional<Handover> handover = give_consumer_.try_pop()) {
-        apply_handover(*handover);
+    // A stalled load goes first, and while it waits nothing behind it applies
+    // (requirement 13).
+    if (!stalled_.has_value() || apply_handover(*stalled_)) {
+        stalled_.reset();
+        while (const std::optional<Handover> handover = give_consumer_.try_pop()) {
+            if (!apply_handover(*handover)) {
+                stalled_ = *handover;
+                break;
+            }
+        }
     }
     read_commands();
     mixer_.process(block);
     push_releases();
 }
 
-void Engine::apply_handover(const Handover& handover) noexcept KS_NONBLOCKING {
-    // The control thread only gives client slots below kMaxClients, but the
-    // give ring is checked like any other ring.
+bool Engine::apply_handover(const Handover& handover) noexcept KS_NONBLOCKING {
+    // The control thread only gives valid indices, but the give ring is
+    // checked like any other ring.
+    switch (handover.kind) {
+    case Handover::Kind::Load:
+        if (handover.index >= kDecks || handover.track == nullptr) {
+            return true;
+        }
+        return apply_load(handover.index, *handover.track);
+    case Handover::Kind::Unload:
+        if (handover.index < kDecks) {
+            // The let-go check in push_releases() releases its references.
+            mixer_.deck(handover.index).unload();
+        }
+        return true;
+    case Handover::Kind::Attach:
+    case Handover::Kind::Detach:
+        break;
+    }
     if (handover.index >= kMaxClients) {
-        return;
+        return true;
     }
     AudioClient& client = std::span{audio_clients_}[handover.index];
-    switch (handover.kind) {
-    case Handover::Kind::Attach:
+    if (handover.kind == Handover::Kind::Attach) {
         if (handover.ring != nullptr) {
             client.consumer.emplace(*handover.ring);
             client.stats = ClientStats{.attached = true};
         }
-        return;
-    case Handover::Kind::Detach:
-        client.consumer.reset();
-        client.stats.attached = false;
-        queue_release(PendingRelease{.ring = handover.ring});
-        return;
-    case Handover::Kind::Load:
-    case Handover::Kind::Unload:
-        return;
+        return true;
     }
+    client.consumer.reset();
+    client.stats.attached = false;
+    queue_release(PendingRelease{.ring = handover.ring, .reference = 0});
+    return true;
+}
+
+bool Engine::apply_load(std::size_t deck, const Track& track) noexcept KS_NONBLOCKING {
+    const std::size_t first = deck * kReferencesPerDeck;
+    const std::span<Reference> slots = std::span{references_}.subspan(first, kReferencesPerDeck);
+    // A duplicate of a live reference: the older one is released in this
+    // block's releases, and the newer one takes its place (requirement 11).
+    // A reference that's letting go is already committed to its release.
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        Reference& slot = slots[i];
+        if (slot.state == Reference::State::Live && slot.track == &track) {
+            ++slot.owed;
+            queue_reference(first + i);
+            static_cast<void>(mixer_.deck(deck).load(track));
+            return true;
+        }
+    }
+    for (Reference& slot : slots) {
+        if (slot.state == Reference::State::Free) {
+            slot = Reference{
+                .track = &track, .owed = 0, .state = Reference::State::Live, .queued = false};
+            // A refused load is released by the let-go check, in this block.
+            static_cast<void>(mixer_.deck(deck).load(track));
+            return true;
+        }
+    }
+    return false;
 }
 
 void Engine::read_commands() noexcept KS_NONBLOCKING {
@@ -153,15 +199,56 @@ void Engine::queue_release(const PendingRelease& release) noexcept KS_NONBLOCKIN
     ++pending_count_;
 }
 
+void Engine::queue_reference(std::size_t reference) noexcept KS_NONBLOCKING {
+    Reference& slot = std::span{references_}[reference];
+    if (!slot.queued) {
+        slot.queued = true;
+        queue_release(PendingRelease{.ring = nullptr, .reference = reference});
+    }
+}
+
 void Engine::push_releases() noexcept KS_NONBLOCKING {
+    // This covers refused loads, waiting loads that a later load replaced,
+    // finished fades, and unloads (requirement 11).
+    for (std::size_t i = 0; i < references_.size(); ++i) {
+        Reference& slot = std::span{references_}[i];
+        if (slot.state == Reference::State::Live &&
+            !mixer_.deck(i / kReferencesPerDeck).holds(*slot.track)) {
+            slot.state = Reference::State::LettingGo;
+            queue_reference(i);
+        }
+    }
     while (pending_count_ > 0) {
-        const PendingRelease& release = std::span{pending_}[pending_first_];
-        if (!retire_producer_.try_push(Released{.track = nullptr, .ring = release.ring})) {
+        if (!drain(std::span{pending_}[pending_first_])) {
             return;
         }
         pending_first_ = (pending_first_ + 1) % pending_.size();
         --pending_count_;
     }
+}
+
+bool Engine::drain(const PendingRelease& release) noexcept KS_NONBLOCKING {
+    if (release.ring != nullptr) {
+        return retire_producer_.try_push(Released{.track = nullptr, .ring = release.ring});
+    }
+    Reference& slot = std::span{references_}[release.reference];
+    const Released reference{.track = slot.track, .ring = nullptr};
+    // Duplicates first, then the slot's own reference once its deck has let
+    // go. A partly drained slot keeps its place at the front of the queue.
+    for (; slot.owed > 0; --slot.owed) {
+        if (!retire_producer_.try_push(reference)) {
+            return false;
+        }
+    }
+    if (slot.state == Reference::State::LettingGo) {
+        if (!retire_producer_.try_push(reference)) {
+            return false;
+        }
+        slot = Reference{};
+        return true;
+    }
+    slot.queued = false;
+    return true;
 }
 
 const Mixer& Engine::mixer() const noexcept KS_NONBLOCKING {

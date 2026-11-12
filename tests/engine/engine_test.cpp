@@ -26,6 +26,7 @@ using ks::engine::Engine;
 using ks::engine::kMaxBlockFrames;
 using ks::engine::kMaxClients;
 using ks::engine::Released;
+using ks::engine::Track;
 using ks::ipc::CommandRing;
 using ks::ipc::CommandSlot;
 using ks::ipc::CommandType;
@@ -63,7 +64,91 @@ struct Ring {
     ks::ipc::RingProducer<CommandSlot, ks::ipc::kCommandRingCapacity> producer{*ring};
 };
 
+/// A silent stereo track that owns its samples.
+struct TestTrack {
+    explicit TestTrack(std::uint32_t rate = kRate) : track{samples, rate} {}
+
+    std::vector<float> samples = std::vector<float>(std::size_t{2} * 4'800, 0.0F);
+    Track track;
+};
+
+/// The track the next release points to, or null if there's none.
+const Track* collect_track(Engine& engine) {
+    return engine.collect().value_or(Released{}).track;
+}
+
 } // namespace
+
+TEST_CASE("Engine: a duplicate load releases the older reference at once", "[engine]") {
+    auto engine = std::make_unique<Engine>();
+    const TestTrack first;
+    REQUIRE(engine->load(0, first.track));
+    REQUIRE(engine->load(0, first.track));
+    render_block(*engine);
+    REQUIRE(collect_track(*engine) == &first.track);
+    REQUIRE_FALSE(engine->collect().has_value());
+    REQUIRE(engine->mixer().deck(0).track() == &first.track);
+
+    REQUIRE(engine->unload(0));
+    REQUIRE_FALSE(engine->load(ks::engine::kDecks, first.track));
+    REQUIRE_FALSE(engine->unload(ks::engine::kDecks));
+    render_block(*engine);
+    REQUIRE(collect_track(*engine) == &first.track);
+    REQUIRE_FALSE(engine->collect().has_value());
+}
+
+TEST_CASE("Engine: a refused load is released in the same block", "[engine]") {
+    auto engine = std::make_unique<Engine>();
+    const TestTrack refused{1'000};
+    REQUIRE(engine->load(0, refused.track));
+    render_block(*engine);
+    REQUIRE(collect_track(*engine) == &refused.track);
+    REQUIRE_FALSE(engine->collect().has_value());
+    REQUIRE(engine->mixer().deck(0).track() == nullptr);
+}
+
+TEST_CASE("Engine: a deck with no room makes loads wait, in order", "[engine]") {
+    auto engine = std::make_unique<Engine>();
+    // Fill the retire ring with duplicate releases from deck 1.
+    const TestTrack filler;
+    for (std::size_t i = 0; i < ks::engine::kHandoverCapacity; ++i) {
+        REQUIRE(engine->load(1, filler.track));
+    }
+    render_block(*engine);
+    REQUIRE(engine->load(1, filler.track));
+    render_block(*engine);
+
+    // Deck 0 takes four references; the fifth distinct track waits, and so
+    // does everything given after it.
+    const std::array<TestTrack, 6> tracks;
+    for (const TestTrack& track : tracks) {
+        REQUIRE(engine->load(0, track.track));
+    }
+    render_block(*engine);
+    render_block(*engine);
+    REQUIRE(engine->mixer().deck(0).track() == &tracks.at(3).track);
+
+    for (std::size_t i = 0; i < ks::engine::kHandoverCapacity; ++i) {
+        REQUIRE(collect_track(*engine) == &filler.track);
+    }
+    REQUIRE_FALSE(engine->collect().has_value());
+    // The first three releases free their slots after this block's handovers.
+    render_block(*engine);
+    for (std::size_t i = 0; i < 3; ++i) {
+        REQUIRE(collect_track(*engine) == &tracks.at(i).track);
+    }
+    REQUIRE_FALSE(engine->collect().has_value());
+    REQUIRE(engine->mixer().deck(0).track() == &tracks.at(3).track);
+
+    // The fourth and fifth let go in the same block, released in slot order.
+    render_block(*engine);
+    const Track* const one = collect_track(*engine);
+    const Track* const two = collect_track(*engine);
+    REQUIRE(((one == &tracks.at(3).track && two == &tracks.at(4).track) ||
+             (one == &tracks.at(4).track && two == &tracks.at(3).track)));
+    REQUIRE_FALSE(engine->collect().has_value());
+    REQUIRE(engine->mixer().deck(0).track() == &tracks.at(5).track);
+}
 
 TEST_CASE("Engine: an invalid block does nothing at all", "[engine]") {
     auto engine = std::make_unique<Engine>();
