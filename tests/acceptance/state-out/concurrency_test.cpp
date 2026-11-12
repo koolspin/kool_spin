@@ -63,8 +63,8 @@ void read_until(ks::ipc::EngineState& state, const std::atomic<bool>& done, Seen
         if (const std::optional<DeckState> d = deck.try_read()) {
             ++seen.reads;
             // Playing at rate 1.0 from the first block, then held at the end.
-            const double expected = static_cast<double>(
-                std::min(kBlock * d->heartbeat, static_cast<std::size_t>(kTrackFrames)));
+            const double expected =
+                static_cast<double>(std::min<std::uint64_t>(kBlock * d->heartbeat, kTrackFrames));
             if (real(d->position) != expected) {
                 ++seen.inconsistent;
             }
