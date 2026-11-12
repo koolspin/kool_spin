@@ -75,6 +75,25 @@ private:
     std::size_t count_ = 0;
 };
 
+/// Counts calls to rendered(), and keeps the last stats it got.
+class HookGraph final : public Graph {
+public:
+    void process(const Block& /*block*/) noexcept KS_NONBLOCKING override {}
+
+    void rendered(const Block& /*block*/,
+                  const ks::engine::RenderStats& stats) noexcept KS_NONBLOCKING override {
+        ++hooks_;
+        last_ = stats;
+    }
+
+    [[nodiscard]] std::size_t hooks() const noexcept { return hooks_; }
+    [[nodiscard]] const ks::engine::RenderStats& last() const noexcept { return last_; }
+
+private:
+    std::size_t hooks_ = 0;
+    ks::engine::RenderStats last_;
+};
+
 /// While rendering, renders a whole device callback through the same core,
 /// as a second driver would if its callback arrived mid-render.
 class NestedDeviceGraph final : public Graph {
@@ -178,6 +197,60 @@ TEST_CASE("A device callback's output latency reaches every block it splits into
     RenderCore default_core{defaulted};
     REQUIRE(render_interleaved(default_core, scratch, device, 1, 48'000, {}) == device.size());
     REQUIRE(defaulted.latencies() == std::vector<std::chrono::nanoseconds>(4));
+}
+
+TEST_CASE("The rendered hook skips skipped and rejected blocks", "[engine]") {
+    HookGraph graph;
+    RenderCore core{graph};
+    std::vector<float> samples(64);
+    const std::array<std::span<float>, 1> channels{std::span{samples}};
+    const Block block{.channels = channels, .frames = 64, .sample_rate = 48'000, .host_time = {}};
+
+    // Rejected: no frames.
+    Block empty = block;
+    empty.frames = 0;
+    REQUIRE(core.try_render(empty) == ks::engine::RenderResult::Rejected);
+    // Skipped: another driver is active.
+    REQUIRE(core.try_render(block, ks::engine::DriverId{1}) == ks::engine::RenderResult::Skipped);
+    REQUIRE(graph.hooks() == 0);
+    REQUIRE(core.blocks_rendered() == 0);
+
+    REQUIRE(core.try_render(block) == ks::engine::RenderResult::Rendered);
+    REQUIRE(core.try_render(block, ks::engine::DriverId{1}) == ks::engine::RenderResult::Skipped);
+    REQUIRE(core.try_render(block) == ks::engine::RenderResult::Rendered);
+    REQUIRE(graph.hooks() == 2);
+    REQUIRE(core.blocks_rendered() == 2);
+    REQUIRE(graph.last().blocks_rendered == 2);
+    REQUIRE(graph.last().frames_rendered == 128);
+    REQUIRE(graph.last().render_time == core.render_time());
+    REQUIRE(graph.last().render_load == core.render_load());
+    REQUIRE(graph.last().peak_render_load == core.peak_render_load());
+}
+
+TEST_CASE("Render timing reads 0 before the first block", "[engine]") {
+    HookGraph graph;
+    const RenderCore core{graph};
+    REQUIRE(core.blocks_rendered() == 0);
+    REQUIRE(core.late_blocks() == 0);
+    REQUIRE(core.render_time() == std::chrono::nanoseconds{0});
+    REQUIRE(core.render_load() == 0.0);
+    REQUIRE(core.peak_render_load() == 0.0);
+}
+
+TEST_CASE("The core keeps its mute and output state", "[engine]") {
+    HookGraph graph;
+    RenderCore core{graph};
+    REQUIRE_FALSE(core.muted());
+    core.set_muted(true);
+    REQUIRE(core.muted());
+    core.set_muted(false);
+    REQUIRE_FALSE(core.muted());
+
+    REQUIRE(core.output_state() == ks::engine::OutputState::Stopped);
+    core.set_output_state(ks::engine::OutputState::Freewheeling);
+    REQUIRE(core.output_state() == ks::engine::OutputState::Freewheeling);
+    core.set_output_state(ks::engine::OutputState::Stopped);
+    REQUIRE(core.output_state() == ks::engine::OutputState::Stopped);
 }
 
 TEST_CASE("Interleaving no channels succeeds and writes nothing", "[engine]") {

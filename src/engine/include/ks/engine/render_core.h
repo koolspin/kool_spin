@@ -195,6 +195,18 @@ private:
     std::atomic<bool> silenced_{false};
     std::atomic<std::uint64_t> non_finite_samples_{0};
     std::atomic<std::uint64_t> limited_frames_{0};
+
+    // Render timing. Only the token's holder writes these.
+    std::atomic<std::uint64_t> blocks_rendered_{0};
+    std::atomic<std::uint64_t> late_blocks_{0};
+    /// render_time(), in nanoseconds.
+    std::atomic<std::int64_t> render_time_ns_{0};
+    /// render_load() and peak_render_load(), as a double's bit pattern, so
+    /// they're lock-free on every platform.
+    std::atomic<std::uint64_t> render_load_bits_{0};
+    std::atomic<std::uint64_t> peak_render_load_bits_{0};
+
+    std::atomic<OutputState> output_state_{OutputState::Stopped};
 };
 
 } // namespace ks::engine
