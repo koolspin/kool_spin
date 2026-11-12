@@ -1,0 +1,65 @@
+# Plan: state-out
+
+Written by the planning pass from `spec.md`. Each build pass takes the first unchecked task, ticks it when every check passes, and adds a note beneath it. A failed attempt is recorded as a note; three failed attempts on one task mean the loop writes `BLOCKED.md`.
+
+**Files involved:**
+- Edit (the stubs): `src/engine/track.cpp`, `src/engine/interleave.cpp`, `src/engine/render_core.cpp`, `src/engine/output_controller.cpp`, `src/engine/engine.cpp`. In the headers `track.h`, `render_core.h`, `output_controller.h`, and `engine.h`, add **private members and private helpers only**: the public API must not change (spec, "The API exists before the code").
+- Edit (not protected): `tests/engine/render_core_test.cpp`, `tests/engine/engine_test.cpp`, `tests/engine/device_loss_test.cpp` for unit tests; `tests/CMakeLists.txt` only if a new unit-test file is added to `ks_engine_tests`.
+- Don't change: `src/ipc/include/ks/ipc/state.h`. It isn't protected, but it's complete, and it's a layout.
+- Read, don't edit (protected): `tests/acceptance/state-out/` (`layout_test.cpp`, `render_core_test.cpp`, `engine_state_test.cpp`, `concurrency_test.cpp`, `realtime_test.cpp`, `test_support.h`).
+- Useful references: `SeqlockWriter`/`SeqlockReader` in `<ks/ipc/seqlock.h>` (the writer isn't default-constructible; construct it once, from the control thread, in the engine's constructor), `ks::core::monotonic_now()` in `<ks/core/clock.h>`, `frames_to_duration()` in `<ks/engine/block.h>`, `Deck::track()/playing()/waiting()/position()/rate()/cue()` in `deck.h`, `Track::capacity()/ready()/sample_rate()`, `Mixer::settings()` (`MixerSettings`, `ChannelSettings`, `CrossfaderSide`, `BusMap`), `Engine::client_stats()` (`ClientStats`, `Rejection`), and `specs/commands/plan.md` for how the last loop worked.
+
+**State before the loop:** the stubs compile. Of the 15 state-out acceptance tests, only "State: the layout" passes (per the commit that added them); everything else passes.
+
+## Tasks
+
+- [ ] 1. **Track IDs and output latency.** Requirements 9 to 11.
+  - `Track`: a private `std::uint64_t id_` set by the constructor; `id()` returns it. Remove the stub comment and `NOLINTNEXTLINE`.
+  - `render_interleaved()`: set `output_latency` on every block it builds. Remove the stub comment. Check that the paced, offline (freewheel), and miniaudio drivers still call it without a latency, so they pass 0 (they need no change if they rely on the default).
+
+  Unit tests: one in `render_core_test.cpp` (or wherever `render_interleaved()` is already tested) with a recording graph: a latency given reaches every block across several `kMaxBlockFrames` splits. (passes: "Track: an ID", "Render interleaved: the output latency reaches every block")
+
+- [ ] 2. **The render core: timing, mute, output state, and the rendered hook.** Requirements 12 to 15, in `render_core.cpp` and private members of `render_core.h`:
+  - new atomics, written only by the token's holder (relaxed, like `frames_rendered_`): `blocks_rendered_`, `late_blocks_`, `render_time_ns_` (`std::int64_t`), `render_load_bits_` and `peak_render_load_bits_` (a double's bit pattern in a `std::atomic<std::uint64_t>`, see Decisions); and `output_state_` (`std::atomic<OutputState>`, `Stopped`), stored and loaded by `set_output_state()`/`output_state()` from any thread;
+  - in `try_render()`: `const auto start = ks::core::monotonic_now();` right after the driver check passes (before `silence()`); `const auto end = monotonic_now();` right after `safety_.process()`. Render time = `end - start` in nanoseconds; duration = `frames_to_duration(block.frames, block.sample_rate)`; load = `render_time / duration` as doubles; late if `render_time > duration`; peak = max. Update every count (the existing ones and the new ones, `silenced_` still last among the stores), then build a `RenderStats` from the same values the accessors return (`muted` is the block's snapshot, `silenced` is `muted && safety_.silenced()`, `output_state` is a load of `output_state_`), call `graph_->rendered(rendered, stats)` with the `Block` the graph processed (with `resumed` set), and only then release the token. Skipped and rejected blocks return before any of this;
+  - `muted()` loads `muted_`;
+  - remove the stubs comment block and its `NOLINTBEGIN`/`NOLINTEND`.
+
+  Unit tests in `tests/engine/render_core_test.cpp`: the hook isn't called for skipped or rejected blocks; `blocks_rendered()` counts rendered blocks only; `render_time()`, `render_load()`, `peak_render_load()` are 0 before the first block; `muted()` follows `set_muted()`; `output_state()` is `Stopped` until set. (passes: "Render core: the graph hears about each rendered block", "Render core: load and late blocks"; advances: "State out is real-time safe")
+
+- [ ] 3. **The output controller sets the core's output state.** Requirement 14, in `output_controller.cpp`: a private helper (for example `set_state(OutputState)`) that assigns `state_` and calls `core_->set_output_state()`, used at every place `state_` changes today (start → Playing or Freewheeling, the Playing → Freewheeling, Freewheeling → Attaching, Attaching → Playing/Freewheeling transitions, and stop → Stopped). Check with `grep -n "state_ =" src/engine/output_controller.cpp` that none is left. `OutputState` already lives in `render_core.h`; check that `output_controller.h` includes it.
+
+  Unit test in `tests/engine/device_loss_test.cpp`: after `start()`, `poll()` through an unplug and a return, and `stop()`, `core.output_state() == controller.state()`. (passes: "Render core: the output state follows the controller")
+
+- [ ] 4. **The engine publishes its decks, mixer, and status.** Requirements 16 to 18, in `engine.cpp` and private members of `engine.h`:
+  - members: `std::array<std::optional<ipc::SeqlockWriter<ipc::DeckState>>, kDecks> deck_writers_`, `std::optional<ipc::SeqlockWriter<ipc::MixerState>> mixer_writer_`, `std::optional<ipc::SeqlockWriter<ipc::EngineStatus>> status_writer_`. The new constructor delegates to `Engine{map}` and then emplaces each writer on `state.decks[i]`, `state.mixer`, `state.status`. An engine built without a state block has none and publishes nothing. Constructing them is the only read of the state block (requirement 16);
+  - private encoding helpers in an anonymous namespace in `engine.cpp`: a real is `std::bit_cast<std::uint64_t>(double)`; a host time is `std::bit_cast<std::uint64_t>(std::int64_t ns since epoch)` (`duration_cast<nanoseconds>(tp.time_since_epoch()).count()`); a duration is `ns.count()` as `std::uint64_t`; a side is the `CrossfaderSide` value (A 0, B 1, Thru 2); a bool is 0/1; an output state is the `OutputState` value (Stopped 0, Playing 1, Freewheeling 2, Attaching 3). Mark them `noexcept KS_NONBLOCKING`;
+  - `rendered()`: return at once without writers. Otherwise compute the block's end, `block.host_time + frames_to_duration(block.frames, block.sample_rate)`, once; then write each deck (requirement 3: heartbeat = `stats.blocks_rendered`; flags from `track() != nullptr`, `playing()`, `waiting()`, and `track()->ready().complete`; `track_id`, `track_sample_rate`, `track_frames` (`capacity()`), `frames_ready` (`ready().frames`) only with a track, else 0; position, rate, cue as reals; `host_time` = the block's end; `output_latency` = `block.output_latency`); then the mixer (requirement 4, from `mixer_.settings()`; `bus_main`/`bus_cue` from the bus map's two channels); then the status (requirement 6, from `stats` and `block`: `sample_rate`, `host_time` = the block's end, flags `kStatusMuted`/`kStatusSilenced` from `stats.muted`/`stats.silenced`, render time as a duration, loads as reals). Leave `EngineStatus::clients` zero for now (task 5). Each block is built in a local value-initialized struct and written once;
+  - remove the two stub comments in `engine.cpp`.
+
+  Unit tests in `tests/engine/engine_test.cpp`: an engine without a state block and one with renders bit-identical output for a short script; before the first block everything reads zero; after N blocks each seqlock's sequence is 2N; a skipped block publishes nothing. (passes: "State: each rendered block publishes everything once", "State: decks", "State: the visual play position", "State: the mixer", "State: publishing doesn't change the output"; advances: "State: status")
+
+  If this task grows past about 200 lines, split it: 4a the writers, the helpers, and the deck blocks, with the mixer and status blocks written zero-filled apart from their heartbeat; 4b the mixer and status fields.
+
+- [ ] 5. **Acknowledgements, concurrency, and real time.** Requirements 5, 6 (`clients`), 19, and 20:
+  - fill `EngineStatus::clients[i]` from `client_stats(i)` for every slot: flags `kClientAttached`/`kClientCorrupt`, the three counts, and `last_rejection` as the `Rejection` value plus 1, or 0 when empty (see Decisions);
+  - run the concurrency test under `tsan` (`cmake --workflow --preset tsan`, or build `tsan` and `ctest --preset tsan -R "torn block"`) and fix anything ThreadSanitizer reports; never suppress it. The engine only writes through `SeqlockWriter`, so nothing should be needed beyond confirming;
+  - run "State out is real-time safe" under `rtsan`. If function-effect analysis complains about something `rendered()` calls (for example `std::optional::operator->` or a `std::chrono` conversion), restructure the call; never suppress a diagnostic.
+
+  Unit test in `engine_test.cpp`: a detached slot reads 0 flags; a rejection's code is its `Rejection` plus 1. (passes: "State: status", "State: acknowledgements", "State: readers never see a torn block", "State out is real-time safe")
+
+- [ ] 6. **Finish.** Run the complete suite with `cmake --workflow --preset` `debug`, `asan`, `rtsan`, and `tsan`, and `tools/lint.sh`. Check that no "Stub" comment or stub `NOLINT` is left (`grep -rn "Stub" src/engine`), and that the doc comments in the edited headers match the code. Write `specs/state-out/pr-description.md`: what changed, how each `[auto]` criterion is covered, the macOS CI criterion (only CI can check it), the Decisions below, and Learnings. (passes: everything the loop can pass; "Every CI configuration" only in CI)
+
+## Decisions
+
+- **Order.** The small, independent pieces first (track IDs and latency), then the render core, whose hook and stats every engine test depends on, then the output controller, then the engine's publishing. Acknowledgements and the concurrency and real-time checks come last because they only pass once everything the engine publishes is in place.
+- **Doubles in atomics.** The render load and peak are stored as bit patterns in `std::atomic<std::uint64_t>`, not `std::atomic<double>`: the same lock-free guarantee on every platform, no reliance on `is_always_lock_free` for doubles, and it matches how the state segment encodes reals.
+- **Timing points.** The render time starts right after the active-driver check (before the block is silenced) and ends right after `safety_.process()`, before the counts are stored and before the hook, so the hook's time isn't part of it (requirement 15). Restoring the floating-point mode between the two is negligible and is left inside.
+- **`stats.muted` and `stats.silenced`.** Both come from the block's own snapshot of `muted_`, so they describe the block that was rendered. They equal the accessors read right after `try_render()` returns unless another thread calls `set_muted()` in between, which the hook test doesn't.
+- **Rejection codes.** `Rejection` starts at `UnknownType = 0`; the state code is 0 for none, so the published code is the enum value plus 1 (requirement 1).
+- **The block's end.** Both `DeckState::host_time` and `EngineStatus::host_time` use `block.host_time + frames_to_duration(block.frames, block.sample_rate)`, the same expression the render core uses for `rendered_until()`, so they're equal to it bit for bit.
+- **Writers in `std::optional`.** `SeqlockWriter` has no default constructor; `std::optional` keeps "no state block" simple and allocates nothing. They're constructed on the control thread in the constructor, before the engine is shared with the audio thread.
+
+## Learnings
+
+What a later pass, or the maintainer, should know.
