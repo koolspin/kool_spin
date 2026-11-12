@@ -126,7 +126,7 @@ Let other threads, and later other processes, control the engine without ever ma
 13. **When rings fill up:**
     - **The give ring:** `load()`, `unload()`, `attach()`, and `detach()` return false or nothing, as above, and the caller can try again later.
     - **The retire ring:** releases that don't fit wait for a later block, in the order they would have been released. None is lost.
-    - **A deck with no room** for another reference makes a load for it wait. That happens only while releases are waiting for the retire ring. The handover stays at the front of the give ring, and the items behind it wait too, so handovers apply in the order they were given.
+    - **Handovers wait** only while releases are waiting for the retire ring: a load, an unload, or a detach waits when the engine has no room for the releases it could cause. The handover stays at the front of the give ring, and the items behind it wait too, so handovers apply in the order they were given.
 14. **Block-size invariance.** Given the same handovers and commands before the same frames, the output doesn't depend on how the frames were divided into blocks (ADR 0003 §3).
 
 ### Fuzzing
