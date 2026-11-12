@@ -27,6 +27,7 @@ ks_add_test(ks_engine_tests
         engine/command_test.cpp
         engine/deck_test.cpp
         engine/device_loss_test.cpp
+        engine/engine_test.cpp
         engine/mixer_test.cpp
         engine/render_core_test.cpp
         engine/safety_test.cpp

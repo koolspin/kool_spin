@@ -15,7 +15,9 @@
 #include <ks/engine/render_core.h>
 #include <ks/engine/track.h>
 #include <ks/ipc/command.h>
+#include <ks/ipc/spsc_ring.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -116,8 +118,71 @@ public:
     [[nodiscard]] ClientStats client_stats(std::size_t client) const noexcept KS_NONBLOCKING;
 
 private:
+    /// One item on the give ring, from the control thread to the audio
+    /// thread. `index` is the deck or the client slot.
+    struct Handover {
+        enum class Kind : std::uint8_t { Load, Unload, Attach, Detach };
+
+        Kind kind = Kind::Load;
+        std::size_t index = 0;
+        const Track* track = nullptr;
+        ipc::CommandRing* ring = nullptr;
+    };
+
+    using CommandConsumer = ipc::RingConsumer<ipc::CommandSlot, ipc::kCommandRingCapacity>;
+
+    /// A client slot as the control thread sees it.
+    struct ControlClient {
+        /// The ring given to attach(); null while the slot is free.
+        ipc::CommandRing* ring = nullptr;
+        /// detach() has been given, and the release not yet collected.
+        bool detaching = false;
+    };
+
+    /// A client slot as the audio thread sees it.
+    struct AudioClient {
+        /// Set while the client is attached.
+        std::optional<CommandConsumer> consumer;
+        ClientStats stats;
+    };
+
+    /// A release waiting to be pushed to the retire ring. `ring` is set for a
+    /// detached client's ring.
+    struct PendingRelease {
+        ipc::CommandRing* ring = nullptr;
+    };
+
+    /// Room for every reference slot (4 per deck) and every client ring, each
+    /// queued at most once.
+    static constexpr std::size_t kMaxPendingReleases = (kDecks * 4) + kMaxClients;
+
+    void apply_handover(const Handover& handover) noexcept KS_NONBLOCKING;
+    void read_commands() noexcept KS_NONBLOCKING;
+    void queue_release(const PendingRelease& release) noexcept KS_NONBLOCKING;
+    void push_releases() noexcept KS_NONBLOCKING;
+    /// Pushes `handover` to the give ring. Control thread only.
+    [[nodiscard]] bool give(const Handover& handover) noexcept;
+
     Interpolator interpolator_;
     Mixer mixer_;
+
+    // The two rings, in private memory: the only state both threads touch.
+    ipc::SpscRing<Handover, kHandoverCapacity> give_ring_{};
+    ipc::SpscRing<Released, kHandoverCapacity> retire_ring_{};
+
+    // Control thread.
+    ipc::RingProducer<Handover, kHandoverCapacity> give_producer_{give_ring_};
+    ipc::RingConsumer<Released, kHandoverCapacity> retire_consumer_{retire_ring_};
+    std::array<ControlClient, kMaxClients> control_clients_{};
+
+    // Audio thread.
+    ipc::RingConsumer<Handover, kHandoverCapacity> give_consumer_{give_ring_};
+    ipc::RingProducer<Released, kHandoverCapacity> retire_producer_{retire_ring_};
+    std::array<AudioClient, kMaxClients> audio_clients_{};
+    /// A FIFO of releases waiting for room in the retire ring.
+    std::array<PendingRelease, kMaxPendingReleases> pending_{};
+    std::size_t pending_first_ = 0;
+    std::size_t pending_count_ = 0;
 };
 
 } // namespace ks::engine
