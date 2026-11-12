@@ -58,7 +58,9 @@ Written by the planning pass from `spec.md`. Each build pass takes the first unc
 
   Done (pass 5): no code change needed; pass 4 had already filled the acknowledgements and added the unit test ("the status acknowledges each client slot"). Confirmed: the full `tsan` suite passes (245 tests) with no ThreadSanitizer report, including "State: readers never see a torn block"; the full `rtsan` suite passes (247), including "State out is real-time safe", with no function-effect diagnostics; `debug`/`asan` unit tests and lint are clean. Acceptance: 123 of 123 pass in `debug` (unchanged).
 
-- [ ] 6. **Finish.** Run the complete suite with `cmake --workflow --preset` `debug`, `asan`, `rtsan`, and `tsan`, and `tools/lint.sh`. Check that no "Stub" comment or stub `NOLINT` is left (`grep -rn "Stub" src/engine`), and that the doc comments in the edited headers match the code. Write `specs/state-out/pr-description.md`: what changed, how each `[auto]` criterion is covered, the macOS CI criterion (only CI can check it), the Decisions below, and Learnings. (passes: everything the loop can pass; "Every CI configuration" only in CI)
+- [x] 6. **Finish.** Run the complete suite with `cmake --workflow --preset` `debug`, `asan`, `rtsan`, and `tsan`, and `tools/lint.sh`. Check that no "Stub" comment or stub `NOLINT` is left (`grep -rn "Stub" src/engine`), and that the doc comments in the edited headers match the code. Write `specs/state-out/pr-description.md`: what changed, how each `[auto]` criterion is covered, the macOS CI criterion (only CI can check it), the Decisions below, and Learnings. (passes: everything the loop can pass; "Every CI configuration" only in CI)
+
+  Done (pass 6): full workflows pass: `debug` 245/245, `asan` 245/245, `rtsan` 247/247, `tsan` 245/245 (no ThreadSanitizer report); lint clean. No stub comments or stub `NOLINT`s left; the header doc comments match the code, and the public API is as the spec commit declared it. Wrote `pr-description.md`. Acceptance: 123 of 123 pass. Only the macOS CI criterion is left, for CI.
 
 ## Decisions
 
@@ -73,3 +75,6 @@ Written by the planning pass from `spec.md`. Each build pass takes the first unc
 ## Learnings
 
 What a later pass, or the maintainer, should know.
+
+- Acceptance tests that compare a whole published block after every block force all of its fields into one task; plan by what the tests compare, not by field group (task 4 had to absorb task 5's acknowledgements).
+- The loop's shell allowlist refuses `for` loops; run each preset as its own command.
