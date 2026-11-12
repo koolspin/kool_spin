@@ -1,12 +1,93 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/engine/engine.h>
 
+#include <bit>
+#include <chrono>
+#include <cstdint>
 #include <expected>
 #include <span>
 
 namespace ks::engine {
 
+namespace {
+
+// The state segment's encodings (specs/state-out/spec.md requirement 1).
+
+std::uint64_t real_code(double value) noexcept KS_NONBLOCKING {
+    return std::bit_cast<std::uint64_t>(value);
+}
+
+std::uint64_t host_time_code(std::chrono::steady_clock::time_point time) noexcept KS_NONBLOCKING {
+    const std::int64_t ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+    return std::bit_cast<std::uint64_t>(ns);
+}
+
+std::uint64_t duration_code(std::chrono::nanoseconds duration) noexcept KS_NONBLOCKING {
+    return static_cast<std::uint64_t>(duration.count());
+}
+
+std::uint64_t flag_code(bool value) noexcept KS_NONBLOCKING {
+    return value ? 1U : 0U;
+}
+
+std::uint64_t side_code(CrossfaderSide side) noexcept KS_NONBLOCKING {
+    switch (side) {
+    case CrossfaderSide::A:
+        return 0;
+    case CrossfaderSide::B:
+        return 1;
+    case CrossfaderSide::Thru:
+        return 2;
+    }
+    return 2;
+}
+
+std::uint64_t output_state_code(OutputState state) noexcept KS_NONBLOCKING {
+    switch (state) {
+    case OutputState::Stopped:
+        return 0;
+    case OutputState::Playing:
+        return 1;
+    case OutputState::Freewheeling:
+        return 2;
+    case OutputState::Attaching:
+        return 3;
+    }
+    return 0;
+}
+
+/// 0 for none, then the Rejection's value plus 1.
+std::uint64_t rejection_code(const std::optional<Rejection>& rejection) noexcept KS_NONBLOCKING {
+    if (!rejection.has_value()) {
+        return 0;
+    }
+    switch (*rejection) {
+    case Rejection::UnknownType:
+        return 1;
+    case Rejection::BadTarget:
+        return 2;
+    case Rejection::NonzeroPadding:
+        return 3;
+    case Rejection::BadValue:
+        return 4;
+    }
+    return 0;
+}
+
+} // namespace
+
 Engine::Engine(const BusMap& map) : mixer_{interpolator_, map} {}
+
+Engine::Engine(ipc::EngineState& state, const BusMap& map) : Engine{map} {
+    // The only reads of the state block: each writer continues from its
+    // sequence number (requirement 16).
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        deck_writers_.at(i).emplace(state.decks.at(i));
+    }
+    mixer_writer_.emplace(state.mixer);
+    status_writer_.emplace(state.status);
+}
 
 // ---- The control thread --------------------------------------------------------
 
@@ -264,6 +345,93 @@ bool Engine::drain(PendingRelease& release) noexcept KS_NONBLOCKING {
         }
     }
     return true;
+}
+
+void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_NONBLOCKING {
+    if (!status_writer_.has_value() || !mixer_writer_.has_value()) {
+        return;
+    }
+    const std::uint64_t heartbeat = stats.blocks_rendered;
+    // The same expression as the render core's rendered_until().
+    const std::uint64_t end =
+        host_time_code(block.host_time + frames_to_duration(block.frames, block.sample_rate));
+    const std::uint64_t latency = duration_code(block.output_latency);
+
+    // Requirement 3.
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        std::optional<ipc::SeqlockWriter<ipc::DeckState>>& writer = std::span{deck_writers_}[i];
+        if (!writer.has_value()) {
+            continue;
+        }
+        const Deck& deck = mixer_.deck(i);
+        ipc::DeckState state{};
+        state.heartbeat = heartbeat;
+        state.flags =
+            (deck.playing() ? ipc::kDeckPlaying : 0U) | (deck.waiting() ? ipc::kDeckWaiting : 0U);
+        if (const Track* const track = deck.track(); track != nullptr) {
+            const TrackReady ready = track->ready();
+            state.flags |= ipc::kDeckLoaded | (ready.complete ? ipc::kDeckComplete : 0U);
+            state.track_id = track->id();
+            state.track_sample_rate = track->sample_rate();
+            state.track_frames = track->capacity();
+            state.frames_ready = ready.frames;
+        }
+        state.position = real_code(deck.position());
+        state.rate = real_code(deck.rate());
+        state.cue = real_code(deck.cue());
+        state.host_time = end;
+        state.output_latency = latency;
+        writer->write(state);
+    }
+
+    // Requirement 4.
+    const MixerSettings& settings = mixer_.settings();
+    ipc::MixerState mixer{};
+    mixer.heartbeat = heartbeat;
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const ChannelSettings& channel = std::span{settings.channels}[i];
+        ipc::ChannelState& out = std::span{mixer.channels}[i];
+        out.trim_db = real_code(channel.trim_db);
+        out.fader = real_code(channel.fader);
+        out.side = side_code(channel.side);
+        out.cue = flag_code(channel.cue);
+    }
+    mixer.crossfader = real_code(settings.crossfader);
+    mixer.crossfader_transition = real_code(settings.crossfader_transition);
+    mixer.main_level_db = real_code(settings.main_level_db);
+    mixer.headphone_level_db = real_code(settings.headphone_level_db);
+    mixer.cue_mix = real_code(settings.cue_mix);
+    mixer.bus_main = settings.bus_map.main;
+    mixer.bus_cue = settings.bus_map.cue;
+    mixer_writer_->write(mixer);
+
+    // Requirements 5 and 6.
+    ipc::EngineStatus status{};
+    for (std::size_t i = 0; i < kMaxClients; ++i) {
+        const ClientStats& client = std::span{audio_clients_}[i].stats;
+        ipc::ClientAck& ack = std::span{status.clients}[i];
+        ack.flags = (client.attached ? ipc::kClientAttached : 0U) |
+                    (client.corrupt ? ipc::kClientCorrupt : 0U);
+        ack.commands_read = client.commands_read;
+        ack.last_sequence = client.last_sequence;
+        ack.rejected = client.rejected;
+        ack.last_rejection = rejection_code(client.last_rejection);
+    }
+    status.heartbeat = heartbeat;
+    status.frames_rendered = stats.frames_rendered;
+    status.sample_rate = block.sample_rate;
+    status.host_time = end;
+    status.output_latency = latency;
+    status.output_state = output_state_code(stats.output_state);
+    status.flags =
+        (stats.muted ? ipc::kStatusMuted : 0U) | (stats.silenced ? ipc::kStatusSilenced : 0U);
+    status.non_finite_samples = stats.non_finite_samples;
+    status.limited_frames = stats.limited_frames;
+    status.late_blocks = stats.late_blocks;
+    status.render_time = duration_code(stats.render_time);
+    status.render_load = real_code(stats.render_load);
+    status.peak_render_load = real_code(stats.peak_render_load);
+    status_writer_->write(status);
 }
 
 const Mixer& Engine::mixer() const noexcept KS_NONBLOCKING {

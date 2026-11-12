@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/engine/render_core.h>
 
+#include <ks/core/clock.h>
+
 #include <algorithm>
+#include <bit>
+#include <chrono>
 #include <cstdint>
 #include <span>
 
@@ -98,6 +102,8 @@ RenderResult RenderCore::try_render(const Block& block, DriverId driver) noexcep
         return RenderResult::Skipped;
     }
 
+    // The block's render time starts once its driver check has passed.
+    const auto start = ks::core::monotonic_now();
     // Read once, so a mute takes effect at a block boundary.
     const bool muted = muted_.load(std::memory_order_acquire);
     silence(block);
@@ -107,21 +113,52 @@ RenderResult RenderCore::try_render(const Block& block, DriverId driver) noexcep
     graph_->process(rendered);
     safety_.process(rendered, muted);
     restore_mode(saved_mode);
+    const auto finish = ks::core::monotonic_now();
     rendered_any_ = true;
     last_driver_ = driver;
 
+    const auto render_time = std::chrono::duration_cast<std::chrono::nanoseconds>(finish - start);
+    const auto duration = frames_to_duration(block.frames, block.sample_rate);
+    // A block too short to last a nanosecond has no meaningful load.
+    const double load = duration.count() > 0 ? static_cast<double>(render_time.count()) /
+                                                   static_cast<double>(duration.count())
+                                             : 0.0;
+    const bool late = render_time > duration;
+
     // Only the token's holder writes these; other threads only read them.
-    frames_rendered_.store(frames_rendered_.load(std::memory_order_relaxed) + block.frames,
-                           std::memory_order_relaxed);
-    const auto end = block.host_time + frames_to_duration(block.frames, block.sample_rate);
+    RenderStats stats;
+    stats.blocks_rendered = blocks_rendered_.load(std::memory_order_relaxed) + 1;
+    stats.frames_rendered = frames_rendered_.load(std::memory_order_relaxed) + block.frames;
+    stats.non_finite_samples = safety_.non_finite_samples();
+    stats.limited_frames = safety_.limited_frames();
+    stats.late_blocks = late_blocks_.load(std::memory_order_relaxed) + (late ? 1U : 0U);
+    stats.render_time = render_time;
+    stats.render_load = load;
+    stats.peak_render_load = std::max(
+        std::bit_cast<double>(peak_render_load_bits_.load(std::memory_order_relaxed)), load);
+    stats.output_state = output_state_.load(std::memory_order_acquire);
+    stats.muted = muted;
+    stats.silenced = muted && safety_.silenced();
+
+    blocks_rendered_.store(stats.blocks_rendered, std::memory_order_relaxed);
+    frames_rendered_.store(stats.frames_rendered, std::memory_order_relaxed);
+    const auto end = block.host_time + duration;
     rendered_until_ns_.store(
         std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count(),
         std::memory_order_relaxed);
-    non_finite_samples_.store(safety_.non_finite_samples(), std::memory_order_relaxed);
-    limited_frames_.store(safety_.limited_frames(), std::memory_order_relaxed);
+    non_finite_samples_.store(stats.non_finite_samples, std::memory_order_relaxed);
+    limited_frames_.store(stats.limited_frames, std::memory_order_relaxed);
+    late_blocks_.store(stats.late_blocks, std::memory_order_relaxed);
+    render_time_ns_.store(render_time.count(), std::memory_order_relaxed);
+    render_load_bits_.store(std::bit_cast<std::uint64_t>(load), std::memory_order_relaxed);
+    peak_render_load_bits_.store(std::bit_cast<std::uint64_t>(stats.peak_render_load),
+                                 std::memory_order_relaxed);
     // Last, and release: whoever sees the fade finished also sees the frames
     // that finished it.
     silenced_.store(safety_.silenced(), std::memory_order_release);
+
+    // Still holding the token, so the graph's hook never overlaps a render.
+    graph_->rendered(rendered, stats);
 
     // Release: the next holder sees everything this render did.
     token_.store(false, std::memory_order_release);
@@ -165,6 +202,38 @@ std::uint64_t RenderCore::limited_frames() const noexcept KS_NONBLOCKING {
 
 const SafetyConfig& RenderCore::safety_config() const noexcept KS_NONBLOCKING {
     return safety_.config();
+}
+
+std::uint64_t RenderCore::blocks_rendered() const noexcept KS_NONBLOCKING {
+    return blocks_rendered_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t RenderCore::late_blocks() const noexcept KS_NONBLOCKING {
+    return late_blocks_.load(std::memory_order_relaxed);
+}
+
+std::chrono::nanoseconds RenderCore::render_time() const noexcept KS_NONBLOCKING {
+    return std::chrono::nanoseconds{render_time_ns_.load(std::memory_order_relaxed)};
+}
+
+double RenderCore::render_load() const noexcept KS_NONBLOCKING {
+    return std::bit_cast<double>(render_load_bits_.load(std::memory_order_relaxed));
+}
+
+double RenderCore::peak_render_load() const noexcept KS_NONBLOCKING {
+    return std::bit_cast<double>(peak_render_load_bits_.load(std::memory_order_relaxed));
+}
+
+bool RenderCore::muted() const noexcept KS_NONBLOCKING {
+    return muted_.load(std::memory_order_acquire);
+}
+
+void RenderCore::set_output_state(OutputState state) noexcept KS_NONBLOCKING {
+    output_state_.store(state, std::memory_order_release);
+}
+
+OutputState RenderCore::output_state() const noexcept KS_NONBLOCKING {
+    return output_state_.load(std::memory_order_acquire);
 }
 
 } // namespace ks::engine

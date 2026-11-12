@@ -15,12 +15,50 @@
 
 namespace ks::engine {
 
-/// What the render core renders. Later steps make the decks and the mixer a
-/// graph; for now, only tests implement one.
+/// Where the output goes, as the output controller on the control thread
+/// sees it (ADR 0003 §15).
+enum class OutputState : std::uint8_t {
+    Stopped,
+    /// The device is the active driver.
+    Playing,
+    /// The device is lost; the freewheel driver keeps the clock running.
+    Freewheeling,
+    /// The device is back and started, but not yet active.
+    Attaching,
+};
+
+/// The render core's values after a block it rendered, as its accessors
+/// return them (specs/state-out/spec.md requirement 15).
+struct RenderStats {
+    std::uint64_t blocks_rendered = 0;
+    std::uint64_t frames_rendered = 0;
+    std::uint64_t non_finite_samples = 0;
+    std::uint64_t limited_frames = 0;
+    std::uint64_t late_blocks = 0;
+    /// This block's render time.
+    std::chrono::nanoseconds render_time{};
+    /// This block's render load.
+    double render_load = 0.0;
+    double peak_render_load = 0.0;
+    OutputState output_state = OutputState::Stopped;
+    bool muted = false;
+    bool silenced = false;
+
+    bool operator==(const RenderStats&) const = default;
+};
+
+/// What the render core renders: the engine, or a test's graph.
 class Graph {
 public:
     /// Writes the block's channels. They hold silence when it's called.
     virtual void process(const Block& block) noexcept KS_NONBLOCKING = 0;
+
+    /// Called by the render core once for each block it renders, after the
+    /// safety stage and after updating every count, while it still holds the
+    /// render token. `block` is the block the graph rendered, and `stats` the
+    /// core's values after it. Does nothing by default.
+    virtual void rendered(const Block& /*block*/,
+                          const RenderStats& /*stats*/) noexcept KS_NONBLOCKING {}
 
 protected:
     Graph() = default;
@@ -68,13 +106,31 @@ public:
     /// Renders `block` if it's valid, `driver` is the active driver, and no
     /// other driver is rendering: takes the render token, checks the driver,
     /// fills the block's channels with silence, runs the graph (with
-    /// Block::resumed set) and the safety stage, counts the frames, and
-    /// releases the token. Denormals are flushed while it renders.
+    /// Block::resumed set) and the safety stage, counts the frames, times the
+    /// block, calls the graph's rendered(), and releases the token. Denormals
+    /// are flushed while it renders.
     RenderResult try_render(const Block& block,
                             DriverId driver = kDefaultDriver) noexcept KS_NONBLOCKING;
 
     /// The total number of frames in rendered blocks. Any thread may call it.
     [[nodiscard]] std::uint64_t frames_rendered() const noexcept KS_NONBLOCKING;
+
+    // Render timing (specs/state-out/spec.md requirements 12 and 13). A
+    // block's render time runs from when its driver check passes to the end
+    // of the safety stage, read with ks::core::monotonic_now(). Its render
+    // load is the render time divided by the block's duration. Any thread may
+    // call these.
+
+    /// The number of rendered blocks: the heartbeat.
+    [[nodiscard]] std::uint64_t blocks_rendered() const noexcept KS_NONBLOCKING;
+    /// Rendered blocks whose render time was longer than their duration.
+    [[nodiscard]] std::uint64_t late_blocks() const noexcept KS_NONBLOCKING;
+    /// The last rendered block's render time; 0 before the first.
+    [[nodiscard]] std::chrono::nanoseconds render_time() const noexcept KS_NONBLOCKING;
+    /// The last rendered block's render load; 0 before the first.
+    [[nodiscard]] double render_load() const noexcept KS_NONBLOCKING;
+    /// The highest render load of any rendered block; 0 before the first.
+    [[nodiscard]] double peak_render_load() const noexcept KS_NONBLOCKING;
 
     /// Makes `driver` the active driver. Any thread may call it.
     void activate(DriverId driver) noexcept KS_NONBLOCKING;
@@ -91,6 +147,9 @@ public:
     /// from the start of the next rendered block. Any thread may call it.
     void set_muted(bool muted) noexcept KS_NONBLOCKING;
 
+    /// Whether set_muted() last muted the output. Any thread may call it.
+    [[nodiscard]] bool muted() const noexcept KS_NONBLOCKING;
+
     /// True when muted and the fade has reached silence by the end of the
     /// last rendered block. Any thread may call it.
     [[nodiscard]] bool silenced() const noexcept KS_NONBLOCKING;
@@ -105,6 +164,15 @@ public:
 
     /// The safety stage's configuration. Any thread may call it.
     [[nodiscard]] const SafetyConfig& safety_config() const noexcept KS_NONBLOCKING;
+
+    /// Stores where the output goes, for the status the graph publishes. The
+    /// output controller calls it whenever its state changes. Any thread may
+    /// call it (specs/state-out/spec.md requirement 14).
+    void set_output_state(OutputState state) noexcept KS_NONBLOCKING;
+
+    /// What set_output_state() last stored; Stopped until then. Any thread
+    /// may call it.
+    [[nodiscard]] OutputState output_state() const noexcept KS_NONBLOCKING;
 
 private:
     Graph* graph_;
@@ -127,6 +195,18 @@ private:
     std::atomic<bool> silenced_{false};
     std::atomic<std::uint64_t> non_finite_samples_{0};
     std::atomic<std::uint64_t> limited_frames_{0};
+
+    // Render timing. Only the token's holder writes these.
+    std::atomic<std::uint64_t> blocks_rendered_{0};
+    std::atomic<std::uint64_t> late_blocks_{0};
+    /// render_time(), in nanoseconds.
+    std::atomic<std::int64_t> render_time_ns_{0};
+    /// render_load() and peak_render_load(), as a double's bit pattern, so
+    /// they're lock-free on every platform.
+    std::atomic<std::uint64_t> render_load_bits_{0};
+    std::atomic<std::uint64_t> peak_render_load_bits_{0};
+
+    std::atomic<OutputState> output_state_{OutputState::Stopped};
 };
 
 } // namespace ks::engine
