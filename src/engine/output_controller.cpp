@@ -39,12 +39,12 @@ void OutputController::start() {
         core_->activate(driver);
         if (device->start()) {
             adopt_device(std::move(device), driver, now);
-            state_ = OutputState::Playing;
+            set_state(OutputState::Playing);
             return;
         }
     }
     start_freewheel(now);
-    state_ = OutputState::Freewheeling;
+    set_state(OutputState::Freewheeling);
     last_retry_ = now;
 }
 
@@ -65,7 +65,7 @@ void OutputController::poll() {
             // up the time it took to notice. Only then close the device.
             start_freewheel(std::max(core_->rendered_until(), device_started_));
             close(device_);
-            state_ = OutputState::Freewheeling;
+            set_state(OutputState::Freewheeling);
             last_retry_ = now;
         }
         return;
@@ -83,7 +83,7 @@ void OutputController::poll() {
             device_ = std::move(device);
             device_driver_ = driver;
             device_started_ = now;
-            state_ = OutputState::Attaching;
+            set_state(OutputState::Attaching);
         }
         return;
     }
@@ -94,10 +94,10 @@ void OutputController::poll() {
             close(freewheel_);
             adopt_device(std::move(device_), device_driver_, device_started_);
             last_progress_ = now;
-            state_ = OutputState::Playing;
+            set_state(OutputState::Playing);
         } else if (device_->lost() || now - device_started_ >= config_.stall_timeout) {
             close(device_);
-            state_ = OutputState::Freewheeling;
+            set_state(OutputState::Freewheeling);
         }
         return;
     }
@@ -115,11 +115,16 @@ void OutputController::stop() {
     }
     close(freewheel_);
     close(device_);
-    state_ = OutputState::Stopped;
+    set_state(OutputState::Stopped);
 }
 
 OutputState OutputController::state() const noexcept {
     return state_;
+}
+
+void OutputController::set_state(OutputState state) noexcept {
+    state_ = state;
+    core_->set_output_state(state);
 }
 
 DriverId OutputController::next_driver() noexcept {

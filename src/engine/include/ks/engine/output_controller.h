@@ -60,6 +60,9 @@ private:
     /// A DriverId never given out before.
     DriverId next_driver() noexcept;
 
+    /// Changes the state, and the core's output state with it.
+    void set_state(OutputState state) noexcept;
+
     /// Opens the device as `driver`, not started, or returns null if the
     /// source doesn't have it.
     std::unique_ptr<AudioBackend> open_device(DriverId driver);

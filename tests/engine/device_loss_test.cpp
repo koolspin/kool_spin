@@ -155,6 +155,40 @@ TEST_CASE("A returning device that never calls back is dropped", "[engine][outpu
     controller.stop();
 }
 
+TEST_CASE("The core's output state follows every controller transition", "[engine][output]") {
+    NullGraph graph;
+    RenderCore core{graph};
+    ScriptedSource source;
+    OutputController controller{core, source, kQuickRetries};
+    REQUIRE(core.output_state() == OutputState::Stopped);
+
+    // A device that starts but never calls back: Playing, then lost.
+    source.next = ScriptedSource::Next::Silent;
+    controller.start();
+    REQUIRE(controller.state() == OutputState::Playing);
+    REQUIRE(core.output_state() == OutputState::Playing);
+    source.next = ScriptedSource::Next::Unavailable;
+    REQUIRE(poll_until(controller, OutputState::Freewheeling, milliseconds{1000}));
+    REQUIRE(core.output_state() == OutputState::Freewheeling);
+
+    // It returns, still silent, and is dropped again.
+    source.next = ScriptedSource::Next::Silent;
+    REQUIRE(poll_until(controller, OutputState::Attaching, milliseconds{1000}));
+    REQUIRE(core.output_state() == OutputState::Attaching);
+    source.next = ScriptedSource::Next::Unavailable;
+    REQUIRE(poll_until(controller, OutputState::Freewheeling, milliseconds{1000}));
+    REQUIRE(core.output_state() == OutputState::Freewheeling);
+
+    // A device that works takes over.
+    source.next = ScriptedSource::Next::Paced;
+    REQUIRE(poll_until(controller, OutputState::Playing, milliseconds{1000}));
+    REQUIRE(core.output_state() == OutputState::Playing);
+
+    controller.stop();
+    REQUIRE(controller.state() == OutputState::Stopped);
+    REQUIRE(core.output_state() == OutputState::Stopped);
+}
+
 TEST_CASE("A device that won't start leaves the controller freewheeling", "[engine][output]") {
     NullGraph graph;
     RenderCore core{graph};
