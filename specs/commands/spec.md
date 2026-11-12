@@ -145,7 +145,7 @@ The command slot and the decoder (`decoder_test.cpp`):
 - [ ] `[auto]` `CommandSlot` is 64 bytes, standard layout, and trivially copyable, with the offsets in requirement 1. `CommandRing`'s capacity is 256. (test: "Commands: the slot layout")
 - [ ] `[auto]` **Each type decodes:** for every row of requirement 2, a hand-built slot decodes to the expected `Command`, including −∞ for trim and both levels, and out-of-range values that the control will clamp (fader 2, rate 10, seek −5, trim +20 dB). (test: "Commands: every type decodes")
 - [ ] `[auto]` **Rejections,** each with its reason:
-  - types 0, 15, and 0xFFFFFFFF;
+  - types 0, 15, 0x101 (its low byte alone would be `SetPlaying`, so the decoder must check all 32 bits before narrowing), and 0xFFFFFFFF;
   - deck 4 for a deck command, channel 4 for a channel command, and target 1 for a global one;
   - a nonzero `payload[1]` (except for `SetBusMap`) and a nonzero `payload[5]`;
   - NaN for every double (quiet, signalling, and negative), +∞ for every double, and −∞ for the doubles that don't allow it;

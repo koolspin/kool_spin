@@ -155,6 +155,8 @@ TEST_CASE("Commands: invalid slots are rejected", "[commands]") {
         {slot(0, 0, 0), Rejection::UnknownType},
         {slot(15, 0, 0), Rejection::UnknownType},
         {slot(0xFFFF'FFFFU, 0, 0), Rejection::UnknownType},
+        // The low byte alone is SetPlaying: all 32 bits are the type.
+        {slot(0x101, 0, 1), Rejection::UnknownType},
         // The target.
         {slot(SetRate, 4, bits_of(1.0)), Rejection::BadTarget},
         {slot(SetPlaying, 4, 1), Rejection::BadTarget},
