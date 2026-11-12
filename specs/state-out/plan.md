@@ -13,11 +13,13 @@ Written by the planning pass from `spec.md`. Each build pass takes the first unc
 
 ## Tasks
 
-- [ ] 1. **Track IDs and output latency.** Requirements 9 to 11.
+- [x] 1. **Track IDs and output latency.** Requirements 9 to 11.
   - `Track`: a private `std::uint64_t id_` set by the constructor; `id()` returns it. Remove the stub comment and `NOLINTNEXTLINE`.
   - `render_interleaved()`: set `output_latency` on every block it builds. Remove the stub comment. Check that the paced, offline (freewheel), and miniaudio drivers still call it without a latency, so they pass 0 (they need no change if they rely on the default).
 
   Unit tests: one in `render_core_test.cpp` (or wherever `render_interleaved()` is already tested) with a recording graph: a latency given reaches every block across several `kMaxBlockFrames` splits. (passes: "Track: an ID", "Render interleaved: the output latency reaches every block")
+
+  Done (pass 1): `Track` keeps `id_`; `render_interleaved()` sets `output_latency` on each block. The paced and miniaudio drivers rely on the default (0), and offline builds its own `Block`s with the default; none changed. Unit test "A device callback's output latency reaches every block it splits into". Acceptance: 111 of 123 pass (was 109). Note for later passes: a shell `for` loop is refused by the loop's allowlist, so run each preset as its own command.
 
 - [ ] 2. **The render core: timing, mute, output state, and the rendered hook.** Requirements 12 to 15, in `render_core.cpp` and private members of `render_core.h`:
   - new atomics, written only by the token's holder (relaxed, like `frames_rendered_`): `blocks_rendered_`, `late_blocks_`, `render_time_ns_` (`std::int64_t`), `render_load_bits_` and `peak_render_load_bits_` (a double's bit pattern in a `std::atomic<std::uint64_t>`, see Decisions); and `output_state_` (`std::atomic<OutputState>`, `Stopped`), stored and loaded by `set_output_state()`/`output_state()` from any thread;

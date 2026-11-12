@@ -68,6 +68,7 @@ public:
 private:
     std::span<const float> samples_;
     std::uint32_t sample_rate_;
+    std::uint64_t id_;
     /// The frame count in the low 63 bits, and the complete flag in the top bit.
     std::atomic<std::uint64_t> ready_{0};
 };

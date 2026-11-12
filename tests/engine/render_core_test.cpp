@@ -54,6 +54,27 @@ private:
     std::size_t count_ = 0;
 };
 
+/// Records the output latency of each block, up to 16.
+class LatencyGraph final : public Graph {
+public:
+    void process(const Block& block) noexcept KS_NONBLOCKING override {
+        if (count_ < latencies_.size()) {
+            std::span{latencies_}[count_] = block.output_latency;
+        }
+        ++count_;
+    }
+
+    [[nodiscard]] std::vector<std::chrono::nanoseconds> latencies() const {
+        const std::span<const std::chrono::nanoseconds> recorded =
+            std::span{latencies_}.first(count_);
+        return {recorded.begin(), recorded.end()};
+    }
+
+private:
+    std::array<std::chrono::nanoseconds, 16> latencies_{};
+    std::size_t count_ = 0;
+};
+
 /// While rendering, renders a whole device callback through the same core,
 /// as a second driver would if its callback arrived mid-render.
 class NestedDeviceGraph final : public Graph {
@@ -139,6 +160,24 @@ TEST_CASE("A device callback of no frames renders nothing", "[engine]") {
 
     REQUIRE(render_interleaved(core, scratch, {}, 1, 48'000, {}) == 0);
     REQUIRE(graph.count() == 0);
+}
+
+TEST_CASE("A device callback's output latency reaches every block it splits into", "[engine]") {
+    LatencyGraph graph;
+    RenderCore core{graph};
+    std::vector<float> scratch_storage(kMaxBlockFrames);
+    const std::array<std::span<float>, 1> scratch{std::span{scratch_storage}};
+    // Three full blocks and a partial one.
+    std::vector<float> device((3 * kMaxBlockFrames) + 10);
+    const std::chrono::nanoseconds latency{7'250'000};
+
+    REQUIRE(render_interleaved(core, scratch, device, 1, 48'000, {}, {}, latency) == device.size());
+    REQUIRE(graph.latencies() == std::vector<std::chrono::nanoseconds>(4, latency));
+
+    LatencyGraph defaulted;
+    RenderCore default_core{defaulted};
+    REQUIRE(render_interleaved(default_core, scratch, device, 1, 48'000, {}) == device.size());
+    REQUIRE(defaulted.latencies() == std::vector<std::chrono::nanoseconds>(4));
 }
 
 TEST_CASE("Interleaving no channels succeeds and writes nothing", "[engine]") {
