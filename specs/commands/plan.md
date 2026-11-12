@@ -13,7 +13,7 @@ Written by the planning pass from `spec.md`. Each build pass takes the first unc
 
 ## Tasks
 
-- [ ] 1. **The decoder.** Implement `decode()` in `command.cpp` (requirements 3 and 4):
+- [x] 1. **The decoder.** Implement `decode()` in `command.cpp` (requirements 3 and 4):
   - check `slot.type` as the full `std::uint32_t` against 1..14 **before** casting to `CommandType` (0x101 must be `UnknownType`); then classify the type as deck (1–4), channel (5–8), or global (9–14);
   - `BadTarget`: deck/channel target `>= kDecks`; global target `!= 0`;
   - `NonzeroPadding`: `payload[1..5]` must be 0, except `payload[1]` for `SetBusMap`;
@@ -21,6 +21,8 @@ Written by the planning pass from `spec.md`. Each build pass takes the first unc
   - build the `Command` with only the fields the type uses (deck for deck/channel commands; others at their defaults), so encoding it back gives the same 64 bytes (−0.0 stays −0.0 because `value` holds the decoded bits).
 
   Unit tests in a new `tests/engine/command_test.cpp`: one valid slot per type, each rejection reason, the check order (a slot with several faults), the 0x101 type, −0.0 and the largest finite double accepted. (passes: "Commands: every type decodes", "Commands: invalid slots are rejected", "Commands: decoding and encoding round-trip"; under `fuzz`: `ks_command_decoder_fuzz`)
+
+  - Pass 1: `decode()` done (NaN/±∞ checked on the bit pattern as integers; padding loop uses `std::span::subspan` because clang-tidy rejects a non-constant `payload[i]`); 7 unit tests in `tests/engine/command_test.cpp`. 4 of 14 commands acceptance tests pass now (layout, every type, rejections, round-trip). `apply()` is still a stub with a one-line "Stub" comment. The `fuzz` preset wasn't run this pass; task 6 runs it. In this pass, `ctest` worked with `cmake -E env XDG_RUNTIME_DIR=...` and `;`-joined commands, but `for` loops and `$var` were refused.
 
 - [ ] 2. **`apply()`.** In `command.cpp`, a `switch` on `command.type` calling the control requirement 5 names: `SetPlaying` → `mixer.deck(d).set_playing(on)`, `SetRate` → `set_rate`, `Seek` → `seek`, `SetCuePoint` → `set_cue`, `SetChannelCue` → `Mixer::set_cue(d, on)`, `SetCrossfaderAssign` → `set_crossfader_assign(d, side)`, `SetBusMap` → `set_bus_map(bus_map)`, the rest → the mixer control of the same name with `value`. Check the exact signatures in `mixer.h`/`deck.h` (non-const `deck()` accessor). Unit tests: for each type, `apply()` on one mixer and the direct call on another give equal `settings()` and deck state. (advances: "Engine: commands do what direct calls do", "Commands are real-time safe")
 
