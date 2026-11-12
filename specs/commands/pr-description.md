@@ -4,13 +4,13 @@
 
 The engine now takes commands. Clients write 64-byte command slots to SPSC rings. At the start of each block, `Engine::process()` reads up to 32 slots from each attached ring, in slot order. It decodes and validates each slot with `decode()` and applies it to the mixer with `apply()`. Tracks reach the audio thread through a give ring. Every reference, and every detached client ring, comes back exactly once through a retire ring, and only after the deck has let go of it. Everything reachable from `process()` is `KS_NONBLOCKING`, and nothing on the audio thread allocates or waits.
 
-Every check passes on Linux: `cmake --workflow --preset` `debug`, `asan`, `rtsan`, `tsan`, and `fuzz`, with acceptance tests included (221 tests; 223 under `rtsan`, 222 under `fuzz`), and `tools/lint.sh`.
+Every check passes on Linux: `cmake --workflow --preset` `debug`, `asan`, `rtsan`, `tsan`, `release`, and `fuzz`, with acceptance tests included (221 tests; 223 under `rtsan`, 222 under `fuzz`), and `tools/lint.sh`.
 
 ## What was built, task by task
 
 1. **The decoder** (`src/engine/command.cpp`, `decode()`). It checks the type as the full 32-bit field against 1..14 before narrowing, so 0x101 is `UnknownType`. Then it checks the target, then padding, then values. NaN and ±∞ are found from the bit pattern. −∞ is allowed only for trim and the two levels. Flags must be 0 or 1, sides 0 to 2, and bus maps two different even channels below `kMaxOutputChannels`, compared as 64-bit words before narrowing. Only the fields a type uses are filled in, so encoding a decoded `Command` gives the same 64 bytes back (−0.0 included). Unit tests: `tests/engine/command_test.cpp`.
 2. **`apply()`**: a `switch` that calls the matching mixer or deck control. For a deck command, a deck index of `kDecks` or more changes nothing. Unit tests compare `apply()` with the direct call: settings, deck state, and one rendered block, bit for bit.
-3. **Clients and the give and retire rings** (`engine.h` private members, `engine.cpp`). `attach()`, `detach()`, and `collect()` work on the control thread. The audio thread applies handovers, reads commands fairly with per-client statistics, and marks a corrupt ring's client as corrupt. Invalid blocks (0 frames, more than `kMaxBlockFrames`, or a sample rate of 0) do nothing at all. Releases wait in a fixed-capacity FIFO (`kDecks * 4 + kMaxClients` entries) when the retire ring is full. Unit tests: `tests/engine/engine_test.cpp`.
+3. **Clients and the give and retire rings** (`engine.h` private members, `engine.cpp`). `attach()`, `detach()`, and `collect()` work on the control thread. The audio thread applies handovers, reads commands fairly with per-client statistics, and marks a corrupt ring's client as corrupt. Invalid blocks (0 frames, more than `kMaxBlockFrames`, or a sample rate of 0) do nothing at all. Releases wait in a fixed-capacity FIFO when the retire ring is full (task 7 sized it at 128 entries). Unit tests: `tests/engine/engine_test.cpp`.
 4. **Loads, unloads, and references.** A handover that has to wait is held in `stalled_` and retried first in the next block, so order is kept. Each block ends with a let-go check, then the release queue drains as far as the retire ring has room. (Task 7 replaced this task's reference slots and their stall rule; see below.)
 5. **Concurrency.** No code change was needed. The full `tsan` and `asan` suites pass with no reports. Review confirmed that the control methods touch only `control_clients_`, `give_producer_`, and `retire_consumer_`, so the two rings are the only state both threads share.
 6. **Finish.** All five workflows and lint were run, and pass. The stub comments and `NOLINT` blocks were already gone (passes 2 and 4). The private doc comments in `engine.h` were checked, and match the code.
@@ -39,9 +39,8 @@ All of these are tests in `tests/acceptance/commands/`, and they pass in `debug`
 
 ## Deviations from the spec or plan
 
-- **Task 3's planned "ring release waits while the retire ring is full" unit test** was replaced by a release-order test. It can't be built from rings alone: at most 8 ring releases can be outstanding, and the retire ring holds 64. Task 4's back-pressure unit test and the acceptance test cover a full retire ring.
+- **Task 3's planned "ring release waits while the retire ring is full" unit test** was replaced by a release-order test. It can't be built from rings alone: at most 8 ring releases can be outstanding, and the retire ring holds 64. The unit test "Engine: loads wait only while releases wait, and keep their order" and the acceptance test cover a full retire ring.
 - **Release order within one block:** references a load or unload lets go of are queued in handover order; ones the end-of-block check finds are queued in deck and place order. The spec doesn't order them.
-- **A detach or unload can wait too,** not only a load: each needs room in the release queue for what it could add. This only happens while releases are waiting for the retire ring.
 - **Back pressure:** a stalled handover is held outside the give ring (`stalled_`), because `RingConsumer` has no peek. So 65 handovers can be outstanding while one is stalled. `load()` still returns false once the ring holds 64 (see the plan's Decisions).
 - **`apply()` with a deck index `>= kDecks`** (only possible with a hand-built `Command`, since `decode()` rejects it) does nothing, because `Mixer::deck()` requires a valid index.
 - No annotation was needed on `RingConsumer`'s constructor. Its effects are inferred, and `spsc_ring.h` is unchanged.
@@ -54,6 +53,14 @@ All of these are tests in `tests/acceptance/commands/`, and they pass in `debug`
 - Releases go through a fixed FIFO of 128 `{track, count}` or ring entries, sized so it can't fill within one block that starts with it empty.
 - A client's consumer is built on the audio thread when its `Attach` is applied.
 - An invalid block does nothing, not even handovers.
+
+## Changes from review
+
+- **`68260b4`:** the rejection test and its criterion include type 0x101, whose low byte alone would be `SetPlaying`, so a decoder that narrows before checking fails it directly.
+- **`01cad5e`, `d9bd95a`:** a burst of different tracks to one deck must apply in one block while no release is waiting, and a burst with a play command must render the same at every block size. Both checks failed on the first build (only 4 of 6 loads applied in the first block, and the outputs differed from frame 36,002); task 7 fixed it. The spec's criteria describe the new checks.
+- **Requirement 13** now says any handover (a load, an unload, or a detach) waits only while releases are waiting for the retire ring, which is what the release queue does.
+
+**Protected files changed** (this needs the `protected-paths-approved` label): `cmake/KsFuzz.cmake` (new), `tests/acceptance/CMakeLists.txt`, `tests/acceptance/commands/` (new), and `specs/commands/spec.md` (new).
 
 ## Learnings worth adding to `CLAUDE.md`
 
