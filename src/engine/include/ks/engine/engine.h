@@ -17,6 +17,7 @@
 #include <ks/engine/render_core.h>
 #include <ks/engine/track.h>
 #include <ks/ipc/command.h>
+#include <ks/ipc/seqlock.h>
 #include <ks/ipc/spsc_ring.h>
 #include <ks/ipc/state.h>
 
@@ -231,6 +232,13 @@ private:
     std::array<PendingRelease, kMaxPendingReleases> pending_{};
     std::size_t pending_first_ = 0;
     std::size_t pending_count_ = 0;
+
+    // The state block's writers, built by the constructor on the control
+    // thread and used only by the audio thread, in rendered(). Empty without
+    // a state block.
+    std::array<std::optional<ipc::SeqlockWriter<ipc::DeckState>>, kDecks> deck_writers_;
+    std::optional<ipc::SeqlockWriter<ipc::MixerState>> mixer_writer_;
+    std::optional<ipc::SeqlockWriter<ipc::EngineStatus>> status_writer_;
 };
 
 } // namespace ks::engine
