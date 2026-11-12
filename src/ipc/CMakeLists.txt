@@ -14,7 +14,8 @@ target_sources(ks_ipc PUBLIC
         include/ks/ipc/layout.h
         include/ks/ipc/region.h
         include/ks/ipc/seqlock.h
-        include/ks/ipc/spsc_ring.h)
+        include/ks/ipc/spsc_ring.h
+        include/ks/ipc/state.h)
 
 target_link_libraries(ks_ipc
     PUBLIC ks::core

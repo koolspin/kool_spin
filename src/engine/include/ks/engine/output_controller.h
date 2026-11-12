@@ -26,16 +26,6 @@ struct OutputConfig {
     std::uint32_t default_channels = 2;
 };
 
-enum class OutputState : std::uint8_t {
-    Stopped,
-    /// The device is the active driver.
-    Playing,
-    /// The device is lost; the freewheel driver keeps the clock running.
-    Freewheeling,
-    /// The device is back and started, but not yet active.
-    Attaching,
-};
-
 /// Plays through the device the source opens, freewheels while it's lost, and
 /// hands back when it returns. Used from one thread, the control thread,
 /// which calls poll() at least every 10 ms.

@@ -34,8 +34,10 @@ struct TrackReady {
 class Track {
 public:
     /// `samples` is interleaved stereo, so the capacity is samples.size() / 2
-    /// frames. The memory must outlive the track. Nothing is ready yet.
-    Track(std::span<const float> samples, std::uint32_t sample_rate) noexcept;
+    /// frames. The memory must outlive the track. Nothing is ready yet. `id`
+    /// identifies the track to clients; whoever creates the track chooses it,
+    /// and 0 means none (specs/state-out/spec.md requirement 9).
+    Track(std::span<const float> samples, std::uint32_t sample_rate, std::uint64_t id = 0) noexcept;
 
     Track(const Track&) = delete;
     Track& operator=(const Track&) = delete;
@@ -59,6 +61,9 @@ public:
     [[nodiscard]] std::uint64_t capacity() const noexcept KS_NONBLOCKING;
 
     [[nodiscard]] std::uint32_t sample_rate() const noexcept KS_NONBLOCKING;
+
+    /// The ID it was built with.
+    [[nodiscard]] std::uint64_t id() const noexcept KS_NONBLOCKING;
 
 private:
     std::span<const float> samples_;

@@ -167,4 +167,41 @@ const SafetyConfig& RenderCore::safety_config() const noexcept KS_NONBLOCKING {
     return safety_.config();
 }
 
+// Stubs (specs/state-out/spec.md requirements 12 to 15): nothing is timed,
+// the output state isn't kept, and try_render() doesn't call the graph's
+// rendered() yet.
+// NOLINTBEGIN(readability-convert-member-functions-to-static): stubs
+
+std::uint64_t RenderCore::blocks_rendered() const noexcept KS_NONBLOCKING {
+    return 0;
+}
+
+std::uint64_t RenderCore::late_blocks() const noexcept KS_NONBLOCKING {
+    return 0;
+}
+
+std::chrono::nanoseconds RenderCore::render_time() const noexcept KS_NONBLOCKING {
+    return {};
+}
+
+double RenderCore::render_load() const noexcept KS_NONBLOCKING {
+    return 0.0;
+}
+
+double RenderCore::peak_render_load() const noexcept KS_NONBLOCKING {
+    return 0.0;
+}
+
+bool RenderCore::muted() const noexcept KS_NONBLOCKING {
+    return false;
+}
+
+void RenderCore::set_output_state(OutputState /*state*/) noexcept KS_NONBLOCKING {}
+
+OutputState RenderCore::output_state() const noexcept KS_NONBLOCKING {
+    return OutputState::Stopped;
+}
+
+// NOLINTEND(readability-convert-member-functions-to-static)
+
 } // namespace ks::engine

@@ -8,6 +8,9 @@ namespace ks::engine {
 
 Engine::Engine(const BusMap& map) : mixer_{interpolator_, map} {}
 
+// Stub (specs/state-out/spec.md requirement 16): the state block isn't kept.
+Engine::Engine(ipc::EngineState& /*state*/, const BusMap& map) : Engine{map} {}
+
 // ---- The control thread --------------------------------------------------------
 
 bool Engine::load(std::size_t deck, const Track& track) noexcept {
@@ -265,6 +268,10 @@ bool Engine::drain(PendingRelease& release) noexcept KS_NONBLOCKING {
     }
     return true;
 }
+
+// Stub (specs/state-out/spec.md requirement 17): publishes nothing yet.
+void Engine::rendered(const Block& /*block*/,
+                      const RenderStats& /*stats*/) noexcept KS_NONBLOCKING {}
 
 const Mixer& Engine::mixer() const noexcept KS_NONBLOCKING {
     return mixer_;

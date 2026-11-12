@@ -11,7 +11,9 @@ constexpr std::uint64_t kCompleteBit = std::uint64_t{1} << 63U;
 
 } // namespace
 
-Track::Track(std::span<const float> samples, std::uint32_t sample_rate) noexcept
+// Stub (specs/state-out/spec.md requirement 9): the ID isn't kept yet.
+Track::Track(std::span<const float> samples, std::uint32_t sample_rate,
+             std::uint64_t /*id*/) noexcept
     : samples_{samples}, sample_rate_{sample_rate} {}
 
 void Track::publish(std::uint64_t frames, bool complete) noexcept KS_NONBLOCKING {
@@ -35,6 +37,12 @@ std::uint64_t Track::capacity() const noexcept KS_NONBLOCKING {
 
 std::uint32_t Track::sample_rate() const noexcept KS_NONBLOCKING {
     return sample_rate_;
+}
+
+// Stub (specs/state-out/spec.md requirement 9).
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): a stub
+std::uint64_t Track::id() const noexcept KS_NONBLOCKING {
+    return 0;
 }
 
 } // namespace ks::engine

@@ -5,7 +5,9 @@
 /// The engine's graph (specs/commands/spec.md requirements 6 to 14): it reads
 /// the clients' command rings at the start of each block, renders the mixer,
 /// and hands tracks and rings to and from the audio thread through the give
-/// and retire rings (ADR 0003 §4 and §10).
+/// and retire rings (ADR 0003 §4 and §10). After each block the render core
+/// renders, it publishes its state (specs/state-out/spec.md requirements 16
+/// to 20; ADR 0003 §5).
 
 #include <ks/core/realtime.h>
 #include <ks/engine/block.h>
@@ -16,6 +18,7 @@
 #include <ks/engine/track.h>
 #include <ks/ipc/command.h>
 #include <ks/ipc/spsc_ring.h>
+#include <ks/ipc/state.h>
 
 #include <array>
 #include <cstddef>
@@ -30,6 +33,9 @@ inline constexpr std::size_t kMaxClients = 8;
 inline constexpr std::size_t kCommandsPerBlock = 32;
 /// The capacity of the give ring, and of the retire ring.
 inline constexpr std::size_t kHandoverCapacity = 64;
+
+static_assert(ipc::kStateDecks == kDecks, "the state segment describes every deck");
+static_assert(ipc::kStateClients == kMaxClients, "the state segment describes every client slot");
 
 /// What the engine knows about one client slot (spec requirement 9). A slot's
 /// statistics start from zero when a client is attached to it.
@@ -70,6 +76,12 @@ public:
     /// the time it returns.
     explicit Engine(const BusMap& map = {});
 
+    /// Builds the engine as the other constructor does, and publishes its
+    /// state to `state` after every block the render core renders. The state
+    /// block must outlive the engine. The engine writes it only from the
+    /// audio thread, in rendered().
+    explicit Engine(ipc::EngineState& state, const BusMap& map = {});
+
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
     Engine(Engine&&) = delete;
@@ -109,6 +121,11 @@ public:
     /// Applies handovers, reads commands, renders the mixer, and releases
     /// what's no longer used, in that order (requirement 8).
     void process(const Block& block) noexcept KS_NONBLOCKING override;
+
+    /// Publishes each deck's block, then the mixer's, then the status block,
+    /// from what the engine holds after the block, if it was built with a
+    /// state block (specs/state-out/spec.md requirement 17).
+    void rendered(const Block& block, const RenderStats& stats) noexcept KS_NONBLOCKING override;
 
     /// The mixer and its decks, for reading their state between blocks.
     [[nodiscard]] const Mixer& mixer() const noexcept KS_NONBLOCKING;

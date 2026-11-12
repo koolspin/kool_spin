@@ -41,11 +41,13 @@ bool consistent(std::span<const std::span<float>> scratch, std::span<const float
 
 } // namespace
 
-std::size_t render_interleaved(RenderCore& core, std::span<const std::span<float>> scratch,
-                               std::span<float> interleaved, std::size_t channels,
-                               std::uint32_t sample_rate,
-                               std::chrono::steady_clock::time_point host_time,
-                               DriverId driver) noexcept KS_NONBLOCKING {
+std::size_t
+render_interleaved(RenderCore& core, std::span<const std::span<float>> scratch,
+                   std::span<float> interleaved, std::size_t channels, std::uint32_t sample_rate,
+                   std::chrono::steady_clock::time_point host_time, DriverId driver,
+                   // Stub (specs/state-out/spec.md requirement 11):
+                   // not given to the blocks yet.
+                   std::chrono::nanoseconds /*output_latency*/) noexcept KS_NONBLOCKING {
     if (!consistent(scratch, interleaved, channels, sample_rate)) {
         std::ranges::fill(interleaved, 0.0F);
         return 0;
