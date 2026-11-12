@@ -174,6 +174,7 @@ The engine (`engine_test.cpp`):
 - [ ] `[auto]` **Back pressure:**
   - `load()` returns false once 64 handovers are waiting;
   - with `collect()` never called, releases wait once the retire ring is full, and later loads wait too, in order;
+  - while no release is waiting, a burst of 8 different tracks to one deck, paused or playing, applies in one block, and the tracks the deck lets go of are released in that block;
   - after `collect()` runs, everything proceeds, and every reference is released exactly once.
 
   (test: "Engine: full rings delay, but lose nothing")
@@ -184,7 +185,7 @@ The engine (`engine_test.cpp`):
   - the slot is reused only after the release has been collected.
 
   (test: "Engine: clients attach and detach")
-- [ ] `[auto]` **Block-size invariance:** a script that loads two tracks, plays them, and sends crossfader, fader, rate, seek, and cue commands at scheduled frames renders bit-identical output with blocks of 1, 37, 128, and 512 frames. (test: "Engine: output doesn't depend on block size")
+- [ ] `[auto]` **Block-size invariance:** a script that loads two tracks, plays them, and sends crossfader, fader, rate, seek, and cue commands at scheduled frames, then, while a deck plays, loads a burst of 6 different tracks with a play command in one block, renders bit-identical output with blocks of 1, 37, 128, and 512 frames. The play command reaches the burst's last track, so the deck is still audible at the end. (test: "Engine: output doesn't depend on block size")
 - [ ] `[auto]` **Under load:** one thread renders blocks without pause for 2 seconds, while another loads, unloads, attaches, detaches, sends commands, and collects as fast as it can. Afterwards, every reference and every detached ring has been released exactly once. Under the `tsan` preset, ThreadSanitizer reports nothing. (test: "Engine: the control thread and the audio thread share nothing unsafely")
 
 Real-time safety and fuzzing:
