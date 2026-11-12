@@ -83,7 +83,7 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     if (block.frames == 0 || block.frames > kMaxBlockFrames || block.sample_rate == 0) {
         return;
     }
-    // A stalled load goes first, and while it waits nothing behind it applies
+    // A stalled handover goes first, and while it waits nothing behind it applies
     // (requirement 13).
     if (!stalled_.has_value() || apply_handover(*stalled_)) {
         stalled_.reset();
@@ -110,8 +110,11 @@ bool Engine::apply_handover(const Handover& handover) noexcept KS_NONBLOCKING {
         return apply_load(handover.index, *handover.track);
     case Handover::Kind::Unload:
         if (handover.index < kDecks) {
-            // The let-go check in push_releases() releases its references.
+            if (release_room() < kPlacesPerDeck) {
+                return false;
+            }
             mixer_.deck(handover.index).unload();
+            let_go(handover.index);
         }
         return true;
     case Handover::Kind::Attach:
@@ -129,37 +132,51 @@ bool Engine::apply_handover(const Handover& handover) noexcept KS_NONBLOCKING {
         }
         return true;
     }
+    if (release_room() == 0) {
+        return false;
+    }
     client.consumer.reset();
     client.stats.attached = false;
-    queue_release(PendingRelease{.ring = handover.ring, .reference = 0});
+    static_cast<void>(
+        queue_release(PendingRelease{.track = nullptr, .ring = handover.ring, .count = 0}));
     return true;
 }
 
 bool Engine::apply_load(std::size_t deck, const Track& track) noexcept KS_NONBLOCKING {
-    const std::size_t first = deck * kReferencesPerDeck;
-    const std::span<Reference> slots = std::span{references_}.subspan(first, kReferencesPerDeck);
-    // A duplicate of a live reference: the older one is released in this
-    // block's releases, and the newer one takes its place (requirement 11).
-    // A reference that's letting go is already committed to its release.
-    for (std::size_t i = 0; i < slots.size(); ++i) {
-        Reference& slot = slots[i];
-        if (slot.state == Reference::State::Live && slot.track == &track) {
-            ++slot.owed;
-            queue_reference(first + i);
-            static_cast<void>(mixer_.deck(deck).load(track));
-            return true;
+    // Room for a duplicate, plus every place's reference (requirement 13).
+    if (release_room() < kPlacesPerDeck + 1) {
+        return false;
+    }
+    // The places then hold only tracks the deck holds: at most 3.
+    let_go(deck);
+    const std::span<const Track*> places =
+        std::span{places_}.subspan(deck * kPlacesPerDeck, kPlacesPerDeck);
+    bool placed = false;
+    for (const Track* const place : places) {
+        if (place == &track) {
+            // A duplicate: the older reference is released in this block's
+            // releases, and the newer one takes its place (requirement 11).
+            static_cast<void>(
+                queue_release(PendingRelease{.track = &track, .ring = nullptr, .count = 1}));
+            placed = true;
+            break;
         }
     }
-    for (Reference& slot : slots) {
-        if (slot.state == Reference::State::Free) {
-            slot = Reference{
-                .track = &track, .owed = 0, .state = Reference::State::Live, .queued = false};
-            // A refused load is released by the let-go check, in this block.
-            static_cast<void>(mixer_.deck(deck).load(track));
-            return true;
+    for (std::size_t i = 0; i < places.size() && !placed; ++i) {
+        if (places[i] == nullptr) {
+            places[i] = &track;
+            placed = true;
         }
     }
-    return false;
+    if (!placed) {
+        // Can't happen while the deck holds at most 3 tracks; waiting keeps
+        // the reference rather than losing it.
+        return false;
+    }
+    // A refused load, or a waiting load this one replaced, leaves at once.
+    static_cast<void>(mixer_.deck(deck).load(track));
+    let_go(deck);
+    return true;
 }
 
 void Engine::read_commands() noexcept KS_NONBLOCKING {
@@ -189,34 +206,43 @@ void Engine::read_commands() noexcept KS_NONBLOCKING {
     }
 }
 
-void Engine::queue_release(const PendingRelease& release) noexcept KS_NONBLOCKING {
-    // Each client ring and reference slot is queued at most once, so the
-    // queue never overflows; the check keeps a broken invariant harmless.
+std::size_t Engine::release_room() const noexcept KS_NONBLOCKING {
+    return pending_.size() - pending_count_;
+}
+
+bool Engine::queue_release(const PendingRelease& release) noexcept KS_NONBLOCKING {
+    if (release.track != nullptr && pending_count_ > 0) {
+        PendingRelease& last =
+            std::span{pending_}[(pending_first_ + pending_count_ - 1) % pending_.size()];
+        if (last.track == release.track) {
+            last.count += release.count;
+            return true;
+        }
+    }
     if (pending_count_ == pending_.size()) {
-        return;
+        return false;
     }
     std::span{pending_}[(pending_first_ + pending_count_) % pending_.size()] = release;
     ++pending_count_;
+    return true;
 }
 
-void Engine::queue_reference(std::size_t reference) noexcept KS_NONBLOCKING {
-    Reference& slot = std::span{references_}[reference];
-    if (!slot.queued) {
-        slot.queued = true;
-        queue_release(PendingRelease{.ring = nullptr, .reference = reference});
+void Engine::let_go(std::size_t deck) noexcept KS_NONBLOCKING {
+    const Deck& owner = mixer_.deck(deck);
+    for (const Track*& place : std::span{places_}.subspan(deck * kPlacesPerDeck, kPlacesPerDeck)) {
+        // With the queue full, the reference stays in its place until there's
+        // room.
+        if (place != nullptr && !owner.holds(*place) &&
+            queue_release(PendingRelease{.track = place, .ring = nullptr, .count = 1})) {
+            place = nullptr;
+        }
     }
 }
 
 void Engine::push_releases() noexcept KS_NONBLOCKING {
-    // This covers refused loads, waiting loads that a later load replaced,
-    // finished fades, and unloads (requirement 11).
-    for (std::size_t i = 0; i < references_.size(); ++i) {
-        Reference& slot = std::span{references_}[i];
-        if (slot.state == Reference::State::Live &&
-            !mixer_.deck(i / kReferencesPerDeck).holds(*slot.track)) {
-            slot.state = Reference::State::LettingGo;
-            queue_reference(i);
-        }
+    // This catches fades that finished while mixing (requirement 11).
+    for (std::size_t deck = 0; deck < kDecks; ++deck) {
+        let_go(deck);
     }
     while (pending_count_ > 0) {
         if (!drain(std::span{pending_}[pending_first_])) {
@@ -227,27 +253,16 @@ void Engine::push_releases() noexcept KS_NONBLOCKING {
     }
 }
 
-bool Engine::drain(const PendingRelease& release) noexcept KS_NONBLOCKING {
+bool Engine::drain(PendingRelease& release) noexcept KS_NONBLOCKING {
     if (release.ring != nullptr) {
         return retire_producer_.try_push(Released{.track = nullptr, .ring = release.ring});
     }
-    Reference& slot = std::span{references_}[release.reference];
-    const Released reference{.track = slot.track, .ring = nullptr};
-    // Duplicates first, then the slot's own reference once its deck has let
-    // go. A partly drained slot keeps its place at the front of the queue.
-    for (; slot.owed > 0; --slot.owed) {
-        if (!retire_producer_.try_push(reference)) {
+    // A partly drained entry keeps its place at the front of the queue.
+    for (; release.count > 0; --release.count) {
+        if (!retire_producer_.try_push(Released{.track = release.track, .ring = nullptr})) {
             return false;
         }
     }
-    if (slot.state == Reference::State::LettingGo) {
-        if (!retire_producer_.try_push(reference)) {
-            return false;
-        }
-        slot = Reference{};
-        return true;
-    }
-    slot.queued = false;
     return true;
 }
 

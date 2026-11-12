@@ -107,47 +107,63 @@ TEST_CASE("Engine: a refused load is released in the same block", "[engine]") {
     REQUIRE(engine->mixer().deck(0).track() == nullptr);
 }
 
-TEST_CASE("Engine: a deck with no room makes loads wait, in order", "[engine]") {
+TEST_CASE("Engine: a burst of different tracks applies in one block", "[engine]") {
     auto engine = std::make_unique<Engine>();
-    // Fill the retire ring with duplicate releases from deck 1.
-    const TestTrack filler;
-    for (std::size_t i = 0; i < ks::engine::kHandoverCapacity; ++i) {
-        REQUIRE(engine->load(1, filler.track));
-    }
-    render_block(*engine);
-    REQUIRE(engine->load(1, filler.track));
-    render_block(*engine);
-
-    // Deck 0 takes four references; the fifth distinct track waits, and so
-    // does everything given after it.
-    const std::array<TestTrack, 6> tracks;
+    // A paused deck replaces each load at once, so it lets go of all but the
+    // last, in load order, in the same block.
+    const std::array<TestTrack, 12> tracks;
     for (const TestTrack& track : tracks) {
         REQUIRE(engine->load(0, track.track));
     }
+    REQUIRE(engine->unload(1));
     render_block(*engine);
-    render_block(*engine);
-    REQUIRE(engine->mixer().deck(0).track() == &tracks.at(3).track);
-
-    for (std::size_t i = 0; i < ks::engine::kHandoverCapacity; ++i) {
-        REQUIRE(collect_track(*engine) == &filler.track);
-    }
-    REQUIRE_FALSE(engine->collect().has_value());
-    // The first three releases free their slots after this block's handovers.
-    render_block(*engine);
-    for (std::size_t i = 0; i < 3; ++i) {
+    REQUIRE(engine->mixer().deck(0).track() == &tracks.back().track);
+    for (std::size_t i = 0; i + 1 < tracks.size(); ++i) {
         REQUIRE(collect_track(*engine) == &tracks.at(i).track);
     }
     REQUIRE_FALSE(engine->collect().has_value());
-    REQUIRE(engine->mixer().deck(0).track() == &tracks.at(3).track);
 
-    // The fourth and fifth let go in the same block, released in slot order.
+    REQUIRE(engine->unload(0));
     render_block(*engine);
-    const Track* const one = collect_track(*engine);
-    const Track* const two = collect_track(*engine);
-    REQUIRE(((one == &tracks.at(3).track && two == &tracks.at(4).track) ||
-             (one == &tracks.at(4).track && two == &tracks.at(3).track)));
+    REQUIRE(collect_track(*engine) == &tracks.back().track);
     REQUIRE_FALSE(engine->collect().has_value());
-    REQUIRE(engine->mixer().deck(0).track() == &tracks.at(5).track);
+}
+
+TEST_CASE("Engine: loads wait only while releases wait, and keep their order", "[engine]") {
+    auto engine = std::make_unique<Engine>();
+    // Alternating two tracks on a paused deck releases one reference per
+    // load, in load order: first, second, first, ...
+    const TestTrack first;
+    const TestTrack second;
+    const std::array<const Track*, 2> alternate{&first.track, &second.track};
+    std::size_t given = 0;
+    std::size_t blocks = 0;
+    bool refused = false;
+    for (; blocks < 20 && !refused; ++blocks) {
+        for (std::size_t i = 0; i < ks::engine::kHandoverCapacity; ++i) {
+            if (!engine->load(0, *alternate.at(given % 2))) {
+                refused = true;
+                break;
+            }
+            ++given;
+        }
+        render_block(*engine);
+    }
+    // Nothing waits until the retire ring is full and the release queue has
+    // filled behind it: two full give rings apply before any load waits.
+    REQUIRE(refused);
+    REQUIRE(given > 2 * ks::engine::kHandoverCapacity);
+
+    std::size_t released = 0;
+    for (std::size_t round = 0; round < 100 && released + 1 < given; ++round) {
+        while (const std::optional<Released> next = engine->collect()) {
+            REQUIRE(next.value_or(Released{}).track == alternate.at(released % 2));
+            ++released;
+        }
+        render_block(*engine);
+    }
+    REQUIRE(released + 1 == given);
+    REQUIRE(engine->mixer().deck(0).track() == alternate.at((given - 1) % 2));
 }
 
 TEST_CASE("Engine: an invalid block does nothing at all", "[engine]") {
