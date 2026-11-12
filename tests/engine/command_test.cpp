@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/engine/command.h>
 
+#include <ks/engine/block.h>
+#include <ks/engine/interpolator.h>
 #include <ks/engine/mixer.h>
+#include <ks/engine/track.h>
 #include <ks/ipc/command.h>
 
 #include <catch2/catch_test_macros.hpp>
@@ -10,15 +13,25 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <memory>
+#include <span>
+#include <vector>
 
 namespace {
 
+using ks::engine::apply;
+using ks::engine::Block;
 using ks::engine::BusMap;
 using ks::engine::Command;
 using ks::engine::CrossfaderSide;
 using ks::engine::decode;
+using ks::engine::Interpolator;
+using ks::engine::kDecks;
+using ks::engine::Mixer;
 using ks::engine::Rejection;
+using ks::engine::Track;
 using ks::ipc::CommandSlot;
 using ks::ipc::CommandType;
 
@@ -163,6 +176,132 @@ TEST_CASE("decode: the first fault is reported", "[command]") {
     CHECK(rejection_of(slot) == Rejection::BadValue);
     slot.payload[0] = 1;
     CHECK(decode(slot).has_value());
+}
+
+constexpr std::uint32_t kRate = 48'000;
+constexpr std::size_t kTrackFrames = 10'000;
+constexpr std::size_t kChannels = 4;
+constexpr std::size_t kRenderFrames = 512;
+
+/// One ramp track, loaded on every deck of two mixers: one driven by apply(),
+/// the other by direct calls.
+struct Pair {
+    Pair() : samples(kTrackFrames * 2), applied{interpolator}, direct{interpolator} {
+        for (std::size_t frame = 0; frame < kTrackFrames; ++frame) {
+            const float value = static_cast<float>(frame) / static_cast<float>(kTrackFrames);
+            samples.at(frame * 2) = value;
+            samples.at((frame * 2) + 1) = -value;
+        }
+        track = std::make_unique<Track>(samples, kRate);
+        track->publish(kTrackFrames, true);
+        for (std::size_t i = 0; i < kDecks; ++i) {
+            REQUIRE(applied.deck(i).load(*track));
+            REQUIRE(direct.deck(i).load(*track));
+        }
+    }
+
+    Interpolator interpolator;
+    std::vector<float> samples;
+    std::unique_ptr<Track> track;
+    Mixer applied;
+    Mixer direct;
+};
+
+std::vector<std::vector<float>> render(Mixer& mixer) {
+    std::vector<std::vector<float>> out(kChannels, std::vector<float>(kRenderFrames, 0.0F));
+    std::vector<std::span<float>> views(out.begin(), out.end());
+    mixer.process(Block{.channels = views,
+                        .frames = kRenderFrames,
+                        .sample_rate = kRate,
+                        .host_time = {},
+                        .resumed = false});
+    return out;
+}
+
+void check_same(Pair& pair) {
+    CHECK(pair.applied.settings() == pair.direct.settings());
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        CAPTURE(i);
+        const auto& a = pair.applied.deck(i);
+        const auto& d = pair.direct.deck(i);
+        CHECK(a.track() == d.track());
+        CHECK(a.playing() == d.playing());
+        CHECK(a.waiting() == d.waiting());
+        CHECK(std::bit_cast<std::uint64_t>(a.rate()) == std::bit_cast<std::uint64_t>(d.rate()));
+        CHECK(std::bit_cast<std::uint64_t>(a.position()) ==
+              std::bit_cast<std::uint64_t>(d.position()));
+        CHECK(std::bit_cast<std::uint64_t>(a.cue()) == std::bit_cast<std::uint64_t>(d.cue()));
+    }
+}
+
+TEST_CASE("apply: each type does what the direct call does", "[command]") {
+    using enum CommandType;
+    constexpr double kMinusInfinity = -std::numeric_limits<double>::infinity();
+
+    struct Case {
+        Command command;
+        std::function<void(Mixer&)> direct;
+    };
+    const std::vector<Case> cases{
+        {{.type = SetPlaying, .deck = 1, .on = true},
+         [](Mixer& m) { m.deck(1).set_playing(true); }},
+        {{.type = SetRate, .deck = 2, .value = 1.05}, [](Mixer& m) { m.deck(2).set_rate(1.05); }},
+        {{.type = Seek, .deck = 3, .value = 4800.5}, [](Mixer& m) { m.deck(3).seek(4800.5); }},
+        {{.type = SetCuePoint, .deck = 0, .value = 1200.0},
+         [](Mixer& m) { m.deck(0).set_cue(1200.0); }},
+        {{.type = SetTrim, .deck = 1, .value = kMinusInfinity},
+         [&](Mixer& m) { m.set_trim(1, kMinusInfinity); }},
+        {{.type = SetFader, .deck = 2, .value = 2.0}, [](Mixer& m) { m.set_fader(2, 2.0); }},
+        {{.type = SetCrossfaderAssign, .deck = 3, .side = CrossfaderSide::B},
+         [](Mixer& m) { m.set_crossfader_assign(3, CrossfaderSide::B); }},
+        {{.type = SetChannelCue, .deck = 0, .on = true}, [](Mixer& m) { m.set_cue(0, true); }},
+        {{.type = SetCrossfader, .value = 0.2}, [](Mixer& m) { m.set_crossfader(0.2); }},
+        {{.type = SetCrossfaderCurve, .value = 0.3}, [](Mixer& m) { m.set_crossfader_curve(0.3); }},
+        {{.type = SetMainLevel, .value = -6.0}, [](Mixer& m) { m.set_main_level(-6.0); }},
+        {{.type = SetHeadphoneLevel, .value = kMinusInfinity},
+         [&](Mixer& m) { m.set_headphone_level(kMinusInfinity); }},
+        {{.type = SetCueMix, .value = 0.7}, [](Mixer& m) { m.set_cue_mix(0.7); }},
+        {{.type = SetBusMap, .bus_map = BusMap{.main = 2, .cue = 0}},
+         [](Mixer& m) { m.set_bus_map(BusMap{.main = 2, .cue = 0}); }},
+    };
+
+    // Each type on its own.
+    for (const auto& [command, direct] : cases) {
+        CAPTURE(command.type);
+        Pair pair;
+        pair.applied.deck(command.deck).set_playing(true);
+        pair.direct.deck(command.deck).set_playing(true);
+        apply(command, pair.applied);
+        direct(pair.direct);
+        check_same(pair);
+        CHECK(render(pair.applied) == render(pair.direct));
+        check_same(pair);
+    }
+
+    // All of them, one after another, with a block between each.
+    Pair pair;
+    for (const auto& [command, direct] : cases) {
+        CAPTURE(command.type);
+        apply(command, pair.applied);
+        direct(pair.direct);
+        check_same(pair);
+        CHECK(render(pair.applied) == render(pair.direct));
+    }
+    check_same(pair);
+}
+
+TEST_CASE("apply: a deck index out of range changes nothing", "[command]") {
+    using enum CommandType;
+    Pair pair;
+    for (const auto type : {SetPlaying, SetRate, Seek, SetCuePoint, SetTrim, SetFader,
+                            SetCrossfaderAssign, SetChannelCue}) {
+        CAPTURE(type);
+        apply(
+            Command{
+                .type = type, .deck = kDecks, .value = 0.5, .on = true, .side = CrossfaderSide::A},
+            pair.applied);
+        check_same(pair);
+    }
 }
 
 } // namespace

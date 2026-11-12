@@ -152,7 +152,63 @@ std::expected<Command, Rejection> decode(const ipc::CommandSlot& slot) noexcept 
     return command;
 }
 
-// Stub: apply() does nothing until plan task 2 (specs/commands/plan.md).
-void apply(const Command& /*command*/, Mixer& /*mixer*/) noexcept KS_NONBLOCKING {}
+void apply(const Command& command, Mixer& mixer) noexcept KS_NONBLOCKING {
+    // decode() only builds deck indices below kDecks, but a Command can be
+    // built by hand: the mixer's controls ignore a bad index, and deck()
+    // requires a good one.
+    const std::size_t deck = command.deck;
+    switch (command.type) {
+    case CommandType::SetPlaying:
+        if (deck < kDecks) {
+            mixer.deck(deck).set_playing(command.on);
+        }
+        break;
+    case CommandType::SetRate:
+        if (deck < kDecks) {
+            mixer.deck(deck).set_rate(command.value);
+        }
+        break;
+    case CommandType::Seek:
+        if (deck < kDecks) {
+            mixer.deck(deck).seek(command.value);
+        }
+        break;
+    case CommandType::SetCuePoint:
+        if (deck < kDecks) {
+            mixer.deck(deck).set_cue(command.value);
+        }
+        break;
+    case CommandType::SetTrim:
+        mixer.set_trim(deck, command.value);
+        break;
+    case CommandType::SetFader:
+        mixer.set_fader(deck, command.value);
+        break;
+    case CommandType::SetCrossfaderAssign:
+        mixer.set_crossfader_assign(deck, command.side);
+        break;
+    case CommandType::SetChannelCue:
+        mixer.set_cue(deck, command.on);
+        break;
+    case CommandType::SetCrossfader:
+        mixer.set_crossfader(command.value);
+        break;
+    case CommandType::SetCrossfaderCurve:
+        mixer.set_crossfader_curve(command.value);
+        break;
+    case CommandType::SetMainLevel:
+        mixer.set_main_level(command.value);
+        break;
+    case CommandType::SetHeadphoneLevel:
+        mixer.set_headphone_level(command.value);
+        break;
+    case CommandType::SetCueMix:
+        mixer.set_cue_mix(command.value);
+        break;
+    case CommandType::SetBusMap:
+        mixer.set_bus_map(command.bus_map);
+        break;
+    }
+}
 
 } // namespace ks::engine
