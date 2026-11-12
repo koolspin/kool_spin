@@ -14,6 +14,7 @@
 #include "test_support.h"
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -24,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -474,6 +476,57 @@ TEST_CASE("Engine: full rings delay, but lose nothing", "[commands][engine]") {
         REQUIRE(ledger.outstanding() == 0);
         REQUIRE(ledger.track_releases() == given);
     }
+
+    SECTION("while no release waits, a burst of different tracks doesn't wait") {
+        // Requirement 13: a load waits only while releases are waiting for the
+        // retire ring. A reference the deck lets go of during a block's
+        // handovers mustn't hold up the loads behind it.
+        auto engine = std::make_unique<Engine>();
+        Ledger ledger;
+        constexpr std::size_t kBurst = 8;
+        std::vector<std::unique_ptr<OwnedTrack>> paused_burst;
+        std::vector<std::unique_ptr<OwnedTrack>> audible_burst;
+        for (std::size_t i = 0; i < kBurst; ++i) {
+            const float step = 0.01F * static_cast<float>(i);
+            paused_burst.push_back(constant_track(0.01F + step, 4'800));
+            audible_burst.push_back(constant_track(0.2F + step, 4'800));
+        }
+
+        // A paused deck is silent, so each load replaces the one before at
+        // once, and the deck lets go of all but the last in the same block.
+        for (const auto& track : paused_burst) {
+            REQUIRE(engine->load(0, track->track()));
+            ledger.loaded(track->track());
+        }
+        render_block(*engine);
+        REQUIRE(engine->mixer().deck(0).track() == &paused_burst.back()->track());
+        REQUIRE(ledger.collect_all(*engine));
+        REQUIRE(ledger.outstanding() == 1);
+
+        // An audible deck crossfades: its outgoing head keeps the track it was
+        // playing, and each load after the first replaces the new main head,
+        // which is still silent. The loads in between are released in the
+        // same block.
+        Client client;
+        REQUIRE(engine->attach(client.ring()).has_value());
+        render_block(*engine);
+        REQUIRE(client.send(playing(0, true)));
+        // Past the fade in, so the fade out outlasts the next block.
+        for (std::size_t done = 0; done <= kFadeFrames; done += kBlock) {
+            render_block(*engine);
+        }
+        for (const auto& track : audible_burst) {
+            REQUIRE(engine->load(0, track->track()));
+            ledger.loaded(track->track());
+        }
+        render_block(*engine);
+        REQUIRE(engine->mixer().deck(0).track() == &audible_burst.back()->track());
+        REQUIRE(engine->mixer().deck(0).holds(paused_burst.back()->track()));
+        REQUIRE(ledger.collect_all(*engine));
+        REQUIRE(ledger.outstanding() == 2);
+        REQUIRE(ledger.outstanding(paused_burst.back()->track()) == 1);
+        REQUIRE(ledger.outstanding(audible_burst.back()->track()) == 1);
+    }
 }
 
 TEST_CASE("Engine: clients attach and detach", "[commands][engine]") {
@@ -537,6 +590,12 @@ TEST_CASE("Engine: output doesn't depend on block size", "[commands][engine]") {
     const auto first = music_track(0);
     const auto second = music_track(7'777);
     const auto third = music_track(3'000);
+    constexpr std::size_t kBurst = 6;
+    std::vector<std::unique_ptr<OwnedTrack>> burst;
+    burst.reserve(kBurst);
+    for (std::size_t i = 0; i < kBurst; ++i) {
+        burst.push_back(music_track(11'000 + (1'000 * i)));
+    }
 
     enum class Kind : std::uint8_t { Load, Unload, Send };
     struct Event {
@@ -550,7 +609,7 @@ TEST_CASE("Engine: output doesn't depend on block size", "[commands][engine]") {
         return Event{
             .frame = frame, .kind = Kind::Send, .deck = 0, .track = nullptr, .command = command};
     };
-    const std::vector<Event> script{
+    std::vector<Event> script{
         {.frame = 0, .kind = Kind::Load, .deck = 0, .track = &first->track(), .command = {}},
         {.frame = 0, .kind = Kind::Load, .deck = 1, .track = &second->track(), .command = {}},
         send(0, assign(0, CrossfaderSide::A)),
@@ -574,7 +633,21 @@ TEST_CASE("Engine: output doesn't depend on block size", "[commands][engine]") {
         {.frame = 28'000, .kind = Kind::Load, .deck = 0, .track = &third->track(), .command = {}},
         send(30'000, playing(0, true)),
         {.frame = 34'000, .kind = Kind::Unload, .deck = 1, .track = nullptr, .command = {}},
+        // Deck 0 bypasses the crossfader, which is at B, so it's heard.
+        send(35'000, assign(0, CrossfaderSide::Thru)),
     };
+    // While deck 0 plays, a burst of different tracks and a play command in
+    // one block. None of the loads waits (requirement 13), so the command
+    // applies to the last, which fades in as the third fades out.
+    constexpr std::size_t kBurstFrame = 36'000;
+    for (const auto& track : burst) {
+        script.push_back({.frame = kBurstFrame,
+                          .kind = Kind::Load,
+                          .deck = 0,
+                          .track = &track->track(),
+                          .command = {}});
+    }
+    script.push_back(send(kBurstFrame, playing(0, true)));
     constexpr std::size_t kFrames = 40'000;
 
     const auto run = [&script](std::size_t block_frames) {
@@ -613,6 +686,9 @@ TEST_CASE("Engine: output doesn't depend on block size", "[commands][engine]") {
 
     const Outputs reference = run(1);
     REQUIRE(any_sound(reference));
+    // The play command reached the burst's last track.
+    const std::span<const float> end = std::span{reference.at(0)}.last(1'000);
+    REQUIRE(std::ranges::any_of(end, [](float sample) { return sample != 0.0F; }));
     for (const std::size_t block_frames : {std::size_t{37}, std::size_t{128}, std::size_t{512}}) {
         CAPTURE(block_frames);
         REQUIRE(identical(run(block_frames), reference));
