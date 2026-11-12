@@ -10,6 +10,7 @@ target_sources(ks_ipc PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include
     FILES
+        include/ks/ipc/command.h
         include/ks/ipc/layout.h
         include/ks/ipc/region.h
         include/ks/ipc/seqlock.h
