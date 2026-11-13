@@ -7,6 +7,7 @@
 
 #include <ks/engine/render_core.h>
 
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -21,6 +22,12 @@ struct StreamInfo {
     std::uint32_t sample_rate = 0;
     std::uint32_t channels = 0;
     std::uint32_t period_frames = 0;
+    /// The device's buffer, in periods; 0 if the backend doesn't say.
+    std::uint32_t periods = 0;
+    /// The backend's estimate of how long after a block's host time its first
+    /// frame leaves the device; 0 if it has none
+    /// (specs/miniaudio-devices/spec.md requirement 7).
+    std::chrono::nanoseconds output_latency{0};
 };
 
 struct BackendError {
