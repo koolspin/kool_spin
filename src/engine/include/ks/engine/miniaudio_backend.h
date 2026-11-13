@@ -190,6 +190,10 @@ private:
     /// Holds the miniaudio context that available() lists devices with.
     std::unique_ptr<Lister> lister_;
     OutputDevice device_;
+    /// The format the first device opened through this source had; 0 until
+    /// one has.
+    std::uint32_t opened_sample_rate_ = 0;
+    std::uint32_t opened_channels_ = 0;
 };
 
 } // namespace ks::engine
