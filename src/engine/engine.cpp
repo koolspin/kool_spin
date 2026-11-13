@@ -85,10 +85,59 @@ Engine::Engine(ipc::EngineState& state, const BusMap& map) : Engine{map} {
     }
 }
 
-// Stub (specs/resume-state/spec.md requirements 13 to 16): it starts clean,
-// takes no track, and never fades in.
-Engine::Engine(ipc::EngineState& state, std::span<const Track* const> /*tracks*/, const BusMap& map)
-    : Engine{state, map} {}
+Engine::Engine(ipc::EngineState& state, std::span<const Track* const> tracks, const BusMap& map)
+    : Engine{state, map} {
+    // Requirements 13 and 14. This runs before any block, on the control
+    // thread, so the audio thread's members are free to set here.
+    if (!found_snapshot_.has_value()) {
+        return;
+    }
+    const Snapshot& snapshot = *found_snapshot_;
+    // Every value in a valid snapshot is in range, so the setters keep it
+    // as it is, and settings() equals the snapshot's.
+    const MixerSettings& settings = snapshot.mixer;
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const ChannelSettings& channel = std::span{settings.channels}[i];
+        mixer_.set_trim(i, channel.trim_db);
+        mixer_.set_fader(i, channel.fader);
+        mixer_.set_crossfader_assign(i, channel.side);
+        mixer_.set_cue(i, channel.cue);
+    }
+    mixer_.set_crossfader(settings.crossfader);
+    mixer_.set_crossfader_curve(settings.crossfader_transition);
+    mixer_.set_main_level(settings.main_level_db);
+    mixer_.set_headphone_level(settings.headphone_level_db);
+    mixer_.set_cue_mix(settings.cue_mix);
+    mixer_.set_bus_map(settings.bus_map);
+
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const DeckSnapshot& saved = std::span{snapshot.decks}[i];
+        Deck& deck = mixer_.deck(i);
+        if (saved.track_id != 0) {
+            // The first non-null track with the ID; ID 0 never matches.
+            const Track* found = nullptr;
+            for (const Track* const track : tracks) {
+                if (track != nullptr && track->id() == saved.track_id) {
+                    found = track;
+                    break;
+                }
+            }
+            // The deck is silent and the engine holds nothing yet, so the
+            // load is immediate and the deck's first place is free; the
+            // reference is kept there, as apply_load() keeps one.
+            if (found != nullptr && deck.load(*found)) {
+                deck.set_cue(saved.cue);
+                std::span{places_}[kPlacesPerDeck * i] = found;
+                std::span{resume_outcome_.tracks}[i] = found;
+            }
+        }
+        deck.set_rate(saved.rate);
+    }
+    resume_outcome_.generation = snapshot.generation;
+    // The first rendered block moves the resumed decks on and starts the
+    // fade-in (requirements 15 and 16).
+    resume_pending_ = true;
+}
 
 // ---- The control thread --------------------------------------------------------
 

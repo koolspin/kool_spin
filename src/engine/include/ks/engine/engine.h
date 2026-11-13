@@ -293,6 +293,12 @@ private:
 
     /// Set by the resuming constructor; never changed after.
     ResumeOutcome resume_outcome_;
+    /// Set by the resuming constructor when it resumed from found_snapshot_;
+    /// the first rendered block then moves each deck that took a track
+    /// (resume_outcome_.tracks) to found_snapshot_'s position, moved on by
+    /// the time since its host time, starts the ones that were playing, and
+    /// clears it (specs/resume-state/spec.md requirement 15).
+    bool resume_pending_ = false;
 };
 
 } // namespace ks::engine
