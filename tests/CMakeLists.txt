@@ -30,6 +30,7 @@ ks_add_test(ks_engine_tests
         engine/engine_test.cpp
         engine/mixer_test.cpp
         engine/render_core_test.cpp
+        engine/resume_test.cpp
         engine/safety_test.cpp
     LIBRARIES ks::engine)
 

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/engine/engine.h>
 
-#include <bit>
+#include "codes.h"
+
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -11,36 +12,16 @@ namespace ks::engine {
 
 namespace {
 
-// The state segment's encodings (specs/state-out/spec.md requirement 1).
+// The state segment's encodings (specs/state-out/spec.md requirement 1). The
+// ones the resume slots share are in codes.h.
 
-std::uint64_t real_code(double value) noexcept KS_NONBLOCKING {
-    return std::bit_cast<std::uint64_t>(value);
-}
-
-std::uint64_t host_time_code(std::chrono::steady_clock::time_point time) noexcept KS_NONBLOCKING {
-    const std::int64_t ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
-    return std::bit_cast<std::uint64_t>(ns);
-}
+using codes::flag_code;
+using codes::host_time_code;
+using codes::real_code;
+using codes::side_code;
 
 std::uint64_t duration_code(std::chrono::nanoseconds duration) noexcept KS_NONBLOCKING {
     return static_cast<std::uint64_t>(duration.count());
-}
-
-std::uint64_t flag_code(bool value) noexcept KS_NONBLOCKING {
-    return value ? 1U : 0U;
-}
-
-std::uint64_t side_code(CrossfaderSide side) noexcept KS_NONBLOCKING {
-    switch (side) {
-    case CrossfaderSide::A:
-        return 0;
-    case CrossfaderSide::B:
-        return 1;
-    case CrossfaderSide::Thru:
-        return 2;
-    }
-    return 2;
 }
 
 std::uint64_t output_state_code(OutputState state) noexcept KS_NONBLOCKING {
