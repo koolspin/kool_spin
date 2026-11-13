@@ -15,8 +15,10 @@
 #include <expected>
 #include <format>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -64,6 +66,8 @@ public:
         }
         driver_ = config.driver;
 
+        // Stub (specs/miniaudio-devices/spec.md requirements 2 and 6): only
+        // System and Null are told apart, and config.device is ignored.
         std::array<ma_backend, 1> null_backend{ma_backend_null};
         const bool use_null = config.backends == MiniaudioBackends::Null;
         if (const ma_result result = ma_context_init(use_null ? null_backend.data() : nullptr,
@@ -107,6 +111,8 @@ public:
             .sample_rate = device_.sampleRate,
             .channels = device_.playback.channels,
             .period_frames = device_.playback.internalPeriodSizeInFrames,
+            // Stub (specs/miniaudio-devices/spec.md requirement 7): no
+            // periods or latency estimate yet.
         };
         return {};
     }
@@ -127,7 +133,8 @@ public:
 
     [[nodiscard]] const StreamInfo& info() const noexcept override { return info_; }
 
-    // miniaudio's notifications aren't handled until step 2c.
+    // Stub (specs/miniaudio-devices/spec.md requirement 11): miniaudio's
+    // notifications aren't handled yet.
     [[nodiscard]] bool lost() const noexcept override { return false; }
 
     [[nodiscard]] std::uint64_t callbacks() const noexcept override {
@@ -143,6 +150,8 @@ private:
         self->callbacks_.fetch_add(1, std::memory_order_relaxed);
         const std::span<float> out{static_cast<float*>(output),
                                    std::size_t{frames} * self->channels_};
+        // Stub (specs/miniaudio-devices/spec.md requirement 8): blocks carry
+        // no output latency yet.
         static_cast<void>(render_interleaved(*self->core_, self->scratch_, out, self->channels_,
                                              self->sample_rate_, host_time, self->driver_));
     }
@@ -170,6 +179,65 @@ open_miniaudio(RenderCore& core, const MiniaudioConfig& config) {
         return std::unexpected{std::move(opened.error())};
     }
     return backend;
+}
+
+// Stub (specs/miniaudio-devices/spec.md requirement 3).
+std::string_view backend_name(MiniaudioBackends /*backends*/) noexcept {
+    return {};
+}
+
+// Stub (specs/miniaudio-devices/spec.md requirement 3).
+std::optional<MiniaudioBackends> parse_backend(std::string_view /*name*/) noexcept {
+    return std::nullopt;
+}
+
+// Stub (specs/miniaudio-devices/spec.md requirement 5).
+std::expected<OutputDeviceList, BackendError> list_output_devices(MiniaudioBackends /*backends*/) {
+    return failure(BackendError::Kind::OpenFailed, "not implemented");
+}
+
+// Stub (specs/miniaudio-devices/spec.md requirement 10): no event loses the
+// device.
+void LossDetector::on_event(DeviceEvent /*event*/) noexcept KS_NONBLOCKING {}
+
+void LossDetector::stopping() noexcept KS_NONBLOCKING {
+    stopping_.store(true, std::memory_order_release);
+}
+
+void LossDetector::starting() noexcept KS_NONBLOCKING {
+    stopping_.store(false, std::memory_order_release);
+}
+
+bool LossDetector::lost() const noexcept KS_NONBLOCKING {
+    return lost_.load(std::memory_order_acquire);
+}
+
+// Stub (specs/miniaudio-devices/spec.md requirements 12 to 15): the source
+// can't be created yet.
+class MiniaudioDeviceSource::Lister {};
+
+std::expected<std::unique_ptr<MiniaudioDeviceSource>, BackendError>
+MiniaudioDeviceSource::create(const MiniaudioSourceConfig& /*config*/) {
+    return failure(BackendError::Kind::NoBackend, "not implemented");
+}
+
+MiniaudioDeviceSource::MiniaudioDeviceSource(Key /*key*/, const MiniaudioSourceConfig& config,
+                                             std::unique_ptr<Lister> lister, OutputDevice device)
+    : config_{config}, lister_{std::move(lister)}, device_{std::move(device)} {}
+
+MiniaudioDeviceSource::~MiniaudioDeviceSource() = default;
+
+bool MiniaudioDeviceSource::available() {
+    return false;
+}
+
+std::expected<std::unique_ptr<AudioBackend>, BackendError>
+MiniaudioDeviceSource::open(RenderCore& /*core*/, DriverId /*driver*/) {
+    return failure(BackendError::Kind::OpenFailed, "not implemented");
+}
+
+const OutputDevice& MiniaudioDeviceSource::device() const noexcept {
+    return device_;
 }
 
 } // namespace ks::engine
