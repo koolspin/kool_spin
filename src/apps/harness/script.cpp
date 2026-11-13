@@ -483,8 +483,14 @@ private:
                                         std::size_t line);
     Parsed<std::monostate> read_end(double time, std::size_t line);
     Parsed<std::monostate> read_load(double time, Tokens args, std::size_t line);
+    /// `seek` or `cuepoint`.
+    Parsed<std::monostate> read_track_time(double time, CommandType type, Tokens args,
+                                           std::size_t line);
     Parsed<std::monostate> add_event(double time, const Action& action, std::size_t line);
     std::optional<ScriptError> finish();
+    /// Gives each seek and cue point its deck's track, walking the events
+    /// in run order (requirement 10).
+    std::optional<ScriptError> resolve_track_times();
 
     std::filesystem::path directory_;
     Script script_;
@@ -620,8 +626,11 @@ Parsed<std::monostate> Reader::read_command(double time, std::string_view keywor
         return add_event(time, Unload{.deck = *target}, line);
     }
     if (keyword == "seek" || keyword == "cuepoint") {
-        // Plan task 3.
-        return line_error(quoted(keyword) + " isn't supported yet");
+        if (auto ok = arity(keyword, args, 2); !ok) {
+            return ok;
+        }
+        return read_track_time(
+            time, keyword == "seek" ? CommandType::Seek : CommandType::SetCuePoint, args, line);
     }
     if (keyword == "repeat") {
         // Plan task 4.
@@ -666,6 +675,26 @@ Parsed<std::monostate> Reader::read_load(double time, Tokens args, std::size_t l
     return add_event(time, Load{.deck = *target}, line);
 }
 
+Parsed<std::monostate> Reader::read_track_time(double time, CommandType type, Tokens args,
+                                               std::size_t line) {
+    const Parsed<std::size_t> target = deck(args[0]);
+    if (!target) {
+        return std::unexpected{target.error()};
+    }
+    const Parsed<double> seconds = amount(args[1], "a time in the track");
+    if (!seconds) {
+        return std::unexpected{seconds.error()};
+    }
+    // A frame at any track rate is finite at this bound, so decode() accepts
+    // it whatever the rate turns out to be (plan, Decisions).
+    if (!(*seconds <= kMaxTime)) {
+        return line_error("a time in the track must be at most 86,400 seconds (24 hours)");
+    }
+    // The deck's track is filled in by finish(), once the events are in run
+    // order.
+    return add_event(time, TrackTime{.type = type, .deck = *target, .seconds = *seconds}, line);
+}
+
 Parsed<std::monostate> Reader::add_event(double time, const Action& action, std::size_t line) {
     if (script_.events.size() >= kMaxEvents) {
         return line_error("a script can have at most 100,000 events, repeats included");
@@ -696,6 +725,38 @@ std::optional<ScriptError> Reader::finish() {
         }
     }
     std::ranges::stable_sort(script_.events, {}, &Event::time);
+    return resolve_track_times();
+}
+
+std::optional<ScriptError> Reader::resolve_track_times() {
+    std::array<std::optional<std::size_t>, engine::kDecks> decks{};
+    const std::span<std::optional<std::size_t>> deck_track{decks};
+    for (Event& event : script_.events) {
+        if (const auto* load = std::get_if<Load>(&event.action)) {
+            deck_track[load->deck] = load->track;
+        } else if (const auto* unload = std::get_if<Unload>(&event.action)) {
+            deck_track[unload->deck].reset();
+        } else if (auto* time = std::get_if<TrackTime>(&event.action)) {
+            const std::optional<std::size_t> track = deck_track[time->deck];
+            if (!track) {
+                return ScriptError{.line = event.line,
+                                   .message =
+                                       "deck " + std::to_string(time->deck + 1) +
+                                       " has no track then: load one at an earlier time first"};
+            }
+            time->track = *track;
+            // A synthetic track's rate is known now, so check the command
+            // decode() would see (requirement 11). A file's rate isn't known
+            // until it's decoded; read_track_time() bounds its seconds.
+            if (const auto* signal = std::get_if<Signal>(&script_.tracks.at(*track).source)) {
+                if (const Parsed<Command> command =
+                        checked(command_for(*time, signal->sample_rate));
+                    !command) {
+                    return ScriptError{.line = event.line, .message = command.error()};
+                }
+            }
+        }
+    }
     return std::nullopt;
 }
 
@@ -706,9 +767,10 @@ std::expected<Script, ScriptError> read_script(std::string_view text,
     return Reader{directory}.read(text);
 }
 
-// Stub (specs/harness/spec.md requirement 10).
-engine::Command command_for(const TrackTime& /*event*/, std::uint32_t /*sample_rate*/) noexcept {
-    return {};
+engine::Command command_for(const TrackTime& event, std::uint32_t sample_rate) noexcept {
+    return Command{.type = event.type,
+                   .deck = event.deck,
+                   .value = event.seconds * static_cast<double>(sample_rate)};
 }
 
 } // namespace ks::harness

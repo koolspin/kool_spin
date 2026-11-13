@@ -18,10 +18,12 @@
 namespace {
 
 using ks::engine::Command;
+using ks::harness::command_for;
 using ks::harness::Load;
 using ks::harness::read_script;
 using ks::harness::Script;
 using ks::harness::ScriptError;
+using ks::harness::TrackTime;
 using ks::ipc::CommandType;
 
 const std::filesystem::path kDirectory{"/s"};
@@ -73,6 +75,47 @@ TEST_CASE("script: the end and the time limit") {
     CHECK(read_script("86400 end\n", kDirectory).has_value());
     CHECK(read_script("0 cuemix 0\n0.001 end\n", kDirectory).has_value());
     CHECK(error_line("1 cuemix 0\n1 end\n") == 1);
+}
+
+TEST_CASE("script: seek and cue point follow the deck's track in run order") {
+    const auto read = read_script("track a noise 1\n"
+                                  "track b file \"b.wav\"\n"
+                                  "3 seek 1 0.5\n"
+                                  "2 load 1 b\n"
+                                  "0 load 1 a\n"
+                                  "1 cuepoint 1 0\n"
+                                  "2 seek 1 86400\n"
+                                  "4 end\n",
+                                  kDirectory);
+    REQUIRE(read.has_value());
+    REQUIRE(read->events.size() == 5);
+    CHECK(std::get<TrackTime>(read->events.at(1).action) ==
+          TrackTime{.type = CommandType::SetCuePoint, .deck = 0, .seconds = 0, .track = 0});
+    // Line 7 comes after the load on line 4 at the same time.
+    CHECK(std::get<TrackTime>(read->events.at(3).action).track == 1);
+    CHECK(std::get<TrackTime>(read->events.at(4).action) ==
+          TrackTime{.type = CommandType::Seek, .deck = 0, .seconds = 0.5, .track = 1});
+}
+
+TEST_CASE("script: seek and cue point errors") {
+    const std::string tracks = "track a noise 1\n0 load 1 a\n";
+    CHECK(error_line(tracks + "1 seek 1\n9 end\n") == 3);
+    CHECK(error_line(tracks + "1 seek 1 -1\n9 end\n") == 3);
+    CHECK(error_line(tracks + "1 cuepoint 1 86400.5\n9 end\n") == 3);
+    CHECK(error_line(tracks + "1 seek 0 1\n9 end\n") == 3);
+    // At the same time, a seek on an earlier line runs before the load.
+    CHECK(error_line("track a noise 1\n1 seek 1 0\n1 load 1 a\n9 end\n") == 2);
+    // The first in run order, not in script order.
+    CHECK(error_line("track a noise 1\n5 seek 2 0\n2 seek 3 0\n9 end\n") == 3);
+}
+
+TEST_CASE("script: command_for() converts seconds to frames") {
+    const TrackTime seek{.type = CommandType::Seek, .deck = 2, .seconds = 1.5, .track = 0};
+    CHECK(command_for(seek, 8'000) ==
+          Command{.type = CommandType::Seek, .deck = 2, .value = 12'000});
+    const TrackTime cue{.type = CommandType::SetCuePoint, .deck = 0, .seconds = 86'400};
+    CHECK(command_for(cue, 384'000) ==
+          Command{.type = CommandType::SetCuePoint, .deck = 0, .value = 86'400.0 * 384'000.0});
 }
 
 } // namespace
