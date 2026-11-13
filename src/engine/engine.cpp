@@ -214,8 +214,11 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     if (block.frames == 0 || block.frames > kMaxBlockFrames || block.sample_rate == 0) {
         return;
     }
-    // Stub (specs/resume-state/spec.md requirements 15 and 16): a resumed
-    // engine's first block doesn't move its decks, and nothing fades in.
+    if (resume_pending_) {
+        resume_pending_ = false;
+        resume_moves(block);
+    }
+    // Stub (specs/resume-state/spec.md requirement 16): nothing fades in.
 
     // A stalled handover goes first, and while it waits nothing behind it applies
     // (requirement 13).
@@ -231,6 +234,32 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     read_commands();
     mixer_.process(block);
     push_releases();
+}
+
+void Engine::resume_moves(const Block& block) noexcept KS_NONBLOCKING {
+    // Requirement 15: each resumed deck goes to the snapshot's position,
+    // moved on by the time since it was written if it was playing. The deck
+    // clamps the result to its track.
+    if (!found_snapshot_.has_value()) {
+        return;
+    }
+    const Snapshot& snapshot = *found_snapshot_;
+    const std::chrono::steady_clock::duration gap = block.host_time - snapshot.host_time;
+    const double elapsed = gap.count() > 0 ? std::chrono::duration<double>(gap).count() : 0.0;
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const Track* const track = std::span{resume_outcome_.tracks}[i];
+        if (track == nullptr) {
+            continue;
+        }
+        const DeckSnapshot& saved = std::span{snapshot.decks}[i];
+        Deck& deck = mixer_.deck(i);
+        const double travel =
+            saved.playing ? saved.rate * static_cast<double>(track->sample_rate()) * elapsed : 0.0;
+        deck.seek(saved.position + travel);
+        if (saved.playing) {
+            deck.set_playing(true);
+        }
+    }
 }
 
 bool Engine::apply_handover(const Handover& handover) noexcept KS_NONBLOCKING {

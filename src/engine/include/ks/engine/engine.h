@@ -249,6 +249,10 @@ private:
     /// Writes a snapshot of what the engine holds after `block` to the next
     /// resume slot (specs/resume-state/spec.md requirement 11).
     void write_snapshot(const Block& block) noexcept KS_NONBLOCKING;
+    /// The first rendered block's moves after a resume: seeks each resumed
+    /// deck and starts the ones that were playing
+    /// (specs/resume-state/spec.md requirement 15).
+    void resume_moves(const Block& block) noexcept KS_NONBLOCKING;
 
     Interpolator interpolator_;
     Mixer mixer_;
