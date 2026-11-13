@@ -2,6 +2,9 @@
 #include <ks/harness/options.h>
 
 #include <ks/engine/miniaudio_backend.h>
+#include <ks/harness/run.h>
+#include <ks/harness/script.h>
+#include <ks/harness/tracks.h>
 
 #include <atomic>
 #include <charconv>
@@ -10,6 +13,8 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <fstream>
+#include <ios>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -194,26 +199,140 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     return options;
 }
 
-// Partly a stub (specs/harness/spec.md requirement 3): only the device
-// number check is in place; task 12 does the rest.
-int run(const Options& options, std::ostream& /*out*/, std::ostream& err,
-        const std::atomic<bool>& /*stop*/) {
-    if (options.device && !options.out) {
-        const auto list = engine::list_output_devices(
-            options.backend.value_or(engine::MiniaudioBackends::System));
+namespace {
+
+/// --list-devices: the backend's output devices, numbered from 0, with the
+/// default marked, as ks-tone lists them.
+int list_devices(engine::MiniaudioBackends backends, std::ostream& out, std::ostream& err) {
+    const auto list = engine::list_output_devices(backends);
+    if (!list) {
+        err << "ks-harness: the output devices couldn't be listed: " << list.error().message
+            << '\n';
+        return kExitRuntimeError;
+    }
+    out << std::format("Output devices on {}:\n", list->backend);
+    for (std::size_t i = 0; const engine::OutputDevice& device : list->devices) {
+        out << std::format("  {}: {}{}\n", i, device.name, device.is_default ? " (default)" : "");
+        ++i;
+    }
+    return kExitOk;
+}
+
+/// The script file's text, at most kMaxScriptBytes + 1 bytes of it: enough
+/// for read_script() to refuse a script that's too long without reading all
+/// of a huge file.
+std::expected<std::string, std::string> read_text(const std::filesystem::path& path) {
+    std::ifstream file{path, std::ios::binary};
+    if (!file) {
+        return std::unexpected{
+            std::format("ks-harness: {}: the script couldn't be opened", path.string())};
+    }
+    std::string text(kMaxScriptBytes + 1, '\0');
+    file.read(text.data(), static_cast<std::streamsize>(text.size()));
+    if (file.bad()) {
+        return std::unexpected{
+            std::format("ks-harness: {}: the script couldn't be read", path.string())};
+    }
+    text.resize(static_cast<std::size_t>(file.gcount()));
+    return text;
+}
+
+/// Device mode's options from the command line, with --device turned into the
+/// device's key. On failure, returns the exit code, having printed why.
+std::expected<DeviceOptions, int> device_options(const Options& options, std::ostream& err) {
+    DeviceOptions device{
+        .backends = options.backend.value_or(engine::MiniaudioBackends::System),
+        .device = std::nullopt,
+        .sample_rate = options.rate.value_or(0),
+        .channels = options.channels.value_or(0),
+        .period_frames = options.period.value_or(0),
+    };
+    if (options.device) {
+        const auto list = engine::list_output_devices(device.backends);
         if (!list) {
             err << "ks-harness: the output devices couldn't be listed: " << list.error().message
                 << '\n';
-            return kExitRuntimeError;
+            return std::unexpected{kExitRuntimeError};
         }
         if (*options.device >= list->devices.size()) {
             err << std::format("ks-harness: device {} isn't listed; --list-devices shows the "
                                "{} device numbers\n",
                                *options.device, list->devices.size());
-            return kExitUsageError;
+            return std::unexpected{kExitUsageError};
         }
+        device.device = std::span{list->devices}[*options.device].key;
     }
-    return kExitRuntimeError;
+    return device;
+}
+
+} // namespace
+
+int run(const Options& options, std::ostream& out, std::ostream& err,
+        const std::atomic<bool>& stop) {
+    if (options.help) {
+        out << usage();
+        return kExitOk;
+    }
+    if (options.list_devices) {
+        return list_devices(options.backend.value_or(engine::MiniaudioBackends::System), out, err);
+    }
+    if (!options.script) {
+        err << "ks-harness: no script given\n\n" << usage();
+        return kExitUsageError;
+    }
+
+    // Check the device number before reading anything, as a usage error.
+    std::optional<DeviceOptions> device;
+    if (!options.out && !options.check) {
+        auto resolved = device_options(options, err);
+        if (!resolved) {
+            return resolved.error();
+        }
+        device = *resolved;
+    }
+
+    const std::filesystem::path& path = *options.script;
+    const auto text = read_text(path);
+    if (!text) {
+        err << text.error() << '\n';
+        return kExitRuntimeError;
+    }
+    const auto script = read_script(*text, path.parent_path());
+    if (!script) {
+        err << std::format("{}:{}: {}\n", path.string(), script.error().line,
+                           script.error().message);
+        return kExitUsageError;
+    }
+    const auto tracks = TrackSet::prepare(*script);
+    if (!tracks) {
+        err << "ks-harness: " << tracks.error() << '\n';
+        return kExitRuntimeError;
+    }
+
+    if (options.check) {
+        out << std::format("{}: {} tracks, {} events, ends at {:.3f} s\n", path.string(),
+                           script->tracks.size(), script->events.size(), script->end);
+        return kExitOk;
+    }
+
+    std::expected<Report, std::string> report;
+    if (options.out) {
+        const FileOptions file{
+            .path = *options.out,
+            .sample_rate = options.rate.value_or(kDefaultFileRate),
+            .channels = options.channels.value_or(kDefaultFileChannels),
+            .block_frames = options.period.value_or(kDefaultFileBlock),
+        };
+        report = render_to_file(*script, *tracks, file, stop);
+    } else {
+        report = play_on_device(*script, *tracks, *device, stop, out);
+    }
+    if (!report) {
+        err << "ks-harness: " << report.error() << '\n';
+        return kExitRuntimeError;
+    }
+    print_report(*report, out);
+    return flags_problem(*report) ? kExitProblem : kExitOk;
 }
 
 } // namespace ks::harness

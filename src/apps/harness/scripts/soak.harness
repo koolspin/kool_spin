@@ -1,0 +1,89 @@
+# A one-hour soak for Phase 1a, step 8 (specs/harness/spec.md requirement 32).
+#
+# Four decks play synthetic tracks at different sample rates, so the engine
+# resamples each one differently. Every minute the decks are reloaded, seek,
+# change rate (reverse included), and the crossfader sweeps back and forth
+# every 5 seconds. It runs anywhere, with no music files:
+#
+#     ks-harness src/apps/harness/scripts/soak.harness
+#     ks-harness --out soak.wav src/apps/harness/scripts/soak.harness
+#
+# To soak with music instead, replace the track lines with file sources. A
+# relative path is relative to this script's directory, and the path goes in
+# double quotes. For example:
+#
+#     track a file "music/first.flac"
+#     track b file "/home/me/Music/second.mp3"
+#
+# Keep the seek times below each track's length, and keep every track name
+# the load lines use.
+
+# ---- Tracks: different signals at different rates -------------------------
+
+track a sine 220 300 rate 44100
+track b sweep 50 8000 240 rate 48000
+track c noise 120 rate 96000
+track d clicks 120 300 rate 22050
+track e sine 330 180 rate 32000
+
+# ---- The mixer ------------------------------------------------------------
+
+0 main -6
+0 headphones -12
+0 cuemix 0.5
+0 curve 0.5
+0 crossfader 0.5
+0 assign 1 a
+0 assign 2 b
+0 assign 3 thru
+0 assign 4 thru
+0 fader 1 0.9
+0 fader 2 0.9
+0 fader 3 0.15
+0 fader 4 0.6
+0 trim 3 -6
+0 pfl 4 on
+
+# ---- Every minute: loads, seeks, and rate changes -------------------------
+
+0 repeat 60 every 60
+# Deck 1: the 220 Hz sine, forward, faster, reverse, then forward again.
+0 load 1 a
+0 play 1
+10 seek 1 30
+20 rate 1 1.02
+30 rate 1 -1
+40 rate 1 1
+# Halfway through the minute, deck 1 changes to the 330 Hz sine.
+45 load 1 e
+46 play 1
+50 seek 1 60
+# Deck 2: the sweep, slower, then backwards at half speed.
+5 load 2 b
+5 play 2
+25 seek 2 100
+35 rate 2 0.94
+45 rate 2 -0.5
+55 rate 2 1
+# Deck 3: quiet noise, paused and seeking now and then.
+2 load 3 c
+2 play 3
+15 pause 3
+17 seek 3 10
+18 play 3
+# Deck 4: clicks, played on the headphones too.
+8 load 4 d
+8 play 4
+38 rate 4 1.5
+48 rate 4 1
+58 unload 4
+end repeat
+
+# ---- Every 5 seconds: the crossfader moves --------------------------------
+
+0 repeat 720 every 5
+0 crossfader 0.2
+2.5 crossfader 0.8
+end repeat
+
+3600 end
