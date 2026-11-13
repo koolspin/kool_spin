@@ -78,8 +78,6 @@ bool valid(const DeckSnapshot& deck) noexcept KS_NONBLOCKING {
     return within(deck.position, 0.0, max_frames) && within(deck.cue, 0.0, max_frames);
 }
 
-/// Whether a Mixer can hold `mixer` (requirement 7). −∞ trims and levels are
-/// allowed; NaN and +∞ aren't.
 /// Whether `map` is valid: both channels even, below kMaxOutputChannels, and
 /// different. The same check as Mixer's, which is private.
 bool valid(const BusMap& map) noexcept KS_NONBLOCKING {
@@ -87,10 +85,14 @@ bool valid(const BusMap& map) noexcept KS_NONBLOCKING {
            map.cue < kMaxOutputChannels && map.main != map.cue;
 }
 
+/// Whether a Mixer can hold `channel`. A −∞ trim is allowed; NaN and +∞
+/// aren't.
 bool valid(const ChannelSettings& channel) noexcept KS_NONBLOCKING {
     return channel.trim_db <= kMaxTrimDb && within(channel.fader, 0.0, 1.0);
 }
 
+/// Whether a Mixer can hold `mixer` (requirement 7). −∞ trims and levels are
+/// allowed; NaN and +∞ aren't.
 bool valid(const MixerSettings& mixer) noexcept KS_NONBLOCKING {
     for (const ChannelSettings& channel : mixer.channels) {
         if (!valid(channel)) {
