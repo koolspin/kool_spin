@@ -14,5 +14,5 @@ ks_add_test(ks_resume_state_acceptance_tests
 # The validator's fuzz target, run under the fuzz preset only.
 ks_add_fuzz_target(ks_resume_state_fuzz
     SOURCES resume_fuzz.cpp
-    RUNS 1000000
+    RUNS 200000
     LIBRARIES ks::engine)

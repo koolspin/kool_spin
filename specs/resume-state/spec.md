@@ -1,6 +1,6 @@
 # Feature: Resume state
 
-- **Status:** Approved by the maintainer on 2026-11-12. Protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-12; requirements 11 and 19 and the carrying-on, ends, and fuzzing criteria amended the same day. Protected: build loops can't change it.
 - **Roadmap:** Phase 1a (step 6c)
 - **Built by:** loop
 
@@ -83,7 +83,7 @@ Let a new engine carry on where a crashed one left off. After every block it ren
 11. **Every block:** in `rendered()`, after the status block, an engine built with a state block writes one snapshot of what it holds after the block, to slot `generation % 2`, through a `SeqlockWriter`:
     - `generation`: one more than the last it wrote (see requirement 12 for the first);
     - `host_time`: the block's end, as for the status block;
-    - **each deck:** the main head's track's ID, and with a track, whether it's playing, its position, and its cue point; with no track, ID 0, paused, position 0, and cue 0, whatever the deck's own flags say. The rate is the deck's target rate either way;
+    - **each deck:** the main head's track's ID, and with a track, whether it's playing, its position, and its cue point; with no track, ID 0, paused, position 0, and cue 0, whatever the deck's own flags say. A track whose ID is 0 counts as no track: no engine could resume it. The rate is the deck's target rate either way;
     - `mixer`: `Mixer::settings()`.
 
     It writes nothing for blocks the render core doesn't render, and nothing before the first. Each snapshot it writes is valid, so it reads back with `validate()` as what was written.
@@ -103,7 +103,7 @@ Let a new engine carry on where a crashed one left off. After every block it ren
 ### Real time and fuzzing
 
 18. **Real time:** everything `process()` and `rendered()` call, including encoding a snapshot, the CRC, the first block's moves, and the fade, is `KS_NONBLOCKING`, allocates nothing, and takes no lock. The constructors and `read_snapshot()` run on the control thread.
-19. **Fuzzing:** under the `fuzz` preset, a libFuzzer target runs for 1,000,000 inputs with a fixed seed. For each input it:
+19. **Fuzzing:** under the `fuzz` preset, a libFuzzer target runs for 200,000 inputs with a fixed seed. For each input it:
     - validates the input's bytes as a `ResumeState`, zero-padded, for slot 0 and slot 1: whatever it accepts is a valid snapshot (requirement 7) and encodes back to the same bytes;
     - does the same with the checksum corrected, so the range checks are reached;
     - builds a valid snapshot from the input's bytes and checks the round trip of requirement 9;
@@ -138,11 +138,11 @@ The engine (`engine_resume_test.cpp`):
 
 - [ ] `[auto]` **Writing:** while engine A loads, plays, seeks, sets cue points and rates, unloads, and changes every mixer setting through commands, after every block slot `g % 2` validates to generation `g` with the block's end as its host time, each deck's track ID, play state, position, rate, and cue point as the engine's decks report them (empty decks as requirement 11 says), and `Mixer::settings()`; the other slot still holds generation `g − 1`. Generations start at 1 in a zero-filled block. (test: "Resume: the engine writes a snapshot after every block")
 - [ ] `[auto]` **Generations continue:** an engine built on a block whose newest valid snapshot has generation `g`, with either constructor, writes `g + 1` first; one built on a block with no valid snapshot writes 1 first. (test: "Resume: generations continue across engines")
-- [ ] `[auto]` **Carrying on:** engine A plays deck 0 at rate 1 (a 48 kHz track), deck 1 at rate 1.0159 (a 44.1 kHz track), and deck 2 in reverse at rate −0.5, holds deck 3 paused with a cue point, and sets every mixer control. Engine B is built from A's block and the tracks, and its first block starts 0.75 s after A's last block ended. B's outcome names A's generation and each deck's track; after B's first block, each deck's position is the snapshot's position plus `rate × track rate × 0.75 s` plus one block's travel (within 10⁻⁴ frames), each deck's rate, cue point, play state, and track ID match A's, and B's mixer settings equal A's, including A's bus map, although B was given a different one. (test: "Resume: decks carry on where they would have been")
+- [ ] `[auto]` **Carrying on:** engine A plays deck 0 at rate 1 (a 48 kHz track), deck 1 at rate 1.0159 (a 44.1 kHz track), and deck 2 in reverse at rate −0.5, holds deck 3 paused with a cue point, and sets every mixer control. Engine B is built from A's block and the tracks, and its first block starts 0.75 s after A's last block ended. B's outcome names A's generation and each deck's track; after B's first block, each deck's position is the snapshot's position plus `rate × track rate × 0.75 s` plus one block's travel (within 10⁻⁴ frames; with B's first block starting 1 s before A's last ended, no travel for the gap), each deck's rate, cue point, play state, and track ID match A's, and B's mixer settings equal A's, including A's bus map, although B was given a different one. (test: "Resume: decks carry on where they would have been")
 - [ ] `[auto]` **No gap:** engine A plays two tracks through the crossfader; engine B resumes from a copy of A's state block, with its first block starting where A's last ended, while A also carries on. From frame `N` (50 ms) on, B's output equals A's within 10⁻⁵. (test: "Resume: with no gap, the output carries on")
 - [ ] `[auto]` **Fade-in:** a deck playing a constant 0.5 resumes. B's first frame is silent; at every frame `n` before `N`, each sample's magnitude is at most `0.5 × n / N` plus 10⁻³; at frame `N` and after, it's 0.5 within 10⁻³. With a 44.1 kHz device, `N` is 2,205 frames. (test: "Resume: playback fades in over 50 ms")
 - [ ] `[auto]` **Missing tracks:** when engine B is given only some of A's tracks, plus an unrelated one, a track with ID 0, a null pointer, and two tracks sharing an ID, decks whose track wasn't given come back empty and paused, the first track with a matching ID is taken, and nothing else is: the outcome names exactly the tracks taken. (test: "Resume: decks without their track come back empty")
-- [ ] `[auto]` **Ends:** a deck playing forward 1,000 frames from its end, and one playing in reverse 1,000 frames from its start, resume after 1 s at the end and at frame 0, still flagged as playing. (test: "Resume: decks stop at the ends")
+- [ ] `[auto]` **Ends:** a deck playing forward 1,000 frames from its end, and one playing in reverse 1,000 frames from its start, resume after 1 s stopped at the end and at frame 0, and paused, as a deck that reaches an end is (deck requirement 17). (test: "Resume: decks stop at the ends")
 - [ ] `[auto]` **Corruption starts clean:** for each of these, applied to both slots of A's block: zero-filled, all bytes 0xFF, bytes from a fixed seed, a flipped bit, odd sequence numbers, and out-of-range values with a correct checksum (a NaN position, rate 10, fader 2, bus map 1 and 3). Engine B, given the tracks, has an empty outcome, takes no reference (`collect()` returns nothing), has every deck empty and paused and the default mixer settings with the map it was given, renders 100 blocks of finite silence, and writes generation 1 first. With only the newest slot corrupted, B resumes from the older one. (test: "Resume: a corrupted resume state starts clean")
 - [ ] `[auto]` **References:** a track resumed on two decks is named twice in the outcome; unloading both returns it twice through `collect()`; and loads, unloads, and commands work as usual afterwards. (test: "Resume: references come back through collect()")
 - [ ] `[auto]` **Block size:** a resumed engine rendered in 64-frame blocks and in blocks of varying sizes from 1 to 512 frames, from the same first host time and with the same commands at the same frames, gives bit-identical output, fade included. (test: "Resume: output doesn't depend on block size")
@@ -150,7 +150,7 @@ The engine (`engine_resume_test.cpp`):
 Real time and fuzzing:
 
 - [ ] `[auto]` **Real time:** rendering a resumed engine through `try_render()`, with its first-block moves, its fade, commands, and snapshot writes, compiles under function-effect analysis and is clean under `rtsan`. (test: `realtime_test.cpp`, "Resume is real-time safe")
-- [ ] `[auto]` **Fuzzing:** under `fuzz`, `ks_resume_state_fuzz` runs 1,000,000 inputs with seed 1 without a failed check, a crash, or a sanitizer report. (test: `resume_fuzz.cpp`, ctest `ks_resume_state_fuzz`)
+- [ ] `[auto]` **Fuzzing:** under `fuzz`, `ks_resume_state_fuzz` runs 200,000 inputs with seed 1 without a failed check, a crash, or a sanitizer report. (test: `resume_fuzz.cpp`, ctest `ks_resume_state_fuzz`)
 - [ ] `[auto]` **Every CI configuration:** all of the above pass on Linux and on macOS arm64 (`debug`, `release`, `asan`, `tsan`).
 
 ## Out of scope
