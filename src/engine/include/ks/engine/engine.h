@@ -246,6 +246,9 @@ private:
     [[nodiscard]] bool drain(PendingRelease& release) noexcept KS_NONBLOCKING;
     /// Pushes `handover` to the give ring. Control thread only.
     [[nodiscard]] bool give(const Handover& handover) noexcept;
+    /// Writes a snapshot of what the engine holds after `block` to the next
+    /// resume slot (specs/resume-state/spec.md requirement 11).
+    void write_snapshot(const Block& block) noexcept KS_NONBLOCKING;
 
     Interpolator interpolator_;
     Mixer mixer_;
@@ -279,6 +282,14 @@ private:
     std::array<std::optional<ipc::SeqlockWriter<ipc::DeckState>>, kDecks> deck_writers_;
     std::optional<ipc::SeqlockWriter<ipc::MixerState>> mixer_writer_;
     std::optional<ipc::SeqlockWriter<ipc::EngineStatus>> status_writer_;
+    /// The resume slots' writers; slot i takes the generations with i = g % 2.
+    std::array<std::optional<ipc::SeqlockWriter<ipc::ResumeState>>, ipc::kResumeSlots>
+        resume_writers_;
+    /// The generation of the next snapshot written (requirement 12).
+    std::uint64_t next_generation_ = 1;
+    /// The snapshot read_snapshot() found when the engine was built: read
+    /// once, by the state-block constructor, for the resuming one to use.
+    std::optional<Snapshot> found_snapshot_;
 
     /// Set by the resuming constructor; never changed after.
     ResumeOutcome resume_outcome_;

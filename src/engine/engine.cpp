@@ -68,8 +68,21 @@ Engine::Engine(ipc::EngineState& state, const BusMap& map) : Engine{map} {
     }
     mixer_writer_.emplace(state.mixer);
     status_writer_.emplace(state.status);
-    // Stub (specs/resume-state/spec.md requirement 12): the resume slots
-    // aren't read yet.
+    std::size_t slot = 0;
+    for (ipc::Seqlock<ipc::ResumeState>& lock : state.resume) {
+        std::span{resume_writers_}[slot].emplace(lock);
+        ++slot;
+    }
+    // Generations carry on from the newest valid snapshot
+    // (specs/resume-state/spec.md requirement 12). A valid generation is at
+    // most kMaxGeneration, so the next one saturates there rather than
+    // becoming invalid.
+    found_snapshot_ = read_snapshot(state);
+    if (found_snapshot_.has_value()) {
+        next_generation_ = found_snapshot_->generation < kMaxGeneration
+                               ? found_snapshot_->generation + 1
+                               : kMaxGeneration;
+    }
 }
 
 // Stub (specs/resume-state/spec.md requirements 13 to 16): it starts clean,
@@ -423,8 +436,38 @@ void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_
     status.render_load = real_code(stats.render_load);
     status.peak_render_load = real_code(stats.peak_render_load);
     status_writer_->write(status);
-    // Stub (specs/resume-state/spec.md requirement 11): no snapshot is
-    // written yet.
+
+    write_snapshot(block);
+}
+
+void Engine::write_snapshot(const Block& block) noexcept KS_NONBLOCKING {
+    std::optional<ipc::SeqlockWriter<ipc::ResumeState>>& writer =
+        std::span{resume_writers_}[next_generation_ % ipc::kResumeSlots];
+    if (!writer.has_value()) {
+        return;
+    }
+    Snapshot snapshot{};
+    snapshot.generation = next_generation_;
+    // The same expression as the status block's host time.
+    snapshot.host_time = block.host_time + frames_to_duration(block.frames, block.sample_rate);
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const Deck& deck = mixer_.deck(i);
+        DeckSnapshot& out = std::span{snapshot.decks}[i];
+        // A track with ID 0 counts as no track: no engine could resume it.
+        if (const Track* const track = deck.track(); track != nullptr && track->id() != 0) {
+            out.track_id = track->id();
+            out.playing = deck.playing();
+            out.position = deck.position();
+            out.cue = deck.cue();
+        }
+        out.rate = deck.rate();
+    }
+    snapshot.mixer = mixer_.settings();
+    writer->write(encode(snapshot));
+    // Saturates at the highest valid generation; unreachable in practice.
+    if (next_generation_ < kMaxGeneration) {
+        ++next_generation_;
+    }
 }
 
 const Mixer& Engine::mixer() const noexcept KS_NONBLOCKING {
