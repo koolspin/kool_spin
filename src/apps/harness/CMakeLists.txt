@@ -7,6 +7,7 @@ add_library(ks_harness STATIC
     options.cpp
     run.cpp
     script.cpp
+    script_lexer.cpp
     tracks.cpp)
 add_library(ks::harness ALIAS ks_harness)
 

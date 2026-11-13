@@ -37,7 +37,11 @@ ks_add_test(ks_engine_tests
 ks_add_test(ks_harness_tests
     SOURCES
         harness/encode_test.cpp
+        harness/script_lexer_test.cpp
+        harness/script_test.cpp
     LIBRARIES ks::harness)
+# The harness's private headers, such as script_lexer.h.
+target_include_directories(ks_harness_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/apps/harness)
 
 ks_add_test(ks_ipc_tests
     SOURCES
