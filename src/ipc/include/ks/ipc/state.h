@@ -3,7 +3,9 @@
 
 /// @file
 /// The engine-state segment: what the engine publishes after every block it
-/// renders (ADR 0003 §5, specs/state-out/spec.md requirements 1 to 8).
+/// renders (ADR 0003 §5, specs/state-out/spec.md requirements 1 to 8), and the
+/// two resume slots it writes in turn (ADR 0003 §11,
+/// specs/resume-state/spec.md requirements 2 to 5).
 ///
 /// Each block is a seqlock that only the engine's audio thread writes. Every
 /// field is a std::uint64_t:
@@ -48,6 +50,12 @@ inline constexpr std::uint64_t kClientCorrupt = std::uint64_t{1} << 1U;
 inline constexpr std::uint64_t kStatusMuted = std::uint64_t{1} << 0U;
 /// EngineStatus::flags: muted, and the fade has reached silence.
 inline constexpr std::uint64_t kStatusSilenced = std::uint64_t{1} << 1U;
+
+/// ResumeDeck::flags: playing.
+inline constexpr std::uint64_t kResumePlaying = std::uint64_t{1} << 0U;
+
+/// The resume slots: the engine writes them in turn.
+inline constexpr std::size_t kResumeSlots = 2;
 
 /// One deck, after a block (requirement 3).
 struct DeckState {
@@ -141,16 +149,56 @@ struct EngineStatus {
     std::array<ClientAck, kStateClients> clients;
 };
 
+/// One deck in a resume slot (resume-state requirement 2).
+struct ResumeDeck {
+    /// The main head's track's ID; 0 with no track.
+    std::uint64_t track_id;
+    /// kResumePlaying.
+    std::uint64_t flags;
+    /// Real: the main head's position, in track frames.
+    std::uint64_t position;
+    /// Real: the target rate.
+    std::uint64_t rate;
+    /// Real: the cue point, in track frames.
+    std::uint64_t cue;
+};
+
+/// One resume slot's value: what the engine needs to resume, as of the end of
+/// a block (resume-state requirement 3).
+struct ResumeState {
+    /// Counts snapshots written, across engines; 0 in a slot never written.
+    std::uint64_t generation;
+    /// Host time: the end of the block.
+    std::uint64_t host_time;
+    std::array<ResumeDeck, kStateDecks> decks;
+    /// Channel i is deck i.
+    std::array<ChannelState, kStateDecks> channels;
+    std::uint64_t crossfader;            ///< Real.
+    std::uint64_t crossfader_transition; ///< Real.
+    std::uint64_t main_level_db;         ///< Real.
+    std::uint64_t headphone_level_db;    ///< Real.
+    std::uint64_t cue_mix;               ///< Real.
+    std::uint64_t bus_main;              ///< The main bus's first device channel.
+    std::uint64_t bus_cue;               ///< The cue bus's first device channel.
+    /// The CRC-32 of the bytes of every word before this one, in memory
+    /// order, in the low 32 bits; the high 32 bits are 0.
+    std::uint64_t checksum;
+};
+
 /// The engine-state segment's layout after its header (requirement 7).
-/// Zero-filled memory is an EngineState in which nothing has been published.
+/// Zero-filled memory is an EngineState in which nothing has been published,
+/// and whose resume slots hold nothing valid.
 struct EngineState {
     std::array<Seqlock<DeckState>, kStateDecks> decks;
     Seqlock<MixerState> mixer;
     Seqlock<EngineStatus> status;
+    /// Slot i holds the snapshots whose generation modulo 2 is i.
+    std::array<Seqlock<ResumeState>, kResumeSlots> resume;
 };
 
-/// The layout version in an engine-state segment's header.
-inline constexpr std::uint32_t kEngineStateLayoutVersion = 1;
+/// The layout version in an engine-state segment's header: 2 since the
+/// resume slots were added.
+inline constexpr std::uint32_t kEngineStateLayoutVersion = 2;
 
 /// An engine-state segment's size: the header, then an EngineState at
 /// kSegmentHeaderSize.
@@ -218,11 +266,37 @@ static_assert(offsetof(EngineStatus, render_load) == 88);
 static_assert(offsetof(EngineStatus, peak_render_load) == 96);
 static_assert(offsetof(EngineStatus, clients) == 104);
 
+static_assert(std::is_standard_layout_v<ResumeDeck> && std::is_trivially_copyable_v<ResumeDeck>);
+static_assert(sizeof(ResumeDeck) == 5 * sizeof(std::uint64_t));
+static_assert(offsetof(ResumeDeck, track_id) == 0);
+static_assert(offsetof(ResumeDeck, flags) == 8);
+static_assert(offsetof(ResumeDeck, position) == 16);
+static_assert(offsetof(ResumeDeck, rate) == 24);
+static_assert(offsetof(ResumeDeck, cue) == 32);
+
+static_assert(std::is_standard_layout_v<ResumeState> && std::is_trivially_copyable_v<ResumeState>);
+static_assert(sizeof(ResumeState) ==
+              (2 + (5 * kStateDecks) + (4 * kStateDecks) + 8) * sizeof(std::uint64_t));
+static_assert(offsetof(ResumeState, generation) == 0);
+static_assert(offsetof(ResumeState, host_time) == 8);
+static_assert(offsetof(ResumeState, decks) == 16);
+static_assert(offsetof(ResumeState, channels) == 176);
+static_assert(offsetof(ResumeState, crossfader) == 304);
+static_assert(offsetof(ResumeState, crossfader_transition) == 312);
+static_assert(offsetof(ResumeState, main_level_db) == 320);
+static_assert(offsetof(ResumeState, headphone_level_db) == 328);
+static_assert(offsetof(ResumeState, cue_mix) == 336);
+static_assert(offsetof(ResumeState, bus_main) == 344);
+static_assert(offsetof(ResumeState, bus_cue) == 352);
+static_assert(offsetof(ResumeState, checksum) == 360);
+
 static_assert(std::is_standard_layout_v<EngineState> && std::is_trivially_copyable_v<EngineState>);
 static_assert(offsetof(EngineState, decks) == 0);
 static_assert(offsetof(EngineState, mixer) == kStateDecks * sizeof(Seqlock<DeckState>));
 static_assert(offsetof(EngineState, status) ==
               offsetof(EngineState, mixer) + sizeof(Seqlock<MixerState>));
+static_assert(offsetof(EngineState, resume) ==
+              offsetof(EngineState, status) + sizeof(Seqlock<EngineStatus>));
 static_assert(kSegmentHeaderSize % alignof(EngineState) == 0,
               "an EngineState starts right after the segment header");
 

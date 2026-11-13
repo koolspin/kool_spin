@@ -45,7 +45,7 @@ TEST_CASE("State: the layout", "[state][layout]") {
 
     STATIC_REQUIRE(ks::ipc::kStateDecks == ks::engine::kDecks);
     STATIC_REQUIRE(ks::ipc::kStateClients == ks::engine::kMaxClients);
-    STATIC_REQUIRE(ks::ipc::kEngineStateLayoutVersion == 1);
+    STATIC_REQUIRE(ks::ipc::kEngineStateLayoutVersion == 2);
 
     // Requirement 3: each field 8 bytes after the last, from 0.
     STATIC_REQUIRE(sizeof(DeckState) == 11 * kWord);

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/engine/engine.h>
 
-#include <bit>
+#include "codes.h"
+
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -11,36 +12,16 @@ namespace ks::engine {
 
 namespace {
 
-// The state segment's encodings (specs/state-out/spec.md requirement 1).
+// The state segment's encodings (specs/state-out/spec.md requirement 1). The
+// ones the resume slots share are in codes.h.
 
-std::uint64_t real_code(double value) noexcept KS_NONBLOCKING {
-    return std::bit_cast<std::uint64_t>(value);
-}
-
-std::uint64_t host_time_code(std::chrono::steady_clock::time_point time) noexcept KS_NONBLOCKING {
-    const std::int64_t ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
-    return std::bit_cast<std::uint64_t>(ns);
-}
+using codes::flag_code;
+using codes::host_time_code;
+using codes::real_code;
+using codes::side_code;
 
 std::uint64_t duration_code(std::chrono::nanoseconds duration) noexcept KS_NONBLOCKING {
     return static_cast<std::uint64_t>(duration.count());
-}
-
-std::uint64_t flag_code(bool value) noexcept KS_NONBLOCKING {
-    return value ? 1U : 0U;
-}
-
-std::uint64_t side_code(CrossfaderSide side) noexcept KS_NONBLOCKING {
-    switch (side) {
-    case CrossfaderSide::A:
-        return 0;
-    case CrossfaderSide::B:
-        return 1;
-    case CrossfaderSide::Thru:
-        return 2;
-    }
-    return 2;
 }
 
 std::uint64_t output_state_code(OutputState state) noexcept KS_NONBLOCKING {
@@ -87,6 +68,75 @@ Engine::Engine(ipc::EngineState& state, const BusMap& map) : Engine{map} {
     }
     mixer_writer_.emplace(state.mixer);
     status_writer_.emplace(state.status);
+    std::size_t slot = 0;
+    for (ipc::Seqlock<ipc::ResumeState>& lock : state.resume) {
+        std::span{resume_writers_}[slot].emplace(lock);
+        ++slot;
+    }
+    // Generations carry on from the newest valid snapshot
+    // (specs/resume-state/spec.md requirement 12). A valid generation is at
+    // most kMaxGeneration, so the next one saturates there rather than
+    // becoming invalid.
+    found_snapshot_ = read_snapshot(state);
+    if (found_snapshot_.has_value()) {
+        next_generation_ = found_snapshot_->generation < kMaxGeneration
+                               ? found_snapshot_->generation + 1
+                               : kMaxGeneration;
+    }
+}
+
+Engine::Engine(ipc::EngineState& state, std::span<const Track* const> tracks, const BusMap& map)
+    : Engine{state, map} {
+    // Requirements 13 and 14. This runs before any block, on the control
+    // thread, so the audio thread's members are free to set here.
+    if (!found_snapshot_.has_value()) {
+        return;
+    }
+    const Snapshot& snapshot = *found_snapshot_;
+    // Every value in a valid snapshot is in range, so the setters keep it
+    // as it is, and settings() equals the snapshot's.
+    const MixerSettings& settings = snapshot.mixer;
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const ChannelSettings& channel = std::span{settings.channels}[i];
+        mixer_.set_trim(i, channel.trim_db);
+        mixer_.set_fader(i, channel.fader);
+        mixer_.set_crossfader_assign(i, channel.side);
+        mixer_.set_cue(i, channel.cue);
+    }
+    mixer_.set_crossfader(settings.crossfader);
+    mixer_.set_crossfader_curve(settings.crossfader_transition);
+    mixer_.set_main_level(settings.main_level_db);
+    mixer_.set_headphone_level(settings.headphone_level_db);
+    mixer_.set_cue_mix(settings.cue_mix);
+    mixer_.set_bus_map(settings.bus_map);
+
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const DeckSnapshot& saved = std::span{snapshot.decks}[i];
+        Deck& deck = mixer_.deck(i);
+        if (saved.track_id != 0) {
+            // The first non-null track with the ID; ID 0 never matches.
+            const Track* found = nullptr;
+            for (const Track* const track : tracks) {
+                if (track != nullptr && track->id() == saved.track_id) {
+                    found = track;
+                    break;
+                }
+            }
+            // The deck is silent and the engine holds nothing yet, so the
+            // load is immediate and the deck's first place is free; the
+            // reference is kept there, as apply_load() keeps one.
+            if (found != nullptr && deck.load(*found)) {
+                deck.set_cue(saved.cue);
+                std::span{places_}[kPlacesPerDeck * i] = found;
+                std::span{resume_outcome_.tracks}[i] = found;
+            }
+        }
+        deck.set_rate(saved.rate);
+    }
+    resume_outcome_.generation = snapshot.generation;
+    // The first rendered block moves the resumed decks on and starts the
+    // fade-in (requirements 15 and 16).
+    resume_pending_ = true;
 }
 
 // ---- The control thread --------------------------------------------------------
@@ -164,6 +214,19 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     if (block.frames == 0 || block.frames > kMaxBlockFrames || block.sample_rate == 0) {
         return;
     }
+    if (resume_pending_) {
+        resume_pending_ = false;
+        resume_moves(block);
+        // Requirement 16: N is kResumeFade at this block's sample rate,
+        // rounded to the nearest frame. Integer arithmetic gives the exact
+        // rounding; a rate too low for one frame has no fade.
+        constexpr auto kFadeUnits = static_cast<std::uint64_t>(kResumeFade.count());
+        constexpr std::uint64_t kUnitsPerSecond = decltype(kResumeFade)::period::den;
+        fade_frames_ = ((kFadeUnits * block.sample_rate) + (kUnitsPerSecond / 2)) / kUnitsPerSecond;
+        fade_frame_ = 0;
+        fading_ = fade_frames_ > 0;
+    }
+
     // A stalled handover goes first, and while it waits nothing behind it applies
     // (requirement 13).
     if (!stalled_.has_value() || apply_handover(*stalled_)) {
@@ -177,7 +240,58 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     }
     read_commands();
     mixer_.process(block);
+    if (fading_) {
+        apply_fade(block);
+    }
     push_releases();
+}
+
+void Engine::apply_fade(const Block& block) noexcept KS_NONBLOCKING {
+    // Requirement 16: frame n, counted from the first rendered block, has
+    // gain n / N, in double; from frame N on the gain is 1. The count carries
+    // across blocks, so the output doesn't depend on block sizes.
+    const auto total = static_cast<double>(fade_frames_);
+    for (std::size_t f = 0; f < block.frames; ++f) {
+        const std::uint64_t n = fade_frame_ + f;
+        if (n >= fade_frames_) {
+            break;
+        }
+        const double gain = static_cast<double>(n) / total;
+        for (const std::span<float> channel : block.channels) {
+            float& sample = channel[f];
+            sample = static_cast<float>(static_cast<double>(sample) * gain);
+        }
+    }
+    fade_frame_ += block.frames;
+    if (fade_frame_ >= fade_frames_) {
+        fading_ = false;
+    }
+}
+
+void Engine::resume_moves(const Block& block) noexcept KS_NONBLOCKING {
+    // Requirement 15: each resumed deck goes to the snapshot's position,
+    // moved on by the time since it was written if it was playing. The deck
+    // clamps the result to its track.
+    if (!found_snapshot_.has_value()) {
+        return;
+    }
+    const Snapshot& snapshot = *found_snapshot_;
+    const std::chrono::steady_clock::duration gap = block.host_time - snapshot.host_time;
+    const double elapsed = gap.count() > 0 ? std::chrono::duration<double>(gap).count() : 0.0;
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const Track* const track = std::span{resume_outcome_.tracks}[i];
+        if (track == nullptr) {
+            continue;
+        }
+        const DeckSnapshot& saved = std::span{snapshot.decks}[i];
+        Deck& deck = mixer_.deck(i);
+        const double travel =
+            saved.playing ? saved.rate * static_cast<double>(track->sample_rate()) * elapsed : 0.0;
+        deck.seek(saved.position + travel);
+        if (saved.playing) {
+            deck.set_playing(true);
+        }
+    }
 }
 
 bool Engine::apply_handover(const Handover& handover) noexcept KS_NONBLOCKING {
@@ -432,10 +546,46 @@ void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_
     status.render_load = real_code(stats.render_load);
     status.peak_render_load = real_code(stats.peak_render_load);
     status_writer_->write(status);
+
+    write_snapshot(block);
+}
+
+void Engine::write_snapshot(const Block& block) noexcept KS_NONBLOCKING {
+    std::optional<ipc::SeqlockWriter<ipc::ResumeState>>& writer =
+        std::span{resume_writers_}[next_generation_ % ipc::kResumeSlots];
+    if (!writer.has_value()) {
+        return;
+    }
+    Snapshot snapshot{};
+    snapshot.generation = next_generation_;
+    // The same expression as the status block's host time.
+    snapshot.host_time = block.host_time + frames_to_duration(block.frames, block.sample_rate);
+    for (std::size_t i = 0; i < kDecks; ++i) {
+        const Deck& deck = mixer_.deck(i);
+        DeckSnapshot& out = std::span{snapshot.decks}[i];
+        // A track with ID 0 counts as no track: no engine could resume it.
+        if (const Track* const track = deck.track(); track != nullptr && track->id() != 0) {
+            out.track_id = track->id();
+            out.playing = deck.playing();
+            out.position = deck.position();
+            out.cue = deck.cue();
+        }
+        out.rate = deck.rate();
+    }
+    snapshot.mixer = mixer_.settings();
+    writer->write(encode(snapshot));
+    // Saturates at the highest valid generation; unreachable in practice.
+    if (next_generation_ < kMaxGeneration) {
+        ++next_generation_;
+    }
 }
 
 const Mixer& Engine::mixer() const noexcept KS_NONBLOCKING {
     return mixer_;
+}
+
+const ResumeOutcome& Engine::resume_outcome() const noexcept KS_NONBLOCKING {
+    return resume_outcome_;
 }
 
 ClientStats Engine::client_stats(std::size_t client) const noexcept KS_NONBLOCKING {

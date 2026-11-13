@@ -1,6 +1,6 @@
 # Feature: State out
 
-- **Status:** Approved by the maintainer on 2026-11-11. Protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-11; requirements 7, 16, and 17 and the layout criterion amended with the resume-state spec (`specs/resume-state/spec.md`). Protected: build loops can't change it.
 - **Roadmap:** Phase 1a (step 6b)
 - **Built by:** loop
 
@@ -80,7 +80,7 @@ Let other threads, and later other processes, see what the engine is doing witho
    | `peak_render_load` | Real: `RenderCore::peak_render_load()`. |
    | `clients` | `kStateClients` `ClientAck`s, slot 0 first. |
 
-7. **`EngineState`**, the engine-state segment's layout after its header: `kStateDecks` `Seqlock<DeckState>`s (`decks`), then a `Seqlock<MixerState>` (`mixer`), then a `Seqlock<EngineStatus>` (`status`). `kEngineStateLayoutVersion` is 1. `kEngineStateSegmentSize` is `kSegmentHeaderSize + sizeof(EngineState)`, and an `EngineState` lives at offset `kSegmentHeaderSize`.
+7. **`EngineState`**, the engine-state segment's layout after its header: `kStateDecks` `Seqlock<DeckState>`s (`decks`), then a `Seqlock<MixerState>` (`mixer`), then a `Seqlock<EngineStatus>` (`status`), then the resume slots (`resume`, resume-state requirement 4). `kEngineStateLayoutVersion` is 2: it was 1 before the resume slots. `kEngineStateSegmentSize` is `kSegmentHeaderSize + sizeof(EngineState)`, and an `EngineState` lives at offset `kSegmentHeaderSize`.
 8. Every struct in this header is standard-layout and trivially copyable, with `static_assert`s on its size and its fields' offsets. Zero-filled memory is a valid `EngineState` in which nothing has been published.
 
 ### Tracks, blocks, and drivers
@@ -107,8 +107,8 @@ Let other threads, and later other processes, see what the engine is doing witho
 
 ### The engine (`<ks/engine/engine.h>`)
 
-16. **The state block:** `Engine` gains a constructor `Engine(ipc::EngineState& state, const BusMap& map = {})`. The state block must outlive the engine. The engine writes it only from the audio thread, in `rendered()`, and never reads it except as `SeqlockWriter` does when it's constructed. An engine built without one publishes nothing.
-17. **Publishing:** in `rendered()`, the engine writes each deck's block, then the mixer's, then the status block, each once, from what it holds after the block (requirements 3 to 6). Blocks the render core doesn't render publish nothing, and nothing is written before the first rendered block.
+16. **The state block:** `Engine` gains a constructor `Engine(ipc::EngineState& state, const BusMap& map = {})`. The state block must outlive the engine. The engine writes it only from the audio thread, in `rendered()`, and never reads it except as `SeqlockWriter` does when it's constructed, and as `read_snapshot()` reads the resume slots once when it's built (resume-state requirement 12). An engine built without one publishes nothing.
+17. **Publishing:** in `rendered()`, the engine writes each deck's block, then the mixer's, then the status block, each once, from what it holds after the block (requirements 3 to 6), then one resume slot (resume-state requirement 11). Blocks the render core doesn't render publish nothing, and nothing is written before the first rendered block.
 18. **Publishing changes nothing else:** with or without a state block, the engine renders the same output, bit for bit, and its other behavior (6a) is unchanged.
 19. **Readers:** any number of threads, later processes, read the blocks with `SeqlockReader` while the engine renders. Every successful read is one block's state as written; the engine never waits for a reader.
 20. **Real time:** everything `rendered()` and `try_render()` call is `KS_NONBLOCKING`, allocates nothing, and takes no lock.
@@ -119,7 +119,7 @@ The tests are in `tests/acceptance/state-out/`. They render through a `RenderCor
 
 The layout (`layout_test.cpp`):
 
-- [ ] `[auto]` `DeckState`, `MixerState`, `ClientAck`, and `EngineStatus` have the fields of requirements 3 to 6, in order, at 8-byte steps from offset 0; every struct in the header is standard-layout and trivially copyable; `kStateDecks` and `kStateClients` equal `engine::kDecks` and `engine::kMaxClients`; `kEngineStateLayoutVersion` is 1; and a `Region` of `kEngineStateSegmentSize` bytes holds an `EngineState` at `kSegmentHeaderSize`. (test: "State: the layout")
+- [ ] `[auto]` `DeckState`, `MixerState`, `ClientAck`, and `EngineStatus` have the fields of requirements 3 to 6, in order, at 8-byte steps from offset 0; every struct in the header is standard-layout and trivially copyable; `kStateDecks` and `kStateClients` equal `engine::kDecks` and `engine::kMaxClients`; `kEngineStateLayoutVersion` is 2 (resume-state requirement 4); and a `Region` of `kEngineStateSegmentSize` bytes holds an `EngineState` at `kSegmentHeaderSize`. (test: "State: the layout")
 
 Tracks, blocks, and the render core (`render_core_test.cpp`):
 

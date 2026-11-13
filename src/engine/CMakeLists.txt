@@ -14,6 +14,7 @@ add_library(ks_engine STATIC
     output_controller.cpp
     paced_backend.cpp
     render_core.cpp
+    resume.cpp
     safety.cpp
     track.cpp)
 add_library(ks::engine ALIAS ks_engine)
@@ -35,6 +36,7 @@ target_sources(ks_engine PUBLIC
         include/ks/engine/output_controller.h
         include/ks/engine/paced_backend.h
         include/ks/engine/render_core.h
+        include/ks/engine/resume.h
         include/ks/engine/safety.h
         include/ks/engine/track.h)
 

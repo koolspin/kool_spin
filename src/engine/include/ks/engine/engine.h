@@ -7,7 +7,9 @@
 /// and hands tracks and rings to and from the audio thread through the give
 /// and retire rings (ADR 0003 §4 and §10). After each block the render core
 /// renders, it publishes its state (specs/state-out/spec.md requirements 16
-/// to 20; ADR 0003 §5).
+/// to 20; ADR 0003 §5) and a snapshot to resume from, and a new engine can
+/// resume from that snapshot (specs/resume-state/spec.md requirements 11 to
+/// 17; ADR 0003 §11).
 
 #include <ks/core/realtime.h>
 #include <ks/engine/block.h>
@@ -15,6 +17,7 @@
 #include <ks/engine/interpolator.h>
 #include <ks/engine/mixer.h>
 #include <ks/engine/render_core.h>
+#include <ks/engine/resume.h>
 #include <ks/engine/track.h>
 #include <ks/ipc/command.h>
 #include <ks/ipc/seqlock.h>
@@ -22,9 +25,11 @@
 #include <ks/ipc/state.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace ks::engine {
 
@@ -34,6 +39,9 @@ inline constexpr std::size_t kMaxClients = 8;
 inline constexpr std::size_t kCommandsPerBlock = 32;
 /// The capacity of the give ring, and of the retire ring.
 inline constexpr std::size_t kHandoverCapacity = 64;
+/// How long a resumed engine takes to fade its output in
+/// (specs/resume-state/spec.md requirement 16).
+inline constexpr std::chrono::milliseconds kResumeFade{50};
 
 static_assert(ipc::kStateDecks == kDecks, "the state segment describes every deck");
 static_assert(ipc::kStateClients == kMaxClients, "the state segment describes every client slot");
@@ -54,6 +62,19 @@ struct ClientStats {
     std::optional<Rejection> last_rejection = std::nullopt;
 
     bool operator==(const ClientStats&) const = default;
+};
+
+/// What a resuming engine found and took (specs/resume-state/spec.md
+/// requirement 14).
+struct ResumeOutcome {
+    /// The generation of the snapshot it resumed from; empty if it started
+    /// clean.
+    std::optional<std::uint64_t> generation = std::nullopt;
+    /// The track each deck resumed with, or null. The engine holds one
+    /// reference to each, and releases it through collect() as for load().
+    std::array<const Track*, kDecks> tracks{};
+
+    bool operator==(const ResumeOutcome&) const = default;
 };
 
 /// Something the audio thread has finished with: one reference to a track,
@@ -78,10 +99,24 @@ public:
     explicit Engine(const BusMap& map = {});
 
     /// Builds the engine as the other constructor does, and publishes its
-    /// state to `state` after every block the render core renders. The state
-    /// block must outlive the engine. The engine writes it only from the
-    /// audio thread, in rendered().
+    /// state to `state` after every block the render core renders, with a
+    /// snapshot to resume from. The state block must outlive the engine. The
+    /// engine writes it only from the audio thread, in rendered(). It reads
+    /// the resume slots once, here, so its snapshots' generations carry on
+    /// from the newest valid one (specs/resume-state/spec.md requirement
+    /// 12), but it starts clean.
     explicit Engine(ipc::EngineState& state, const BusMap& map = {});
+
+    /// Builds the engine as the constructor above does, then resumes from the
+    /// newest valid snapshot in `state`, if there is one: the mixer's
+    /// settings, bus map included (`map` is then ignored), each deck's rate,
+    /// and each deck's track, taken from `tracks` by ID, with its cue point.
+    /// The first rendered block moves the decks to their positions, moved on
+    /// by the time since the snapshot, starts the ones that were playing,
+    /// and starts a fade-in of kResumeFade (specs/resume-state/spec.md
+    /// requirements 13 to 16). Each track the engine takes must stay alive
+    /// until its reference has been released through collect().
+    Engine(ipc::EngineState& state, std::span<const Track* const> tracks, const BusMap& map = {});
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -134,6 +169,11 @@ public:
     /// Client slot `client`'s statistics, between blocks. A slot of
     /// kMaxClients or more reads as never attached.
     [[nodiscard]] ClientStats client_stats(std::size_t client) const noexcept KS_NONBLOCKING;
+
+    /// What the resuming constructor found and took; empty for an engine
+    /// built any other way. It never changes after construction, so any
+    /// thread may call it (specs/resume-state/spec.md requirement 14).
+    [[nodiscard]] const ResumeOutcome& resume_outcome() const noexcept KS_NONBLOCKING;
 
 private:
     /// One item on the give ring, from the control thread to the audio
@@ -206,6 +246,16 @@ private:
     [[nodiscard]] bool drain(PendingRelease& release) noexcept KS_NONBLOCKING;
     /// Pushes `handover` to the give ring. Control thread only.
     [[nodiscard]] bool give(const Handover& handover) noexcept;
+    /// Writes a snapshot of what the engine holds after `block` to the next
+    /// resume slot (specs/resume-state/spec.md requirement 11).
+    void write_snapshot(const Block& block) noexcept KS_NONBLOCKING;
+    /// The first rendered block's moves after a resume: seeks each resumed
+    /// deck and starts the ones that were playing
+    /// (specs/resume-state/spec.md requirement 15).
+    void resume_moves(const Block& block) noexcept KS_NONBLOCKING;
+    /// Scales `block`'s output by the resume fade-in's gain, frame by frame,
+    /// and advances the fade (specs/resume-state/spec.md requirement 16).
+    void apply_fade(const Block& block) noexcept KS_NONBLOCKING;
 
     Interpolator interpolator_;
     Mixer mixer_;
@@ -239,6 +289,29 @@ private:
     std::array<std::optional<ipc::SeqlockWriter<ipc::DeckState>>, kDecks> deck_writers_;
     std::optional<ipc::SeqlockWriter<ipc::MixerState>> mixer_writer_;
     std::optional<ipc::SeqlockWriter<ipc::EngineStatus>> status_writer_;
+    /// The resume slots' writers; slot i takes the generations with i = g % 2.
+    std::array<std::optional<ipc::SeqlockWriter<ipc::ResumeState>>, ipc::kResumeSlots>
+        resume_writers_;
+    /// The generation of the next snapshot written (requirement 12).
+    std::uint64_t next_generation_ = 1;
+    /// The snapshot read_snapshot() found when the engine was built: read
+    /// once, by the state-block constructor, for the resuming one to use.
+    std::optional<Snapshot> found_snapshot_;
+
+    /// Set by the resuming constructor; never changed after.
+    ResumeOutcome resume_outcome_;
+    /// Set by the resuming constructor when it resumed from found_snapshot_;
+    /// the first rendered block then moves each deck that took a track
+    /// (resume_outcome_.tracks) to found_snapshot_'s position, moved on by
+    /// the time since its host time, starts the ones that were playing, and
+    /// clears it (specs/resume-state/spec.md requirement 15).
+    bool resume_pending_ = false;
+    /// The resume fade-in (requirement 16): while fading_, frame n of the
+    /// output, counted from the first rendered block's first frame, is scaled
+    /// by n / fade_frames_; fade_frame_ is the count at the next block.
+    std::uint64_t fade_frame_ = 0;
+    std::uint64_t fade_frames_ = 0;
+    bool fading_ = false;
 };
 
 } // namespace ks::engine
