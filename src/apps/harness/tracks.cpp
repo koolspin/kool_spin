@@ -12,9 +12,12 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <numbers>
 #include <span>
 #include <string>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace ks::harness {
@@ -149,15 +152,62 @@ std::vector<float> generate(const Signal& signal) {
     return samples;
 }
 
-// Stub (specs/harness/spec.md requirement 22). The codec library is linked,
-// so describing a result keeps it in the build.
-std::expected<DecodedAudio, std::string> decode_file(const std::filesystem::path& /*path*/) {
-    return std::unexpected{std::string{ks_codecs_describe(KS_CODECS_OPEN_FAILED)}};
+std::expected<DecodedAudio, std::string> decode_file(const std::filesystem::path& path) {
+    const std::string name = path.string();
+    ks_codecs_audio audio{};
+    const int result = ks_codecs_decode_file(name.c_str(), engine::kMaxTrackFrames, &audio);
+    if (result != KS_CODECS_OK) {
+        return std::unexpected{name + ": " + ks_codecs_describe(result)};
+    }
+
+    // Copy the samples out and free the codec's buffer before checking
+    // anything, so no path leaks it.
+    DecodedAudio decoded;
+    decoded.sample_rate = audio.sample_rate;
+    if (audio.samples != nullptr) {
+        const std::span<const float> samples{audio.samples,
+                                             static_cast<std::size_t>(audio.frames * 2U)};
+        decoded.samples.assign(samples.begin(), samples.end());
+    }
+    ks_codecs_free_audio(&audio);
+
+    if (decoded.sample_rate < engine::kMinTrackRate ||
+        decoded.sample_rate > engine::kMaxTrackRate) {
+        return std::unexpected{name + ": the sample rate is " +
+                               std::to_string(decoded.sample_rate) + " Hz; a track's must be " +
+                               std::to_string(engine::kMinTrackRate) + " to " +
+                               std::to_string(engine::kMaxTrackRate) + " Hz"};
+    }
+    return decoded;
 }
 
-// Stub (specs/harness/spec.md requirements 20 and 21).
-std::expected<TrackSet, std::string> TrackSet::prepare(const Script& /*script*/) {
-    return std::unexpected{std::string{"not implemented"}};
+std::expected<TrackSet, std::string> TrackSet::prepare(const Script& script) {
+    TrackSet set;
+    set.samples_.reserve(script.tracks.size());
+    set.tracks_.reserve(script.tracks.size());
+    for (const TrackSpec& spec : script.tracks) {
+        std::uint32_t rate = 0;
+        std::vector<float> samples;
+        if (const auto* file = std::get_if<TrackFile>(&spec.source)) {
+            std::expected<DecodedAudio, std::string> decoded = decode_file(file->path);
+            if (!decoded.has_value()) {
+                return std::unexpected{std::move(decoded.error())};
+            }
+            rate = decoded->sample_rate;
+            samples = std::move(decoded->samples);
+        } else {
+            const auto& signal = std::get<Signal>(spec.source);
+            rate = signal.sample_rate;
+            samples = generate(signal);
+        }
+
+        set.samples_.push_back(std::move(samples));
+        const std::uint64_t id = set.tracks_.size() + 1;
+        auto track = std::make_unique<engine::Track>(set.samples_.back(), rate, id);
+        track->publish(track->capacity(), true);
+        set.tracks_.push_back(std::move(track));
+    }
+    return set;
 }
 
 std::size_t TrackSet::size() const noexcept {
