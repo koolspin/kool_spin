@@ -6,6 +6,7 @@
 #include <ks/engine/mixer.h>
 #include <ks/engine/track.h>
 #include <ks/ipc/crc32.h>
+#include <ks/ipc/seqlock.h>
 #include <ks/ipc/state.h>
 
 #include "codes.h"
@@ -213,10 +214,24 @@ std::optional<Snapshot> validate(const ipc::ResumeState& words,
     return snapshot;
 }
 
-// Stub (specs/resume-state/spec.md requirement 10): no slot is read.
-
-std::optional<Snapshot> read_snapshot(ipc::EngineState& /*state*/) noexcept {
-    return std::nullopt;
+std::optional<Snapshot> read_snapshot(ipc::EngineState& state) noexcept {
+    // Each slot is read once. Generations in different slots differ in
+    // parity, so two valid snapshots never tie.
+    std::optional<Snapshot> newest;
+    std::size_t slot = 0;
+    for (auto& lock : state.resume) {
+        const std::size_t this_slot = slot++;
+        const std::optional<ipc::ResumeState> words =
+            ipc::SeqlockReader<ipc::ResumeState>{lock}.try_read();
+        if (!words) {
+            continue;
+        }
+        const std::optional<Snapshot> snapshot = validate(*words, this_slot);
+        if (snapshot && (!newest || snapshot->generation > newest->generation)) {
+            newest = snapshot;
+        }
+    }
+    return newest;
 }
 
 } // namespace ks::engine
