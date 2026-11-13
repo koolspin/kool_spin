@@ -37,6 +37,7 @@ ks_add_test(ks_engine_tests
 ks_add_test(ks_harness_tests
     SOURCES
         harness/encode_test.cpp
+        harness/report_test.cpp
         harness/script_lexer_test.cpp
         harness/script_test.cpp
         harness/signals_test.cpp
