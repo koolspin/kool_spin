@@ -87,7 +87,14 @@ Engine::Engine(ipc::EngineState& state, const BusMap& map) : Engine{map} {
     }
     mixer_writer_.emplace(state.mixer);
     status_writer_.emplace(state.status);
+    // Stub (specs/resume-state/spec.md requirement 12): the resume slots
+    // aren't read yet.
 }
+
+// Stub (specs/resume-state/spec.md requirements 13 to 16): it starts clean,
+// takes no track, and never fades in.
+Engine::Engine(ipc::EngineState& state, std::span<const Track* const> /*tracks*/, const BusMap& map)
+    : Engine{state, map} {}
 
 // ---- The control thread --------------------------------------------------------
 
@@ -164,6 +171,9 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     if (block.frames == 0 || block.frames > kMaxBlockFrames || block.sample_rate == 0) {
         return;
     }
+    // Stub (specs/resume-state/spec.md requirements 15 and 16): a resumed
+    // engine's first block doesn't move its decks, and nothing fades in.
+
     // A stalled handover goes first, and while it waits nothing behind it applies
     // (requirement 13).
     if (!stalled_.has_value() || apply_handover(*stalled_)) {
@@ -432,10 +442,16 @@ void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_
     status.render_load = real_code(stats.render_load);
     status.peak_render_load = real_code(stats.peak_render_load);
     status_writer_->write(status);
+    // Stub (specs/resume-state/spec.md requirement 11): no snapshot is
+    // written yet.
 }
 
 const Mixer& Engine::mixer() const noexcept KS_NONBLOCKING {
     return mixer_;
+}
+
+const ResumeOutcome& Engine::resume_outcome() const noexcept KS_NONBLOCKING {
+    return resume_outcome_;
 }
 
 ClientStats Engine::client_stats(std::size_t client) const noexcept KS_NONBLOCKING {

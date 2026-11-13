@@ -11,6 +11,7 @@ target_sources(ks_ipc PUBLIC
     BASE_DIRS include
     FILES
         include/ks/ipc/command.h
+        include/ks/ipc/crc32.h
         include/ks/ipc/layout.h
         include/ks/ipc/region.h
         include/ks/ipc/seqlock.h
