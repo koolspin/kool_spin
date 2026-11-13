@@ -33,6 +33,7 @@ macOS `tsan` doesn't report data races in struct copies, by assignment or `memcp
 ## Code conventions
 
 - Types, enumerators, and template parameters are `CamelCase`. Functions, variables, and namespaces are `snake_case`. Private and protected members end in `_`. Constants are `kCamelCase`. Macros are `KS_UPPER_CASE`. clang-tidy enforces all of these.
+- clang-tidy rejects indexing an array (`std::array` or built-in) with an index that isn't a constant expression. Index through a span instead (`std::span{array}[i]`), or loop with a range-for.
 - Everything lives in namespace `ks`. Public headers go in `src/<lib>/include/ks/<lib>/` and are included as `<ks/<lib>/<name>.h>`.
 - Out-of-line definitions repeat `noexcept KS_NONBLOCKING`: the attribute is part of the function's type, and the build fails if a definition doesn't match its declaration.
 - Executables live in `src/apps/<app>/`, split into a library (everything except argument handling, so tests can use it) and a thin `main.cpp`. `ks-tone` is a standalone diagnostic tool, outside the process model.
@@ -65,7 +66,7 @@ Code reachable from the audio callback must not:
 - Do I/O or make system calls: files, network, console, sleep.
 - Throw exceptions.
 - Call into Qt, SQLite, FFmpeg, or the JS engine.
-- Trust data read from shared memory: other processes write it. Copy a value into private memory, validate it (indices, lengths, enum values), and use only the copy; never read a shared field twice expecting the same value. Take a segment's size from the engine's own mapping, never from a header another process wrote.
+- Trust data read from shared memory: other processes write it. Copy a value into private memory, validate it (indices, lengths, enum values, ranges), and use only the copy; never read a shared field twice expecting the same value. Take a segment's size from the engine's own mapping, never from a header another process wrote. Write a range check on a real as `x >= lo && x <= hi`, so that NaN fails it; a negated comparison such as `!(x < lo)` lets NaN through.
 
 Mark audio-thread entry points and every function they call `noexcept KS_NONBLOCKING`, from `<ks/core/realtime.h>` (it expands to `[[clang::nonblocking]]`; the build fails if such a function allocates, blocks, or calls an unmarked function). The `rtsan` preset must stay clean. Never suppress a RealtimeSanitizer or function-effect diagnostic without the maintainer's approval.
 
