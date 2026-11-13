@@ -34,6 +34,11 @@ ks_add_test(ks_engine_tests
         engine/safety_test.cpp
     LIBRARIES ks::engine)
 
+ks_add_test(ks_harness_tests
+    SOURCES
+        harness/encode_test.cpp
+    LIBRARIES ks::harness)
+
 ks_add_test(ks_ipc_tests
     SOURCES
         ipc/region_test.cpp
