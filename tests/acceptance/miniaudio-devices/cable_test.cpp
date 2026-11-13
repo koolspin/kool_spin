@@ -144,8 +144,9 @@ std::string_view state_name(OutputState state) {
 } // namespace
 
 TEST_CASE("Cable: a tone through a chosen device", "[.][cable]") {
-    const std::optional<MiniaudioBackends> backends =
-        parse_backend(environment("KS_CABLE_BACKEND").value_or("system"));
+    const std::string_view backend_text = environment("KS_CABLE_BACKEND").value_or("system");
+    CAPTURE(backend_text);
+    const std::optional<MiniaudioBackends> backends = parse_backend(backend_text);
     REQUIRE(backends.has_value());
     const MiniaudioBackends chosen = backends.value_or(MiniaudioBackends::System);
 
@@ -160,13 +161,19 @@ TEST_CASE("Cable: a tone through a chosen device", "[.][cable]") {
         ++index;
     }
 
-    const std::optional<std::size_t> device_number = number("KS_CABLE_DEVICE", std::nullopt);
+    const std::optional<std::string_view> device_env = environment("KS_CABLE_DEVICE");
     std::optional<DeviceKey> key;
-    if (environment("KS_CABLE_DEVICE").has_value()) {
+    if (device_env.has_value()) {
+        const std::string_view device_text = device_env.value_or("");
+        const std::size_t device_count = listed->devices.size();
+        CAPTURE(device_text, device_count);
+        const std::optional<std::size_t> device_number = number("KS_CABLE_DEVICE", std::nullopt);
         REQUIRE(device_number.has_value());
-        REQUIRE(device_number.value_or(0) < listed->devices.size());
+        REQUIRE(device_number.value_or(0) < device_count);
         key = std::span{listed->devices}[device_number.value_or(0)].key;
     }
+    const std::string_view seconds_text = environment("KS_CABLE_SECONDS").value_or("");
+    CAPTURE(seconds_text);
     const std::optional<std::size_t> seconds = number("KS_CABLE_SECONDS", 60);
     REQUIRE(seconds.has_value());
 
