@@ -253,6 +253,9 @@ private:
     /// deck and starts the ones that were playing
     /// (specs/resume-state/spec.md requirement 15).
     void resume_moves(const Block& block) noexcept KS_NONBLOCKING;
+    /// Scales `block`'s output by the resume fade-in's gain, frame by frame,
+    /// and advances the fade (specs/resume-state/spec.md requirement 16).
+    void apply_fade(const Block& block) noexcept KS_NONBLOCKING;
 
     Interpolator interpolator_;
     Mixer mixer_;
@@ -303,6 +306,12 @@ private:
     /// the time since its host time, starts the ones that were playing, and
     /// clears it (specs/resume-state/spec.md requirement 15).
     bool resume_pending_ = false;
+    /// The resume fade-in (requirement 16): while fading_, frame n of the
+    /// output, counted from the first rendered block's first frame, is scaled
+    /// by n / fade_frames_; fade_frame_ is the count at the next block.
+    std::uint64_t fade_frame_ = 0;
+    std::uint64_t fade_frames_ = 0;
+    bool fading_ = false;
 };
 
 } // namespace ks::engine

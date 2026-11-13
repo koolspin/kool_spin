@@ -217,8 +217,15 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     if (resume_pending_) {
         resume_pending_ = false;
         resume_moves(block);
+        // Requirement 16: N is kResumeFade at this block's sample rate,
+        // rounded to the nearest frame. Integer arithmetic gives the exact
+        // rounding; a rate too low for one frame has no fade.
+        constexpr auto kFadeUnits = static_cast<std::uint64_t>(kResumeFade.count());
+        constexpr std::uint64_t kUnitsPerSecond = decltype(kResumeFade)::period::den;
+        fade_frames_ = ((kFadeUnits * block.sample_rate) + (kUnitsPerSecond / 2)) / kUnitsPerSecond;
+        fade_frame_ = 0;
+        fading_ = fade_frames_ > 0;
     }
-    // Stub (specs/resume-state/spec.md requirement 16): nothing fades in.
 
     // A stalled handover goes first, and while it waits nothing behind it applies
     // (requirement 13).
@@ -233,7 +240,32 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
     }
     read_commands();
     mixer_.process(block);
+    if (fading_) {
+        apply_fade(block);
+    }
     push_releases();
+}
+
+void Engine::apply_fade(const Block& block) noexcept KS_NONBLOCKING {
+    // Requirement 16: frame n, counted from the first rendered block, has
+    // gain n / N, in double; from frame N on the gain is 1. The count carries
+    // across blocks, so the output doesn't depend on block sizes.
+    const auto total = static_cast<double>(fade_frames_);
+    for (std::size_t f = 0; f < block.frames; ++f) {
+        const std::uint64_t n = fade_frame_ + f;
+        if (n >= fade_frames_) {
+            break;
+        }
+        const double gain = static_cast<double>(n) / total;
+        for (const std::span<float> channel : block.channels) {
+            float& sample = channel[f];
+            sample = static_cast<float>(static_cast<double>(sample) * gain);
+        }
+    }
+    fade_frame_ += block.frames;
+    if (fade_frame_ >= fade_frames_) {
+        fading_ = false;
+    }
 }
 
 void Engine::resume_moves(const Block& block) noexcept KS_NONBLOCKING {
