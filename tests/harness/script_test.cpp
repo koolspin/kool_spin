@@ -118,4 +118,44 @@ TEST_CASE("script: command_for() converts seconds to frames") {
           Command{.type = CommandType::SetCuePoint, .deck = 0, .value = 86'400.0 * 384'000.0});
 }
 
+TEST_CASE("script: a load inside a repeat block resolves at every repetition") {
+    const auto read = read_script("0 repeat 3 every 1\n0 load 2 b\n0.5 unload 2\nend repeat\n"
+                                  "track b noise 1\n5 end\n",
+                                  kDirectory);
+    REQUIRE(read.has_value());
+    REQUIRE(read->events.size() == 6);
+    for (std::size_t k = 0; k < 3; ++k) {
+        const auto& load = read->events.at(2 * k);
+        CHECK(load.time == static_cast<double>(k));
+        CHECK(load.line == 2);
+        CHECK(std::get<Load>(load.action) == Load{.deck = 1, .track = 0});
+        CHECK(read->events.at((2 * k) + 1).line == 3);
+    }
+}
+
+TEST_CASE("script: an empty repeat block adds nothing") {
+    const auto read = read_script("1 repeat 5 every 1\nend repeat\n9 end\n", kDirectory);
+    REQUIRE(read.has_value());
+    CHECK(read->events.empty());
+}
+
+TEST_CASE("script: repeat block errors") {
+    // The repeat line's own form.
+    CHECK(error_line("1 repeat 2\n9 end\n") == 1);
+    CHECK(error_line("1 repeat 2 each 1\n0 play 1\nend repeat\n9 end\n") == 1);
+    CHECK(error_line("1 repeat 2 every 0\n0 play 1\nend repeat\n9 end\n") == 1);
+    CHECK(error_line("1 repeat 1.5 every 1\n0 play 1\nend repeat\n9 end\n") == 1);
+    // A repetition past 86,400 s names the line inside.
+    CHECK(error_line("86000 repeat 3 every 200\n0 play 1\n150 pause 1\nend repeat\n"
+                     "86400 end\n") == 3);
+    // A repetition at or after the end names the line inside.
+    CHECK(error_line("1 repeat 3 every 2\n0 play 1\nend repeat\n5 end\n") == 2);
+    // One more event than allowed, counted before expanding.
+    CHECK(error_line("0 crossfader 0\n0 repeat 100000 every 0.001\n0 crossfader 0.5\n"
+                     "end repeat\n200 end\n") == 4);
+    // The missing end repeat is reported on its repeat line, wherever the
+    // file ends.
+    CHECK(error_line("1 end\n2 play 1\n0.5 repeat 2 every 0.1\n0 play 1\n") == 3);
+}
+
 } // namespace

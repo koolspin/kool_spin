@@ -467,6 +467,26 @@ struct PendingLoad {
     std::size_t line = 0;
 };
 
+/// An open `<time> repeat <count> every <period>` block, until its
+/// `end repeat` (requirement 12).
+struct RepeatBlock {
+    double time = 0.0;
+    std::uint64_t count = 0;
+    double period = 0.0;
+    /// The `repeat` line.
+    std::size_t line = 0;
+    /// The lines inside, in script order, each at its offset.
+    std::vector<Event> events;
+    /// Loads among `events`; PendingLoad::event indexes `events`.
+    std::vector<PendingLoad> loads;
+};
+
+/// Whether `tokens` is `end repeat`.
+bool is_end_repeat(Tokens tokens) {
+    return tokens.size() == 2 && !tokens[0].quoted && tokens[0].text == "end" &&
+           !tokens[1].quoted && tokens[1].text == "repeat";
+}
+
 class Reader {
 public:
     explicit Reader(std::filesystem::path directory) : directory_{std::move(directory)} {}
@@ -486,6 +506,10 @@ private:
     /// `seek` or `cuepoint`.
     Parsed<std::monostate> read_track_time(double time, CommandType type, Tokens args,
                                            std::size_t line);
+    Parsed<std::monostate> read_repeat(double time, Tokens args, std::size_t line);
+    /// Expands `block` at its `end repeat` on `line`. An error may be on a
+    /// line inside the block.
+    std::optional<ScriptError> close_block(const RepeatBlock& block, std::size_t line);
     Parsed<std::monostate> add_event(double time, const Action& action, std::size_t line);
     std::optional<ScriptError> finish();
     /// Gives each seek and cue point its deck's track, walking the events
@@ -496,6 +520,7 @@ private:
     Script script_;
     std::optional<std::size_t> end_line_;
     std::vector<PendingLoad> loads_;
+    std::optional<RepeatBlock> block_;
 };
 
 std::expected<Script, ScriptError> Reader::read(std::string_view text) {
@@ -512,9 +537,21 @@ std::expected<Script, ScriptError> Reader::read(std::string_view text) {
         if (tokens->empty()) {
             continue;
         }
+        if (block_ && is_end_repeat(*tokens)) {
+            const RepeatBlock block = std::move(*block_);
+            block_.reset();
+            if (auto error = close_block(block, line)) {
+                return std::unexpected{std::move(*error)};
+            }
+            continue;
+        }
         if (const auto read = read_line(*tokens, line); !read) {
             return std::unexpected{ScriptError{.line = line, .message = read.error()}};
         }
+    }
+    if (block_) {
+        return std::unexpected{ScriptError{.line = block_->line,
+                                           .message = "this repeat block has no end repeat line"}};
     }
     if (auto error = finish()) {
         return std::unexpected{std::move(*error)};
@@ -525,10 +562,16 @@ std::expected<Script, ScriptError> Reader::read(std::string_view text) {
 Parsed<std::monostate> Reader::read_line(Tokens tokens, std::size_t line) {
     const Token& first = tokens.front();
     if (!first.quoted && first.text == "track") {
+        if (block_) {
+            return line_error("a track line can't be inside a repeat block: put it before the "
+                              "repeat line, on line " +
+                              std::to_string(block_->line));
+        }
         return read_track(tokens, line);
     }
     if (!first.quoted && first.text == "end") {
-        if (tokens.size() == 2 && !tokens[1].quoted && tokens[1].text == "repeat") {
+        // An open block's end repeat is handled by read().
+        if (is_end_repeat(tokens)) {
             return line_error("an end repeat with no repeat before it");
         }
         return line_error("an end needs a time, as in \"60 end\"");
@@ -591,6 +634,11 @@ Parsed<std::monostate> Reader::read_timed(Tokens tokens, std::size_t line) {
     if (!(*time <= kMaxTime)) {
         return line_error("a time must be at most 86,400 seconds (24 hours)");
     }
+    if (block_ && !(*time < block_->period)) {
+        return line_error("a time inside a repeat block is an offset, and must be below the "
+                          "block's period, on line " +
+                          std::to_string(block_->line));
+    }
     if (tokens.size() < 2) {
         return line_error("a time must be followed by a command");
     }
@@ -633,8 +681,7 @@ Parsed<std::monostate> Reader::read_command(double time, std::string_view keywor
             time, keyword == "seek" ? CommandType::Seek : CommandType::SetCuePoint, args, line);
     }
     if (keyword == "repeat") {
-        // Plan task 4.
-        return line_error("repeat blocks aren't supported yet");
+        return read_repeat(time, args, line);
     }
     const auto* form = std::ranges::find(kCommandForms, keyword, &CommandForm::keyword);
     if (form == kCommandForms.end()) {
@@ -651,6 +698,9 @@ Parsed<std::monostate> Reader::read_command(double time, std::string_view keywor
 }
 
 Parsed<std::monostate> Reader::read_end(double time, std::size_t line) {
+    if (block_) {
+        return line_error("the end can't be inside a repeat block");
+    }
     if (end_line_) {
         return line_error("a second end: the first is on line " + std::to_string(*end_line_));
     }
@@ -671,8 +721,80 @@ Parsed<std::monostate> Reader::read_load(double time, Tokens args, std::size_t l
     if (!name) {
         return std::unexpected{name.error()};
     }
-    loads_.push_back(PendingLoad{.event = script_.events.size(), .name = *name, .line = line});
-    return add_event(time, Load{.deck = *target}, line);
+    if (auto added = add_event(time, Load{.deck = *target}, line); !added) {
+        return added;
+    }
+    // Inside a block, the load is resolved once per repetition when the
+    // block is expanded.
+    std::vector<PendingLoad>& loads = block_ ? block_->loads : loads_;
+    const std::size_t index = (block_ ? block_->events.size() : script_.events.size()) - 1;
+    loads.push_back(PendingLoad{.event = index, .name = *name, .line = line});
+    return std::monostate{};
+}
+
+Parsed<std::monostate> Reader::read_repeat(double time, Tokens args, std::size_t line) {
+    if (block_) {
+        return line_error("repeat blocks can't be nested: the block on line " +
+                          std::to_string(block_->line) + " is still open");
+    }
+    if (auto ok = arity("repeat", args, 3); !ok) {
+        return ok;
+    }
+    const Parsed<std::uint64_t> count = whole(args[0], "a repeat count", 1, kMaxRepeatCount);
+    if (!count) {
+        return std::unexpected{count.error()};
+    }
+    if (args[1].quoted || args[1].text != "every") {
+        return line_error("a repeat line is <time> repeat <count> every <seconds>");
+    }
+    const Parsed<double> period = amount(args[2], "a repeat's period");
+    if (!period) {
+        return std::unexpected{period.error()};
+    }
+    if (!(*period > 0.0)) {
+        return line_error("a repeat's period must be above 0 seconds");
+    }
+    block_ = RepeatBlock{
+        .time = time, .count = *count, .period = *period, .line = line, .events = {}, .loads = {}};
+    return std::monostate{};
+}
+
+std::optional<ScriptError> Reader::close_block(const RepeatBlock& block, std::size_t line) {
+    // Check the count before expanding, so a huge block allocates nothing.
+    // Both factors are at most 100,000, so the product can't overflow.
+    const std::uint64_t expanded = block.count * block.events.size();
+    if (script_.events.size() + expanded > kMaxEvents) {
+        return ScriptError{.line = line,
+                           .message = "this repeat block expands to " + std::to_string(expanded) +
+                                      " events: a script can have at most 100,000 events, "
+                                      "repeats included"};
+    }
+    script_.events.reserve(script_.events.size() + expanded);
+    // Line by line, then repetition by repetition, so that events at the
+    // same time keep the order of their lines (requirement 13).
+    auto load = block.loads.begin();
+    for (std::size_t inner = 0; inner < block.events.size(); ++inner) {
+        const Event& event = block.events[inner];
+        const bool is_load = load != block.loads.end() && load->event == inner;
+        for (std::uint64_t k = 0; k < block.count; ++k) {
+            const double time = block.time + (static_cast<double>(k) * block.period) + event.time;
+            if (!(time <= kMaxTime)) {
+                return ScriptError{.line = event.line,
+                                   .message = "repetition " + std::to_string(k + 1) +
+                                              " of this line is past 86,400 seconds (24 hours)"};
+            }
+            if (is_load) {
+                loads_.push_back(PendingLoad{
+                    .event = script_.events.size(), .name = load->name, .line = load->line});
+            }
+            script_.events.push_back(
+                Event{.time = time, .action = event.action, .line = event.line});
+        }
+        if (is_load) {
+            ++load;
+        }
+    }
+    return std::nullopt;
 }
 
 Parsed<std::monostate> Reader::read_track_time(double time, CommandType type, Tokens args,
@@ -696,6 +818,14 @@ Parsed<std::monostate> Reader::read_track_time(double time, CommandType type, To
 }
 
 Parsed<std::monostate> Reader::add_event(double time, const Action& action, std::size_t line) {
+    if (block_) {
+        // A block's lines each run at least once.
+        if (script_.events.size() + block_->events.size() >= kMaxEvents) {
+            return line_error("a script can have at most 100,000 events, repeats included");
+        }
+        block_->events.push_back(Event{.time = time, .action = action, .line = line});
+        return std::monostate{};
+    }
     if (script_.events.size() >= kMaxEvents) {
         return line_error("a script can have at most 100,000 events, repeats included");
     }
