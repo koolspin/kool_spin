@@ -36,6 +36,7 @@ ks_add_test(ks_engine_tests
 
 ks_add_test(ks_harness_tests
     SOURCES
+        harness/device_mode_test.cpp
         harness/encode_test.cpp
         harness/file_mode_test.cpp
         harness/player_test.cpp

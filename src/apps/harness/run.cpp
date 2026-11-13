@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/harness/run.h>
 
+#include <ks/engine/audio_backend.h>
 #include <ks/engine/block.h>
 #include <ks/engine/interleave.h>
+#include <ks/engine/miniaudio_backend.h>
 #include <ks/engine/offline.h>
+#include <ks/engine/output_controller.h>
 #include <ks/engine/render_core.h>
 #include <ks/harness/script.h>
 #include <ks/harness/tracks.h>
@@ -24,6 +27,8 @@
 #include <ostream>
 #include <span>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -171,13 +176,176 @@ std::expected<Report, std::string> render_to_file(const Script& script, const Tr
     return report;
 }
 
-// Stub (specs/harness/spec.md requirements 17 to 20 and 25 to 27).
-std::expected<Report, std::string> play_on_device(const Script& /*script*/,
-                                                  const TrackSet& /*tracks*/,
-                                                  const DeviceOptions& /*options*/,
-                                                  const std::atomic<bool>& /*stop*/,
-                                                  std::ostream& /*out*/) {
-    return std::unexpected{std::string{"not implemented"}};
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+/// The longest the control thread waits between polls (requirement 25).
+constexpr std::chrono::milliseconds kPollInterval{5};
+/// How long it waits, at the end, for the engine to read every command.
+constexpr std::chrono::milliseconds kReadWait{100};
+/// How often it prints a status line, in seconds.
+constexpr double kStatusInterval = 60.0;
+
+std::string_view state_name(engine::OutputState state) noexcept {
+    switch (state) {
+    case engine::OutputState::Stopped:
+        return "Stopped";
+    case engine::OutputState::Playing:
+        return "Playing";
+    case engine::OutputState::Freewheeling:
+        return "Freewheeling";
+    case engine::OutputState::Attaching:
+        return "Attaching";
+    }
+    return "Unknown";
+}
+
+void print_stream(const engine::StreamInfo& info, std::ostream& out) {
+    out << std::format("Backend: {}\n", info.backend);
+    out << std::format("Device: {}\n", info.device);
+    out << std::format("Format: {} Hz, {} channels, period {} frames, {} periods\n",
+                       info.sample_rate, info.channels, info.period_frames, info.periods);
+    out << std::format("Output latency: {:.3f} ms\n",
+                       std::chrono::duration<double, std::milli>(info.output_latency).count());
+}
+
+/// Polls the controller and prints each change of output state with its
+/// time, counting the times it starts freewheeling.
+class StateWatcher {
+public:
+    StateWatcher(engine::OutputController& controller, Clock::time_point started,
+                 std::ostream& out) noexcept
+        : controller_{&controller}, started_{started}, out_{&out} {}
+
+    void poll() {
+        controller_->poll();
+        note();
+    }
+
+    /// Prints the state if it has changed since the last call.
+    void note() {
+        const engine::OutputState state = controller_->state();
+        if (state == shown_) {
+            return;
+        }
+        shown_ = state;
+        if (state == engine::OutputState::Freewheeling) {
+            ++losses_;
+        }
+        *out_ << std::format("{:.3f} s: {}\n", seconds_since(started_), state_name(state));
+    }
+
+    [[nodiscard]] std::uint64_t losses() const noexcept { return losses_; }
+
+    [[nodiscard]] static double seconds_since(Clock::time_point start) noexcept {
+        return std::chrono::duration<double>(Clock::now() - start).count();
+    }
+
+private:
+    engine::OutputController* controller_;
+    Clock::time_point started_;
+    std::ostream* out_;
+    engine::OutputState shown_ = engine::OutputState::Stopped;
+    std::uint64_t losses_ = 0;
+};
+
+} // namespace
+
+std::expected<Report, std::string> play_on_device(const Script& script, const TrackSet& tracks,
+                                                  const DeviceOptions& options,
+                                                  const std::atomic<bool>& stop,
+                                                  std::ostream& out) {
+    std::expected<std::unique_ptr<Player>, std::string> created = Player::create(script, tracks);
+    if (!created.has_value()) {
+        return std::unexpected{std::move(created.error())};
+    }
+    Player& player = **created;
+    const auto core = std::make_unique<engine::RenderCore>(player.engine());
+
+    auto source = engine::MiniaudioDeviceSource::create(engine::MiniaudioSourceConfig{
+        .backends = options.backends,
+        .device = options.device,
+        .channels = options.channels,
+        .sample_rate = options.sample_rate,
+        .period_frames = options.period_frames,
+    });
+    if (!source.has_value()) {
+        return std::unexpected{std::move(source.error().message)};
+    }
+
+    // Open the device once, not started, to show what will play before
+    // starting (requirement 25). The source then opens it in the same format.
+    if (auto probe = (*source)->open(*core, engine::kDefaultDriver); probe.has_value()) {
+        print_stream((*probe)->info(), out);
+    } else {
+        out << std::format("The output device couldn't be opened: {}\n", probe.error().message);
+    }
+
+    engine::OutputConfig config;
+    if (options.sample_rate != 0) {
+        config.default_sample_rate = options.sample_rate;
+    }
+    if (options.channels != 0) {
+        config.default_channels = options.channels;
+    }
+    if (options.period_frames != 0) {
+        config.freewheel_period_frames = options.period_frames;
+    }
+    engine::OutputController controller{*core, **source, config};
+
+    Report report;
+    const Clock::time_point started = Clock::now();
+    StateWatcher watcher{controller, started, out};
+    controller.start();
+    watcher.note();
+
+    double next_status = kStatusInterval;
+    while (true) {
+        watcher.poll();
+        player.collect();
+        if (stop.load(std::memory_order_relaxed)) {
+            report.stopped_early = true;
+            break;
+        }
+        const double now = StateWatcher::seconds_since(started);
+        player.give_due(now);
+        if (now >= script.end) {
+            break;
+        }
+        if (now >= next_status) {
+            Report so_far;
+            player.fill(so_far);
+            out << std::format("{:.3f} s: played {:.3f} s, {} late blocks, peak load {:.3f}\n", now,
+                               so_far.played_seconds, so_far.late_blocks, so_far.peak_render_load);
+            next_status += kStatusInterval;
+        }
+        // Until the next poll, the next event, or the end, whichever is first.
+        double wake = std::min(script.end, next_status);
+        if (const std::optional<double> next = player.next_time()) {
+            wake = std::min(wake, *next);
+        }
+        const Clock::time_point poll_by = Clock::now() + kPollInterval;
+        const Clock::time_point wake_at =
+            started + std::chrono::duration_cast<Clock::duration>(
+                          std::chrono::duration<double>(std::max(wake, now)));
+        std::this_thread::sleep_until(std::min(poll_by, wake_at));
+    }
+
+    // Give the engine a moment to read every command sent, then stop.
+    const Clock::time_point deadline = Clock::now() + kReadWait;
+    while (!player.all_read() && Clock::now() < deadline) {
+        watcher.poll();
+        player.collect();
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    controller.stop();
+    watcher.note();
+
+    player.collect();
+    player.fill(report);
+    report.device_losses = watcher.losses();
+    return report;
 }
 
 } // namespace ks::harness
