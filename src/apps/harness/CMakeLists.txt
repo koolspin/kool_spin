@@ -5,6 +5,7 @@
 add_library(ks_harness STATIC
     encode.cpp
     options.cpp
+    player.cpp
     run.cpp
     script.cpp
     script_lexer.cpp
