@@ -39,6 +39,7 @@ ks_add_test(ks_harness_tests
         harness/device_mode_test.cpp
         harness/encode_test.cpp
         harness/file_mode_test.cpp
+        harness/options_test.cpp
         harness/player_test.cpp
         harness/report_test.cpp
         harness/script_lexer_test.cpp
