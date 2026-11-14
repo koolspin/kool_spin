@@ -23,6 +23,7 @@ namespace {
 
 using ks::engine::MiniaudioBackends;
 using ks::harness::DeviceOptions;
+using ks::harness::flags_problem;
 using ks::harness::play_on_device;
 using ks::harness::read_script;
 using ks::harness::Report;
@@ -87,6 +88,11 @@ TEST_CASE("Device: playing a script on the null backend", "[harness]") {
     CHECK(report->commands_rejected == 0);
     CHECK(report->device_losses == 0);
     CHECK(took < 3.0);
+    CHECK(!flags_problem(*report));
+    // Device mode plays in real time, so a late block is a problem.
+    Report late = *report;
+    late.late_blocks = 1;
+    CHECK(flags_problem(late));
 
     // It names the device, and shows the output starting to play.
     CHECK(out.str().find("NULL Playback Device") != std::string::npos);

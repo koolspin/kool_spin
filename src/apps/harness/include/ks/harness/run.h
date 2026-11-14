@@ -40,13 +40,16 @@ struct Report {
     std::uint64_t events_delayed = 0;
     /// Times the output started freewheeling. Always 0 in file mode.
     std::uint64_t device_losses = 0;
+    /// It played through a device, in real time, so late blocks count as a
+    /// problem. False in file mode, which renders as fast as it can.
+    bool real_time = false;
 
     bool operator==(const Report&) const = default;
 };
 
-/// Whether `report` flags a problem, which makes ks-harness exit with 3: late
-/// blocks, non-finite samples, rejected commands, or fewer commands read
-/// than sent (requirement 28).
+/// Whether `report` flags a problem, which makes ks-harness exit with 3:
+/// non-finite samples, rejected commands, fewer commands read than sent, or,
+/// in real time, late blocks (requirement 28).
 [[nodiscard]] bool flags_problem(const Report& report) noexcept;
 
 /// Prints `report` as these lines, with the numbers filled in:

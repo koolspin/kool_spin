@@ -35,7 +35,7 @@
 namespace ks::harness {
 
 bool flags_problem(const Report& report) noexcept {
-    return report.late_blocks > 0 || report.non_finite_samples > 0 ||
+    return (report.real_time && report.late_blocks > 0) || report.non_finite_samples > 0 ||
            report.commands_rejected > 0 || report.commands_read < report.commands_sent;
 }
 
@@ -295,6 +295,7 @@ std::expected<Report, std::string> play_on_device(const Script& script, const Tr
     engine::OutputController controller{*core, **source, config};
 
     Report report;
+    report.real_time = true;
     const Clock::time_point started = Clock::now();
     StateWatcher watcher{controller, started, out};
     controller.start();

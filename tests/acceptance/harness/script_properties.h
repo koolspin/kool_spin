@@ -35,7 +35,10 @@ inline bool valid_signal(const Signal& signal) {
     const double nyquist = rate / 2.0;
     const bool rate_ok =
         signal.sample_rate >= engine::kMinTrackRate && signal.sample_rate <= engine::kMaxTrackRate;
-    const bool length_ok = signal.seconds > 0.0 && signal.seconds <= kMaxSignalSeconds;
+    // A deck refuses a track over kMaxTrackFrames.
+    const bool length_ok =
+        signal.seconds > 0.0 && signal.seconds <= kMaxSignalSeconds &&
+        std::round(signal.seconds * rate) <= static_cast<double>(engine::kMaxTrackFrames);
     switch (signal.kind) {
     case SignalKind::Sine:
         return rate_ok && length_ok && signal.frequency_hz > 0.0 && signal.frequency_hz < nyquist;

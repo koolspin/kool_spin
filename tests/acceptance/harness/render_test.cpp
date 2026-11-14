@@ -23,6 +23,7 @@
 namespace {
 
 using ks::harness::FileOptions;
+using ks::harness::flags_problem;
 using ks::harness::read_script;
 using ks::harness::render_to_file;
 using ks::harness::Report;
@@ -209,6 +210,11 @@ TEST_CASE("File output: delayed commands", "[harness]") {
     CHECK(report.commands_read == 301);
     CHECK(report.commands_rejected == 0);
     CHECK(report.events_delayed > 0);
+    CHECK(!flags_problem(report));
+    // File mode renders as fast as it can, so a late block isn't a problem.
+    Report late = report;
+    late.late_blocks = 1;
+    CHECK(!flags_problem(late));
 
     const FloatWav wav = read_output(options.path);
     REQUIRE(wav.frames() == 48'000);

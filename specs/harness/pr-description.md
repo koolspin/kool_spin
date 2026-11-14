@@ -36,6 +36,14 @@ There were no deviations from the spec's requirements. The plan records each cho
 - In the options: an option given twice keeps the last value; `-h` is accepted as `--help`, as in `ks-tone`; and a second script or an empty `--out` is a usage error.
 - miniaudio refuses to open a WAV above 384 kHz, so the harness's own sample-rate error can only be reached for rates below the lower limit.
 
+## Changed after the loop
+
+Reviewing the loop's work turned up two gaps in the spec. The maintainer approved amending it, and the fixes were made interactively, with their tests:
+
+- **Late blocks count as a problem only in device mode** (requirement 28). File mode renders as fast as it can, and it splits blocks at events, so a block can be a few frames long and take longer to render than it lasts. A debug build rendering four decks at the default 256-frame blocks reported a late block and exited with 3. File mode still prints late blocks and peak load. `Report::real_time` marks a device-mode report.
+- **A synthetic track can't be longer than `kMaxTrackFrames`** (requirement 8). The spec allowed 3,600 seconds at any rate, but a deck refuses a track over 2^28 frames, without telling the harness, so that deck played nothing and the report didn't say so. It's now a script error on the `track` line. At 96 kHz the longest signal is about 2,796 seconds; at 44.1 kHz the 3,600-second limit still comes first.
+- The soak script's comment says the crossfader jumps between 0.2 and 0.8 every 2.5 seconds, which the mixer smooths, rather than sweeping.
+
 ## Learnings worth adding to `CLAUDE.md`
 
 - `render_offline()` writes non-interleaved per-channel buffers, and the WAV writer wants interleaved samples.

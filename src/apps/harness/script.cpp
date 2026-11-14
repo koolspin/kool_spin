@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -375,6 +376,14 @@ Parsed<SignalArguments> split_rate(std::string_view kind, Tokens args, std::size
                       (own == 1 ? " argument" : " arguments") + ", then optionally rate <hz>");
 }
 
+/// Whether `seconds` at `rate` is at most kMaxTrackFrames frames, the longest
+/// track a deck accepts, rounded as generate() rounds it. Written so that
+/// NaN fails.
+bool fits_a_deck(double seconds, std::uint32_t rate) {
+    return std::round(seconds * static_cast<double>(rate)) <=
+           static_cast<double>(engine::kMaxTrackFrames);
+}
+
 /// Checks a frequency against the signal's sample rate.
 std::optional<std::string> frequency_problem(double hz, std::uint32_t rate) {
     if (hz > 0.0 && hz < rate / 2.0) {
@@ -428,6 +437,13 @@ Parsed<Signal> signal(std::string_view kind, Tokens args) {
     result.seconds = numbers.back();
     if (!in_upper_closed(result.seconds, 0.0, kMaxSignalSeconds)) {
         return line_error("a signal's length must be above 0 and at most 3,600 seconds");
+    }
+    if (!fits_a_deck(result.seconds, result.sample_rate)) {
+        return line_error("a signal this long at " + std::to_string(result.sample_rate) +
+                          " Hz is over the longest track a deck accepts, " +
+                          std::to_string(engine::kMaxTrackFrames) + " frames (about " +
+                          std::to_string(engine::kMaxTrackFrames / result.sample_rate) +
+                          " seconds)");
     }
     switch (result.kind) {
     case SignalKind::Sine:

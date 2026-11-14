@@ -1,9 +1,10 @@
 # A one-hour soak for Phase 1a, step 8 (specs/harness/spec.md requirement 32).
 #
 # Four decks play synthetic tracks at different sample rates, so the engine
-# resamples each one differently. Every minute the decks are reloaded, seek,
-# change rate (reverse included), and the crossfader sweeps back and forth
-# every 5 seconds. It runs anywhere, with no music files:
+# resamples each one differently. Every minute the decks are reloaded, and
+# they seek and change rate (reverse included). Every 5 seconds the crossfader
+# moves to 0.2, then 2.5 seconds later to 0.8; the mixer smooths each move.
+# It runs anywhere, with no music files:
 #
 #     ks-harness src/apps/harness/scripts/soak.harness
 #     ks-harness --out soak.wav src/apps/harness/scripts/soak.harness

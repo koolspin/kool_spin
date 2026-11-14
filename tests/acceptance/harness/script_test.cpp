@@ -6,6 +6,7 @@
 
 #include <ks/engine/command.h>
 #include <ks/engine/mixer.h>
+#include <ks/engine/track.h>
 #include <ks/ipc/command.h>
 
 #include "script_properties.h"
@@ -351,6 +352,8 @@ std::vector<BadScript> bad_scripts() {
         {"clicks too fast", with_prefix("track t clicks 1001 10\n9 end\n"), 3},
         {"a rate too low", with_prefix("track t sine 1000 1 rate 7999\n9 end\n"), 3},
         {"a rate too high", with_prefix("track t noise 1 rate 384001\n9 end\n"), 3},
+        {"a signal longer than a deck's longest track",
+         with_prefix("track t sine 440 2097.153 rate 128000\n9 end\n"), 3},
         {"a seek on a deck with nothing loaded", with_prefix("1 seek 2 3\n9 end\n"), 3},
         {"a cue point on a deck with nothing loaded", with_prefix("1 cuepoint 3 1\n9 end\n"), 3},
         {"a seek after an unload", with_prefix("1 unload 1\n2 seek 1 3\n9 end\n"), 4},
@@ -421,6 +424,15 @@ TEST_CASE("Script: errors name the line", "[harness]") {
         exact.append(kMaxScriptBytes - exact.size(), 'x');
         REQUIRE(exact.size() == kMaxScriptBytes);
         const Read read = read_script(exact, kDirectory);
+        CAPTURE(error_text(read));
+        CHECK(read.has_value());
+    }
+
+    SECTION("a signal of exactly the longest track a deck accepts is read") {
+        // 2,097.152 s at 128 kHz is 2^28 frames.
+        static_assert(ks::engine::kMaxTrackFrames == 268'435'456);
+        const Read read =
+            read_script(with_prefix("track t sine 440 2097.152 rate 128000\n9 end\n"), kDirectory);
         CAPTURE(error_text(read));
         CHECK(read.has_value());
     }

@@ -66,8 +66,9 @@ TEST_CASE("Report: which problems it flags", "[harness]") {
     CHECK_FALSE(flags_problem(Report{}));
     CHECK_FALSE(flags_problem(clean_report()));
 
-    SECTION("late blocks") {
+    SECTION("late blocks, in real time") {
         Report report = clean_report();
+        report.real_time = true;
         report.late_blocks = 1;
         CHECK(flags_problem(report));
     }
@@ -93,6 +94,8 @@ TEST_CASE("Report: which problems it flags", "[harness]") {
         report.events_delayed = 10;
         report.device_losses = 1;
         report.peak_render_load = 0.9;
+        // Late blocks, but not in real time: file mode.
+        report.late_blocks = 3;
         CHECK_FALSE(flags_problem(report));
     }
 }
