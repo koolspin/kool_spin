@@ -1,6 +1,6 @@
 # Feature: miniaudio devices
 
-- **Status:** Approved by the maintainer on 2026-11-12. Protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-12; requirement 18 and its criteria added on 2026-11-14, after step 8 found the headphone bus playing through the speakers on the Inpulse 500. Protected: build loops can't change it.
 - **Roadmap:** Phase 1a (step 7a, which finishes step 2c)
 - **Built by:** interactive
 
@@ -35,6 +35,12 @@ Play through a real device the way the device-loss work (2b) plays through simul
     - PulseAudio sends it when the stream is suspended, and nothing when its sink disappears.
   - **When nothing is sent:** an unplugged ALSA device may stop without a notification. The output controller's stall timeout catches the silent cases.
   - **Underruns:** miniaudio doesn't report them, so this step doesn't either.
+- **How miniaudio lays out channels** (found in step 8 on the Inpulse 500, whose PipeWire sink is laid out FL FR RL RR: the speakers on outputs 1 and 2, the headphones on 3 and 4):
+  - Asked for a channel count, miniaudio gives the engine's side its own default layout for that count (for 4 channels, FL FR FC BC). Where that differs from the device's layout, it rearranges or mixes channels by position.
+  - Its PulseAudio backend gives the stream PulseAudio's default layout for the count (for 4 channels, FL FC FR RC), not the sink's. The server then remixes the stream onto the sink by position.
+  - Together, on the Inpulse, the headphone bus's left channel (engine output 3) played through both speakers, and its right channel (output 4) in both headphone ears.
+  - Given a blank channel map (every position `MA_CHANNEL_NONE`), miniaudio gives the engine's side the device's own layout when the device opens with the channel count asked for, and converts nothing.
+  - In ALSA's channel order (`MA_PA_CHANNEL_MAP_ALSA`), a PulseAudio stream is laid out like the sinks that PulseAudio and PipeWire make for analog sound cards' 2-, 4-, 6-, and 8-channel profiles, so the server doesn't remix it.
 - **Tests run on miniaudio's null backend**, which has one device and calls back in real time. Hardware behaviour is checked by hand.
 
 ## Requirements
@@ -100,6 +106,21 @@ Play through a real device the way the device-loss work (2b) plays through simul
 
 17. The backend's callback, its notification handler, and every `LossDetector` method are `noexcept KS_NONBLOCKING`. Listing, creating a source, `available()`, and `open()` run on the control thread.
 
+### Channel order
+
+18. **Engine output n is device output n.** `open_miniaudio()`, and so every source, opens a device with:
+    - a blank channel map, so that when the device opens with the channel count asked for, miniaudio neither rearranges nor mixes channels;
+    - on PulseAudio, ALSA's channel order, so that PulseAudio or PipeWire doesn't remix the stream onto a sink laid out that way.
+
+    It builds miniaudio's device configuration with `miniaudio_device_config(config, device_id, blank_map)`, declared in the engine's private header `src/engine/miniaudio_device_config.h` so the acceptance tests can check it. That returns a playback configuration with:
+    - `ma_format_f32`, and `config`'s channel count, sample rate, and period;
+    - the device ID `device_id` (null: the system default device);
+    - the low-latency performance profile, and callbacks of whatever size the backend delivers;
+    - `blank_map` as the channel map: the caller's array of `MA_MAX_CHANNELS` positions, all `MA_CHANNEL_NONE`, which must outlive the call to `ma_device_init()`;
+    - `MA_PA_CHANNEL_MAP_ALSA` as the PulseAudio channel map.
+
+    `open_miniaudio()` adds its callbacks and their user data.
+
 ## Acceptance criteria
 
 The tests are in `tests/acceptance/miniaudio-devices/`, on miniaudio's null backend unless a criterion says otherwise. Tests that wait for something fail, rather than hang, when it hasn't happened within the stated time.
@@ -127,11 +148,20 @@ The tests are in `tests/acceptance/miniaudio-devices/`, on miniaudio's null back
 
   (test: "Miniaudio source: resolving and opening the device")
 - [ ] `[auto]` **The output controller on a real backend:** with a source on the null device, `start()` is `Playing`. Over 500 ms the frame count is within 50 ms of real time, or gets there within the next 100 ms. After `stop()` the state is `Stopped`, and nothing renders for 100 ms. (test: "Output: playing through a miniaudio device")
+- [ ] `[auto]` **Channel order:** for every `MiniaudioBackends` value, with channel counts 0, 2, 4, and `kMaxOutputChannels`, and with and without a device ID, `miniaudio_device_config()` gives:
+  - the format, channel count, sample rate, period, device ID, performance profile, and callback sizing of requirement 18;
+  - the blank map it was given as the channel map, unchanged;
+  - `MA_PA_CHANNEL_MAP_ALSA` as the PulseAudio channel map.
+
+  A null device opened with that configuration for 4 channels has the same layout on the engine's side as on the device's, and miniaudio doesn't convert its channels. (test: "Miniaudio: channels reach the device in order")
 - [ ] `[auto]` **Real time:** `LossDetector`'s methods are called from a `KS_NONBLOCKING` function, so function-effect analysis checks them, and the tests above run clean under `rtsan`. (test: "miniaudio devices are real-time safe")
 - [ ] `[manual]` **Cable pull on Linux:** the hidden test "Cable: a tone through a chosen device" lists the devices, then plays a tone through `OutputController` and a `MiniaudioDeviceSource` for `KS_CABLE_SECONDS` (default 60), printing each state change with its time. It uses the backend in `KS_CABLE_BACKEND` (default `system`) and device number `KS_CABLE_DEVICE` from the list (default: the default device). On the Inpulse 500 through PipeWire's PulseAudio backend:
   - pulling the USB cable makes the controller `Freewheeling` within 1 s, and the tone doesn't move to the laptop's speakers;
   - plugging it back in makes it `Playing` within 2 s, with the tone back on the Inpulse.
 - [ ] `[manual]` **Cable pull on macOS:** the same, with CoreAudio.
+- [ ] `[manual]` **Channel order on the Inpulse 500:** through PipeWire's PulseAudio backend, `ks-harness` playing `src/apps/harness/scripts/channels.harness` (a 440 Hz tone on the main bus only, and 880 Hz on the headphone bus only):
+  - plays only the low tone through the speakers, and only the high tone, in both ears, through the headphones;
+  - while it plays, `pw-dump` shows the stream's format laid out FL FR RL RR, the same as the sink's. Before requirement 18 it was FL FC FR RC.
 - [ ] `[auto]` **Every CI configuration:** all of the above pass on Linux and on macOS arm64 (`debug`, `release`, `asan`, `tsan`).
 
 ## Out of scope
@@ -139,6 +169,8 @@ The tests are in `tests/acceptance/miniaudio-devices/`, on miniaudio's null back
 - The development harness (7b), and the one-hour soak test and cable pull through it (step 8).
 - Underruns, which miniaudio doesn't report.
 - A fallback device, and following the system default device (after Phase 1).
+- A device that opens with a different channel count than asked for: miniaudio still mixes the engine's channels into the device's layout. The source asks for the device's own count unless it's configured otherwise.
+- PulseAudio sinks laid out other than in ALSA's order, such as 3-channel and 4.1 profiles, and PipeWire's "Pro Audio" profile, whose channels have no positions: the server may still remix onto them. miniaudio can't ask PulseAudio to match channels by number.
 - Recognising a device whose ID changes when it returns. For example, if ALSA renumbers the card, the source waits for the old ID.
 - Hot-plugging a different device, and choosing a device by name.
 - Windows backends.
