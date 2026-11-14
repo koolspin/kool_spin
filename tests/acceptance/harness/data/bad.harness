@@ -1,0 +1,4 @@
+# For the command-line tests: line 3 is wrong.
+track tone sine 1000 2
+0 jump 1
+1 end

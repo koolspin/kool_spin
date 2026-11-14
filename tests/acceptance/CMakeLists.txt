@@ -10,8 +10,9 @@ set_property(DIRECTORY PROPERTY LABELS acceptance)
 
 # ks_acceptance_test(<name> EXIT <code> [EXPECT <pattern>...] COMMAND <command> [<arg>...])
 #
-# Runs <command> and checks its exit code and output with expect.sh. Each
-# pattern is an extended regular expression that must match a line of output;
+# Runs <command> and checks its exit code and output with expect.sh. <code> may
+# list several codes, separated by '|', for a command that may exit with any
+# of them. Each pattern is an extended regular expression that must match a line of output;
 # a pattern starting with '!' must match none.
 function(ks_acceptance_test name)
     cmake_parse_arguments(PARSE_ARGV 1 arg "" "EXIT" "EXPECT;COMMAND")

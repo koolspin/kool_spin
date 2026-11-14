@@ -23,3 +23,17 @@ target_link_libraries(ks_miniaudio PUBLIC Threads::Threads ${CMAKE_DL_LIBS} $<$<
 
 # miniaudio uses POSIX APIs that strict -std=c17 hides; build it as gnu17.
 set_target_properties(ks_miniaudio PROPERTIES C_EXTENSIONS ON)
+
+# ks::miniaudio_codecs: a second, private copy of miniaudio with its decoders
+# and WAV encoder, for the development harness only (specs/harness/spec.md
+# requirements 30 and 31). Every miniaudio symbol in it is static, so it links
+# beside ks::miniaudio; users see only ks_codecs.h, never miniaudio.h's
+# codec declarations. The engine must never link it.
+add_library(ks_miniaudio_codecs STATIC codecs.c)
+add_library(ks::miniaudio_codecs ALIAS ks_miniaudio_codecs)
+
+target_include_directories(ks_miniaudio_codecs
+    PRIVATE "${MINIAUDIO_INCLUDE_DIR}"
+    INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(ks_miniaudio_codecs PUBLIC Threads::Threads $<$<PLATFORM_ID:Linux>:m>)
+set_target_properties(ks_miniaudio_codecs PROPERTIES C_EXTENSIONS ON)

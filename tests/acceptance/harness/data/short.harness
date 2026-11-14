@@ -1,0 +1,6 @@
+# A one-second script for the command-line tests: two commands.
+track tone sine 1000 2
+0 load 1 tone
+0 play 1
+0.5 rate 1 1.5
+1 end

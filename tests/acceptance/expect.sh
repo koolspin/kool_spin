@@ -5,6 +5,9 @@
 #
 # Usage: expect.sh <exit code> [<pattern>...] -- <command> [<argument>...]
 #
+# <exit code> is one code, or several separated by '|', such as 0|3: the
+# command may exit with any of them.
+#
 # Each <pattern> is an extended regular expression (grep -E) that must match at
 # least one line of the command's combined stdout and stderr. A pattern that
 # starts with '!' must match no line.
@@ -28,7 +31,7 @@ actual_exit=$?
 printf '%s\n---\n' "$output"
 
 failed=0
-if [[ "$actual_exit" != "$expected_exit" ]]; then
+if [[ "|$expected_exit|" != *"|$actual_exit|"* ]]; then
     echo "FAIL: exit code $actual_exit, expected $expected_exit"
     failed=1
 fi
