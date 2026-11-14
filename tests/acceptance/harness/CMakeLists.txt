@@ -12,8 +12,16 @@ ks_add_test(ks_harness_acceptance_tests
         signals_test.cpp
         tracks_test.cpp
     LIBRARIES ks::harness ks::engine)
+# A sanitizer's overhead can make a block take longer to render than it lasts,
+# so only a build without one expects a device to play with no late blocks.
+if(KS_SANITIZER)
+    set(real_time 0)
+else()
+    set(real_time 1)
+endif()
 target_compile_definitions(ks_harness_acceptance_tests
-    PRIVATE KS_HARNESS_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
+    PRIVATE KS_HARNESS_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data"
+            KS_HARNESS_EXPECT_REAL_TIME=${real_time})
 
 # The script reader's fuzz target, run under the fuzz preset only.
 ks_add_fuzz_target(ks_harness_script_fuzz
@@ -97,8 +105,15 @@ ks_acceptance_test(ks-harness.render EXIT 0
         [[^Commands: 2 sent, 2 read, 0 rejected, 0 delayed$]]
         [[^Device losses: 0$]]
     COMMAND ${ks_harness} --out "${CMAKE_CURRENT_BINARY_DIR}/render.wav" "${data}/short.harness")
-ks_acceptance_test(ks-harness.null-device EXIT 0
+# Under a sanitizer, late blocks can make it exit 3; nothing else may.
+if(real_time)
+    set(null_device_exit 0)
+else()
+    set(null_device_exit "0|3")
+endif()
+ks_acceptance_test(ks-harness.null-device EXIT ${null_device_exit}
     EXPECT
         [[NULL Playback Device]]
+        [[^Samples: 0 non-finite, ]]
         [[^Commands: 2 sent, 2 read, 0 rejected, 0 delayed$]]
     COMMAND ${ks_harness} --backend null --rate 48000 --period 512 "${data}/short.harness")

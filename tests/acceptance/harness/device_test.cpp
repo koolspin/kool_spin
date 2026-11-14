@@ -35,6 +35,11 @@ using ks::harness::test::error_text;
 using Clock = std::chrono::steady_clock;
 using std::chrono::milliseconds;
 
+/// Whether this build renders in real time. A sanitizer's overhead can make a
+/// block take longer to render than it lasts, so a build with one doesn't
+/// expect a device to play with no late blocks.
+constexpr bool kExpectRealTime = KS_HARNESS_EXPECT_REAL_TIME != 0;
+
 /// The null device at 48 kHz, stereo. Blocks of 512 frames last 10.7 ms, so
 /// a busy test runner has room before a block counts as late.
 const DeviceOptions kNullDevice{.backends = MiniaudioBackends::Null,
@@ -81,14 +86,19 @@ TEST_CASE("Device: playing a script on the null backend", "[harness]") {
     CHECK(report->played_seconds <= 1.1);
     CHECK(!report->stopped_early);
     CHECK(report->blocks_rendered > 0);
-    CHECK(report->late_blocks == 0);
+    if constexpr (kExpectRealTime) {
+        CHECK(report->late_blocks == 0);
+    }
     CHECK(report->non_finite_samples == 0);
     CHECK(report->commands_sent == 3);
     CHECK(report->commands_read == 3);
     CHECK(report->commands_rejected == 0);
     CHECK(report->device_losses == 0);
     CHECK(took < 3.0);
-    CHECK(!flags_problem(*report));
+    // Apart from any late blocks, the report flags nothing.
+    Report on_time = *report;
+    on_time.late_blocks = 0;
+    CHECK(!flags_problem(on_time));
     // Device mode plays in real time, so a late block is a problem.
     Report late = *report;
     late.late_blocks = 1;

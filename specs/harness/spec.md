@@ -1,6 +1,6 @@
 # Feature: development harness
 
-- **Status:** Approved by the maintainer on 2026-11-13; requirements 8 and 28 and the errors, delays, and device-mode criteria amended the same day, after the build loop's review. Protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-13; requirements 8 and 28 and the errors, delays, and device-mode criteria amended the same day, after the build loop's review and CI on macOS. Protected: build loops can't change it.
 - **Roadmap:** Phase 1a (step 7b)
 - **Built by:** loop. The spec, the API, the acceptance tests, the fuzz target, and the codec library are written interactively first.
 
@@ -234,7 +234,7 @@ The tests are in `tests/acceptance/harness/`, with small audio fixtures in `test
 - [ ] `[auto]` **File mode, timing:** a script that plays a sine from 0.5 s renders silence before frame `round(0.5 × rate)`, and the sine from there, with the deck's fade-in. The file has `round(end × rate)` frames, `--channels` channels, and `--rate`. (test: "File output: events land on their frames")
 - [ ] `[auto]` **File mode, determinism:** rendering a script twice gives identical files, byte for byte. A script with no delays and at most 32 commands at any one time gives the same file at block sizes 1, 128, and 256. (test: "File output: the same script renders the same file")
 - [ ] `[auto]` **Delays:** 300 commands at one time all reach the engine, in order. The report counts the delayed ones, and shows the engine read as many commands as were sent. A late block in a file-mode report doesn't flag a problem. (test: "File output: delayed commands")
-- [ ] `[auto]` **Device mode:** a 1-second script on the null device plays for 1 s, ±100 ms. Its report shows no late blocks, no rejections, and as many commands read as sent, and a late block in it would flag a problem. The output names the device and shows its state changes. (test: "Device: playing a script on the null backend")
+- [ ] `[auto]` **Device mode:** a 1-second script on the null device plays for 1 s, ±100 ms. Its report shows no rejections, and as many commands read as sent, and a late block in it would flag a problem. In a build without a sanitizer, it shows no late blocks: a sanitizer's overhead can make a block take longer to render than it lasts. The output names the device and shows its state changes. (test: "Device: playing a script on the null backend")
 - [ ] `[auto]` **Stopping early:** setting the stop flag 200 ms into a 10-second script returns within 500 ms, with a report that says it was stopped early. (test: "Device: stopping early")
 - [ ] `[auto]` **The command line:** (CTest cases in `tests/acceptance/harness/CMakeLists.txt`)
   - `--list-devices --backend null` lists `0: NULL Playback Device (default)`;
