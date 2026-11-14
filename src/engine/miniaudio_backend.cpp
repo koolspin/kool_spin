@@ -6,6 +6,7 @@
 #include <ks/engine/block.h>
 #include <ks/engine/interleave.h>
 
+#include "miniaudio_device_config.h"
 #include <miniaudio.h>
 
 #include <algorithm>
@@ -231,16 +232,10 @@ public:
             chosen_id = &device_id;
         }
 
-        ma_device_config device_config = ma_device_config_init(ma_device_type_playback);
-        device_config.playback.pDeviceID = chosen_id;
-        device_config.playback.format = ma_format_f32;
-        device_config.playback.channels = config.channels;       // 0: the device's own
-        device_config.sampleRate = config.sample_rate;           // 0: the device's own
-        device_config.periodSizeInFrames = config.period_frames; // 0: the backend's choice
-        device_config.performanceProfile = ma_performance_profile_low_latency;
-        // Call back with whatever the backend delivers; the engine splits it
-        // into blocks itself (ADR 0003 §3).
-        device_config.noFixedSizedCallback = MA_TRUE;
+        // Engine output n goes to device output n (requirement 18). miniaudio
+        // copies the map during ma_device_init().
+        BlankChannelMap blank_map{};
+        ma_device_config device_config = miniaudio_device_config(config, chosen_id, blank_map);
         device_config.dataCallback = &MiniaudioBackend::callback;
         device_config.notificationCallback = &MiniaudioBackend::notified;
         device_config.pUserData = this;

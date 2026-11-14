@@ -9,6 +9,7 @@ add_library(ks_engine STATIC
     interleave.cpp
     interpolator.cpp
     miniaudio_backend.cpp
+    miniaudio_device_config.cpp
     mixer.cpp
     offline.cpp
     output_controller.cpp

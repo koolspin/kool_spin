@@ -98,6 +98,11 @@ ks_acceptance_test(ks-harness.script-error EXIT 2
 ks_acceptance_test(ks-harness.check-soak EXIT 0
     COMMAND ${ks_harness} --check "${PROJECT_SOURCE_DIR}/src/apps/harness/scripts/soak.harness")
 
+# --check reads the channel-check script, for the manual channel-order
+# criterion in specs/miniaudio-devices/spec.md.
+ks_acceptance_test(ks-harness.check-channels EXIT 0
+    COMMAND ${ks_harness} --check "${PROJECT_SOURCE_DIR}/src/apps/harness/scripts/channels.harness")
+
 # Rendering into a file, and playing on the null device, print the report.
 ks_acceptance_test(ks-harness.render EXIT 0
     EXPECT

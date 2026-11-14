@@ -1,0 +1,32 @@
+# Channel check: does each bus reach its own outputs?
+# (specs/miniaudio-devices/spec.md requirement 18, and its manual criterion
+# "Channel order on the Inpulse 500".)
+#
+# Deck 1 plays 440 Hz on the main bus only, outputs 1 and 2: the speakers.
+# Deck 2 plays 880 Hz on the headphone bus only, outputs 3 and 4: its fader
+# is down, its PFL is on, and the cue mix is all cue. For 30 seconds:
+#
+#     ks-harness --channels 4 src/apps/harness/scripts/channels.harness
+#
+# Right: the speakers play only the low tone, and the headphones play only
+# the high tone, in both ears.
+# Wrong: the high tone also comes out of the speakers, or only one ear of the
+# headphones has it.
+#
+# On PipeWire, while it plays, `pw-dump` shows the ks-harness stream's format.
+# Its channel positions should be the sink's (FL FR RL RR on the Inpulse).
+
+track low sine 440 30
+track high sine 880 30
+
+0 main -12
+0 headphones -12
+0 cuemix 0
+0 load 1 low
+0 play 1
+0 load 2 high
+0 fader 2 0
+0 pfl 2 on
+0 play 2
+
+30 end
