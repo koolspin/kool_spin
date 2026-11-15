@@ -8,7 +8,7 @@
 /// Every type has a number that's never reused or renumbered (0 is never a
 /// type), a body with fixed fields in a fixed order, an exact descriptor
 /// count, and a rule for its request ID: non-zero for a request, the
-/// request's ID for a reply, or 0.
+/// request's ID for a reply, or 0 for a notification.
 ///
 /// Bodies: integers are little-endian at their stated width, with no padding.
 /// Text is a 32-bit byte length, then that many bytes of UTF-8 with no NUL,
@@ -16,13 +16,19 @@
 /// has a maximum length. No field is optional, and a body must be used
 /// exactly.
 ///
-/// | Type  | Number | Body                          | Descriptors | Request ID           |
-/// |-------|--------|-------------------------------|-------------|----------------------|
-/// | Ping  | 1      | Empty                         | 0           | Non-zero             |
-/// | Pong  | 2      | Empty                         | 0           | The Ping's           |
-/// | Error | 3      | Code (16 bits); text (≤ 1024) | 0           | The request's, or 0  |
+/// | Type    | Number | Body                          | Descriptors | Request ID          |
+/// |---------|--------|-------------------------------|-------------|---------------------|
+/// | Ping    | 1      | Empty                         | 0           | Non-zero            |
+/// | Pong    | 2      | Empty                         | 0           | The Ping's          |
+/// | Error   | 3      | Code (16 bits); text (≤ 1024) | 0           | The request's, or 0 |
+/// | Hello   | 4      | Name: text (1 to 64)          | 0           | Non-zero            |
+/// | Welcome | 5      | Empty                         | 1           | The Hello's         |
+/// | Stop    | 6      | Empty                         | 0           | Non-zero            |
+/// | Done    | 7      | Empty                         | 0           | The Stop's          |
+/// | Ready   | 8      | Empty                         | 0           | 0                   |
 ///
-/// Later steps add types with the same rules, each in its own spec.
+/// Types 4 to 8 come from specs/processes/spec.md requirement 6. Later steps
+/// add types with the same rules, each in its own spec.
 
 #include <ks/ipc/frame.h>
 
@@ -37,9 +43,14 @@ namespace ks::ipc {
 /// The message types. The values are part of the protocol: never renumber or
 /// reuse them. A frame carries the type in 16 bits.
 enum class MessageType : std::uint8_t {
-    Ping = 1,  ///< Asks the peer to answer with a Pong.
-    Pong = 2,  ///< Answers a Ping.
-    Error = 3, ///< Reports that something the peer sent was refused.
+    Ping = 1,    ///< Asks the peer to answer with a Pong.
+    Pong = 2,    ///< Answers a Ping.
+    Error = 3,   ///< Reports that something the peer sent was refused.
+    Hello = 4,   ///< A client introduces itself to the supervisor.
+    Welcome = 5, ///< The supervisor answers a Hello with the engine-state segment.
+    Stop = 6,    ///< Asks the receiver to fade out and stop.
+    Done = 7,    ///< Answers a Stop, once the receiver has stopped.
+    Ready = 8,   ///< The engine is playing. A notification, with request ID 0.
 };
 
 /// What an Error message reports. The values are part of the protocol. The
@@ -54,6 +65,10 @@ enum class ErrorCode : std::uint8_t {
 
 /// The longest text an Error message carries, in bytes.
 inline constexpr std::size_t kMaxErrorTextSize = 1024;
+
+/// The longest name a Hello message carries, in bytes. A name has at least
+/// one byte.
+inline constexpr std::size_t kMaxClientNameSize = 64;
 
 /// The bodies of the message types.
 namespace msg {
@@ -73,12 +88,43 @@ struct Error {
     friend bool operator==(const Error&, const Error&) = default;
 };
 
+/// A client's first message to the supervisor.
+struct Hello {
+    std::string name; ///< UTF-8, 1 to kMaxClientNameSize bytes, for reports.
+
+    friend bool operator==(const Hello&, const Hello&) = default;
+};
+
+/// The supervisor's answer to a Hello. Its one descriptor is the
+/// engine-state segment, which the client maps read-only.
+struct Welcome {
+    friend bool operator==(const Welcome&, const Welcome&) = default;
+};
+
+/// Asks the receiver to fade out and stop: a client asks the supervisor, and
+/// the supervisor asks the engine.
+struct Stop {
+    friend bool operator==(const Stop&, const Stop&) = default;
+};
+
+/// Answers a Stop, once the receiver has stopped.
+struct Done {
+    friend bool operator==(const Done&, const Done&) = default;
+};
+
+/// The engine tells the supervisor that it's playing.
+struct Ready {
+    friend bool operator==(const Ready&, const Ready&) = default;
+};
+
 } // namespace msg
 
 /// A message: its request ID and its body.
 struct Message {
     std::uint32_t request_id = 0;
-    std::variant<msg::Ping, msg::Pong, msg::Error> body;
+    std::variant<msg::Ping, msg::Pong, msg::Error, msg::Hello, msg::Welcome, msg::Stop, msg::Done,
+                 msg::Ready>
+        body;
 
     friend bool operator==(const Message&, const Message&) = default;
 };
@@ -90,7 +136,7 @@ enum class MessageError : std::uint8_t {
     LongBody,       ///< Bytes are left over after the last field.
     BadField,       ///< A field's value is invalid, such as text that isn't UTF-8.
     WrongFdCount,   ///< The type carries a different number of descriptors.
-    WrongRequestId, ///< A request with ID 0, or a reply without one.
+    WrongRequestId, ///< A request or reply with ID 0, or a notification with one.
 };
 
 /// The message in `frame`, or why it isn't one. A function of the frame's

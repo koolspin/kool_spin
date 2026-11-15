@@ -157,7 +157,7 @@ The supervisor's socket (`listener_test.cpp`):
 Messages (`messages_test.cpp`):
 
 - [ ] `[auto]` **Round trip:** `Ping`, `Pong`, and `Error` with each code and with text of 0 bytes, 1024 bytes, and multi-byte UTF-8 each encode and decode to the same message, and encode again to the same bytes. (test: "Messages: round trip")
-- [ ] `[auto]` **Refused:** each of these is refused with the right error: types 4 and 65,535; a body one byte short and one byte long; a text length that runs past the body; 1025 bytes of text; invalid UTF-8 (a stray continuation byte, an overlong encoding, a surrogate, a sequence cut short, and a NUL); an unknown error code; a `Ping` with request ID 0; and a `Ping` with a descriptor. (test: "Messages: what's refused")
+- [ ] `[auto]` **Refused:** each of these is refused with the right error: types 256 and 65,535; a body one byte short and one byte long; a text length that runs past the body; 1025 bytes of text; invalid UTF-8 (a stray continuation byte, an overlong encoding, a surrogate, a sequence cut short, and a NUL); an unknown error code; a `Ping` with request ID 0; and a `Ping` with a descriptor. (test: "Messages: what's refused")
 
 Fuzzing (`protocol_fuzz.cpp`):
 

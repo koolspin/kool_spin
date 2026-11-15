@@ -43,6 +43,13 @@ open_runtime_directory(const std::filesystem::path& path);
 /// The longest lock-file name.
 inline constexpr std::size_t kMaxLockNameLength = 64;
 
+/// The supervisor's lock (specs/processes/spec.md requirement 5).
+inline constexpr std::string_view kSupervisorLockName = "supervisor";
+
+/// The engine's lock: held while an engine runs, with or without a
+/// supervisor (specs/processes/spec.md requirement 5).
+inline constexpr std::string_view kEngineLockName = "engine";
+
 /// Whether a lock file is held, and by which process.
 struct LockState {
     bool held = false;
