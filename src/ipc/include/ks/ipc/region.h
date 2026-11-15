@@ -63,6 +63,29 @@ void write_header(std::span<std::byte> segment, SegmentKind kind,
                                                             SegmentKind kind,
                                                             std::uint32_t layout_version) noexcept;
 
+/// How a process maps a segment.
+enum class Access : std::uint8_t {
+    ReadOnly, ///< A write through the mapping crashes the writing process.
+    ReadWrite,
+};
+
+/// Why Region::map() refused a segment (specs/segments/spec.md requirement 13).
+enum class MapError : std::uint8_t {
+    System,     ///< fstat() or mmap() failed: see MapFailure::system.
+    NotSealed,  ///< Linux: the segment lacks F_SEAL_SHRINK, F_SEAL_GROW, or F_SEAL_SEAL.
+    TooSmall,   ///< Smaller than a header.
+    BadMagic,   ///< Not a kool_spin segment.
+    BadVersion, ///< A different layout version.
+    BadKind,    ///< A different kind, or not a SegmentKind at all.
+    BadSize,    ///< The header's size isn't the segment's size.
+};
+
+/// What Region::map() reports when it refuses a segment.
+struct MapFailure {
+    MapError error = MapError::System;
+    std::error_code system; ///< The system call's error, when `error` is System.
+};
+
 /// A mapping of shared memory, unmapped when the Region is destroyed.
 class Region {
 public:
@@ -70,6 +93,17 @@ public:
     /// mapping is at least `size` bytes, rounded up to the page size. Returns
     /// an error if `size` is zero or the mapping fails.
     [[nodiscard]] static std::expected<Region, std::error_code> create_anonymous(std::size_t size);
+
+    /// Maps the whole segment `fd`, after checking it (specs/segments/spec.md
+    /// requirement 13): on Linux its seals, then its size from fstat(), then
+    /// its header against that size, `kind`, and `layout_version`. A refused
+    /// segment leaves nothing mapped. `fd` is neither closed nor kept: the
+    /// mapping keeps the segment alive by itself.
+    ///
+    /// With Access::ReadOnly, bytes() and at() still hand out non-const
+    /// pointers, but writing through them crashes the process.
+    [[nodiscard]] static std::expected<Region, MapFailure>
+    map(int fd, SegmentKind kind, std::uint32_t layout_version, Access access);
 
     Region(const Region&) = delete;
     Region& operator=(const Region&) = delete;
