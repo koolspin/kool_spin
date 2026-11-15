@@ -222,6 +222,14 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         }
         return Message{.request_id = frame.request_id, .body = std::move(*error)};
     }
+    case MessageType::Hello:
+    case MessageType::Welcome:
+    case MessageType::Stop:
+    case MessageType::Done:
+    case MessageType::Ready:
+        // Stub: specs/processes/spec.md requirement 6, implemented once its
+        // tests are approved. rules_for() doesn't know these types yet.
+        break;
     }
     return std::unexpected{MessageError::UnknownType};
 }
