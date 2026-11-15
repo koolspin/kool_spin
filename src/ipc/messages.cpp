@@ -23,6 +23,7 @@ namespace {
 enum class RequestRule : std::uint8_t {
     NonZero, ///< A request, or a reply carrying its request's ID.
     Any,     ///< An answer to a request, or 0.
+    Zero,    ///< A notification.
 };
 
 /// A message type's fixed rules.
@@ -36,9 +37,16 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
     switch (type) {
     case static_cast<std::uint16_t>(MessageType::Ping):
     case static_cast<std::uint16_t>(MessageType::Pong):
+    case static_cast<std::uint16_t>(MessageType::Hello):
+    case static_cast<std::uint16_t>(MessageType::Stop):
+    case static_cast<std::uint16_t>(MessageType::Done):
         return TypeRules{.descriptors = 0, .request = RequestRule::NonZero};
+    case static_cast<std::uint16_t>(MessageType::Welcome):
+        return TypeRules{.descriptors = 1, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Error):
         return TypeRules{.descriptors = 0, .request = RequestRule::Any};
+    case static_cast<std::uint16_t>(MessageType::Ready):
+        return TypeRules{.descriptors = 0, .request = RequestRule::Zero};
     default:
         return std::nullopt;
     }
@@ -151,6 +159,12 @@ private:
     std::span<const std::byte> rest_;
 };
 
+/// True if `name` is a valid Hello name: 1 to kMaxClientNameSize bytes of
+/// text (specs/processes/spec.md requirement 6).
+bool valid_name(std::span<const std::byte> name) noexcept {
+    return !name.empty() && name.size() <= kMaxClientNameSize && valid_text(name);
+}
+
 /// Appends `value` little-endian, in `size` bytes.
 void append_integer(std::vector<std::byte>& body, std::uint32_t value, std::size_t size) {
     for (std::size_t i = 0; i < size; ++i) {
@@ -185,9 +199,79 @@ std::expected<msg::Error, MessageError> decode_error(std::span<const std::byte> 
     return msg::Error{.code = static_cast<ErrorCode>(*code), .text = std::move(*text)};
 }
 
+/// A Hello message's body.
+std::expected<msg::Hello, MessageError> decode_hello(std::span<const std::byte> body) {
+    BodyReader reader{body};
+    std::expected<std::string, MessageError> name = reader.text(kMaxClientNameSize);
+    if (!name) {
+        return std::unexpected{name.error()};
+    }
+    if (name->empty()) {
+        return std::unexpected{MessageError::BadField};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    return msg::Hello{.name = std::move(*name)};
+}
+
+/// The message of a type whose body is empty.
+template <typename Body>
+std::expected<Message, MessageError> empty_body(const Frame& frame) {
+    if (!frame.body.empty()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    return Message{.request_id = frame.request_id, .body = Body{}};
+}
+
+/// Appends a text field: its length in 32 bits, then its bytes.
+void append_text(std::vector<std::byte>& body, std::span<const std::byte> text) {
+    append_integer(body, static_cast<std::uint32_t>(text.size()), 4);
+    body.insert(body.end(), text.begin(), text.end());
+}
+
 /// True if `request_id` follows `rule`.
 bool request_id_follows(std::uint32_t request_id, RequestRule rule) noexcept {
-    return rule == RequestRule::Any || request_id != 0;
+    switch (rule) {
+    case RequestRule::NonZero:
+        return request_id != 0;
+    case RequestRule::Zero:
+        return request_id == 0;
+    case RequestRule::Any:
+        break;
+    }
+    return true;
+}
+
+/// The type of `message`'s body, or nothing if it has none (a variant left
+/// valueless by an exception).
+std::optional<MessageType> type_of(const Message& message) noexcept {
+    const auto& body = message.body;
+    if (std::holds_alternative<msg::Ping>(body)) {
+        return MessageType::Ping;
+    }
+    if (std::holds_alternative<msg::Pong>(body)) {
+        return MessageType::Pong;
+    }
+    if (std::holds_alternative<msg::Error>(body)) {
+        return MessageType::Error;
+    }
+    if (std::holds_alternative<msg::Hello>(body)) {
+        return MessageType::Hello;
+    }
+    if (std::holds_alternative<msg::Welcome>(body)) {
+        return MessageType::Welcome;
+    }
+    if (std::holds_alternative<msg::Stop>(body)) {
+        return MessageType::Stop;
+    }
+    if (std::holds_alternative<msg::Done>(body)) {
+        return MessageType::Done;
+    }
+    if (std::holds_alternative<msg::Ready>(body)) {
+        return MessageType::Ready;
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -206,15 +290,9 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
 
     switch (static_cast<MessageType>(frame.type)) {
     case MessageType::Ping:
-    case MessageType::Pong: {
-        if (!frame.body.empty()) {
-            return std::unexpected{MessageError::LongBody};
-        }
-        if (frame.type == static_cast<std::uint16_t>(MessageType::Ping)) {
-            return Message{.request_id = frame.request_id, .body = msg::Ping{}};
-        }
-        return Message{.request_id = frame.request_id, .body = msg::Pong{}};
-    }
+        return empty_body<msg::Ping>(frame);
+    case MessageType::Pong:
+        return empty_body<msg::Pong>(frame);
     case MessageType::Error: {
         std::expected<msg::Error, MessageError> error = decode_error(frame.body);
         if (!error) {
@@ -222,14 +300,21 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         }
         return Message{.request_id = frame.request_id, .body = std::move(*error)};
     }
-    case MessageType::Hello:
+    case MessageType::Hello: {
+        std::expected<msg::Hello, MessageError> hello = decode_hello(frame.body);
+        if (!hello) {
+            return std::unexpected{hello.error()};
+        }
+        return Message{.request_id = frame.request_id, .body = std::move(*hello)};
+    }
     case MessageType::Welcome:
+        return empty_body<msg::Welcome>(frame);
     case MessageType::Stop:
+        return empty_body<msg::Stop>(frame);
     case MessageType::Done:
+        return empty_body<msg::Done>(frame);
     case MessageType::Ready:
-        // Stub: specs/processes/spec.md requirement 6, implemented once its
-        // tests are approved. rules_for() doesn't know these types yet.
-        break;
+        return empty_body<msg::Ready>(frame);
     }
     return std::unexpected{MessageError::UnknownType};
 }
@@ -237,20 +322,25 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
 std::expected<Frame, MessageError> encode(const Message& message) {
     Frame frame;
     frame.request_id = message.request_id;
-    if (std::holds_alternative<msg::Ping>(message.body)) {
-        frame.type = static_cast<std::uint16_t>(MessageType::Ping);
-    } else if (std::holds_alternative<msg::Pong>(message.body)) {
-        frame.type = static_cast<std::uint16_t>(MessageType::Pong);
-    } else if (const auto* const error = std::get_if<msg::Error>(&message.body)) {
-        frame.type = static_cast<std::uint16_t>(MessageType::Error);
+    const std::optional<MessageType> type = type_of(message);
+    if (!type) {
+        return std::unexpected{MessageError::UnknownType};
+    }
+    frame.type = static_cast<std::uint16_t>(*type);
+    if (const auto* const error = std::get_if<msg::Error>(&message.body)) {
         const auto code = static_cast<std::uint32_t>(error->code);
         const std::span<const std::byte> text = std::as_bytes(std::span{error->text});
         if (!valid_code(code) || text.size() > kMaxErrorTextSize || !valid_text(text)) {
             return std::unexpected{MessageError::BadField};
         }
         append_integer(frame.body, code, 2);
-        append_integer(frame.body, static_cast<std::uint32_t>(text.size()), 4);
-        frame.body.insert(frame.body.end(), text.begin(), text.end());
+        append_text(frame.body, text);
+    } else if (const auto* const hello = std::get_if<msg::Hello>(&message.body)) {
+        const std::span<const std::byte> name = std::as_bytes(std::span{hello->name});
+        if (!valid_name(name)) {
+            return std::unexpected{MessageError::BadField};
+        }
+        append_text(frame.body, name);
     }
 
     const std::optional<TypeRules> rules = rules_for(frame.type);
