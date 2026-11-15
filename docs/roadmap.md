@@ -18,7 +18,7 @@ Exit criteria are tagged `[auto]` (CI or a loop can verify it) or `[manual]` (ne
 
 Goal: a repo where AI-written code is checked automatically before a human reads it, and where build loops can run safely.
 
-**Status:** complete on 2026-11-09. One manual check is still open: listening to `ks-tone` through JACK (see the exit criteria).
+**Status:** complete on 2026-11-09. Its last manual check, listening to `ks-tone` through JACK, passed on 2026-11-14.
 
 **How it's built:** interactively. It creates the guardrails the loops depend on.
 
@@ -47,7 +47,7 @@ Exit criteria:
 - [x] `[auto]` CI is green on Linux and macOS. *Every pull request since #3.*
 - [x] `[auto]` A test that allocates inside a `KS_NONBLOCKING` function fails under the `rtsan` preset. This proves the guardrail fires; the test then becomes an expected failure. *`tests/guardrails/rtsan_canary.cpp` also covers locking a mutex.*
 - [x] `[auto]` A loop's attempt to edit a protected file is blocked by the hook, and a branch that changes a protected file fails CI. *`tests/guardrails/protected_paths_test.sh`, a real `claude -p` run, and pull requests #4 and #5.*
-- [ ] `[manual]` `ks-tone` plays on Linux (PipeWire through the JACK API, and ALSA) and on macOS. *Confirmed by the maintainer on 2026-11-09 on Linux with the PulseAudio and ALSA backends, including the Inpulse 500 via `--device`, and on 2026-11-10 on macOS. Still open: JACK through PipeWire (needs `pipewire-jack`).*
+- [x] `[manual]` `ks-tone` plays on Linux (PipeWire through the JACK API, and ALSA) and on macOS. *Confirmed by the maintainer on 2026-11-09 on Linux with the PulseAudio and ALSA backends, including the Inpulse 500 via `--device`; on 2026-11-10 on macOS; and on 2026-11-14 through JACK via PipeWire (`pw-jack`, from `pipewire-jack`).*
 - [x] `[manual]` A trial loop on a small feature (such as `ks-tone` command-line options) runs end to end: it plans, builds, stops when its criteria pass, and writes a pull request description. A deliberately impossible task ends in `BLOCKED.md`. *`ks-tone` options: 1 plan pass and 8 build passes, $6.76, pull request #5. A spec requiring a new library ended in `BLOCKED.md` after one planning pass.*
 
 ## Phase 1: Headless engine and process model
@@ -63,6 +63,8 @@ The shared-memory primitives have their final layouts from 1a on, so 1b changes 
 
 ### Phase 1a: Engine library
 
+**Status:** complete on 2026-11-14.
+
 **How it's built:** interactively for the shared-memory primitives, the render core and its drivers, the deck's interpolator, and the output safety stage. Loops for the mixer, the development harness, and the fuzz tests.
 
 - Shared-memory primitives: the SPSC command ring, the seqlock state block, and the region they live in, backed by anonymous memory until 1b. The command decoder.
@@ -76,13 +78,13 @@ The shared-memory primitives have their final layouts from 1a on, so 1b changes 
 
 Exit criteria:
 
-- [ ] `[auto]` Offline-render golden tests for the deck and mixer: seek, rate change, reverse, crossfade. Golden files are compared with a tolerance. Property tests show the output doesn't depend on block size, bit for bit.
-- [ ] `[auto]` Engine tests are clean under the `rtsan`, `tsan`, and `asan` presets. The command decoder and the resume-state validator are fuzzed under `fuzz`.
-- [ ] `[auto]` Lock-free primitives pass stress tests on macOS arm64, whose weaker memory ordering exposes bugs that x86 hides.
-- [ ] `[auto]` Simulated device loss keeps the clock running, and the engine resumes at the right position when the device returns.
-- [ ] `[auto]` A corrupted resume state is rejected: the engine starts clean with decks paused, and never crashes.
-- [ ] `[manual]` Pulling and reconnecting the Inpulse 500's USB cable mid-playback behaves like the simulated device loss.
-- [ ] `[manual]` One-hour soak test through the harness on the Inpulse 500's audio interface: 4 decks, 128-frame buffer at 44.1 kHz (2.9 ms), scripted loads, seeks, and rate changes, with no buffer underruns caused by the engine.
+- [x] `[auto]` Offline-render golden tests for the deck and mixer: seek, rate change, reverse, crossfade. Golden files are compared with a tolerance. Property tests show the output doesn't depend on block size, bit for bit. *The deck's golden file covers seeks, rate changes, and reverse; the mixer's covers a crossfade. The deck, mixer, and resume tests check that block size doesn't change the output.*
+- [x] `[auto]` Engine tests are clean under the `rtsan`, `tsan`, and `asan` presets. The command decoder and the resume-state validator are fuzzed under `fuzz`. *In CI on every pull request. Fuzz targets: the command decoder, the resume state, and the harness's script parser.*
+- [x] `[auto]` Lock-free primitives pass stress tests on macOS arm64, whose weaker memory ordering exposes bugs that x86 hides. *The ring and seqlock thread tests run in CI on macOS arm64; the shm-primitives spec's mutation check showed they catch real ordering bugs.*
+- [x] `[auto]` Simulated device loss keeps the clock running, and the engine resumes at the right position when the device returns. *The device-loss tests, such as "Output: a silent device loss keeps the clock running": the clock and every block's position stay within tolerance through the loss and the return.*
+- [x] `[auto]` A corrupted resume state is rejected: the engine starts clean with decks paused, and never crashes. *"Resume state: every corruption is rejected", "Resume: a corrupted resume state starts clean", and the resume-state fuzz target.*
+- [x] `[manual]` Pulling and reconnecting the Inpulse 500's USB cable mid-playback behaves like the simulated device loss. *Confirmed by the maintainer on 2026-11-14 with `src/apps/harness/scripts/cable-pull.harness` and the hidden cable test: on a Linux laptop through PipeWire's PulseAudio backend, and on a Mac through CoreAudio.*
+- [x] `[manual]` One-hour soak test through the harness on the Inpulse 500's audio interface: 4 decks, 128-frame buffer at 44.1 kHz (2.9 ms), scripted loads, seeks, and rate changes, with no buffer underruns caused by the engine. *Confirmed by the maintainer on 2026-11-14 with `src/apps/harness/scripts/soak.harness` on a Linux laptop, through JACK via PipeWire with the graph forced to 44.1 kHz and 128 frames: no late blocks. It also ran clean on a Mac through CoreAudio at 128 frames.*
 
 ### Phase 1b: Processes and crash recovery
 

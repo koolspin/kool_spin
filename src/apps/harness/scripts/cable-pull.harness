@@ -1,0 +1,28 @@
+# A cable pull for Phase 1a, step 8 (docs/roadmap.md): pull the output
+# device's USB cable mid-playback, wait about 10 seconds, and plug it back in.
+#
+#     ks-harness --channels 4 src/apps/harness/scripts/cable-pull.harness
+#
+# Deck 1 sweeps up three octaves over two minutes (40 seconds an octave), so
+# its pitch tells you where it is. While the cable is out the engine keeps its
+# clock running, so when the output comes back the sweep is higher by the time
+# it was gone (10 s is about 3 semitones), rather than carrying on from where
+# it stopped. Deck 2 clicks once a second, on the headphone bus only.
+#
+# The harness prints "Freewheeling" when it notices the loss and "Playing"
+# when it's back on the device. At the end, "Played" should be about 120 s
+# and "Device losses: 1".
+
+track sweep sweep 110 880 120 rate 44100
+track tick clicks 60 120 rate 48000
+
+0 main -6
+0 headphones -12
+0 load 1 sweep
+0 play 1
+0 load 2 tick
+0 play 2
+0 fader 2 0
+0 pfl 2 on
+
+120 end

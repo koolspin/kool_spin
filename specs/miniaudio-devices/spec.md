@@ -155,13 +155,19 @@ The tests are in `tests/acceptance/miniaudio-devices/`, on miniaudio's null back
 
   A null device opened with that configuration for 4 channels has the same layout on the engine's side as on the device's, and miniaudio doesn't convert its channels. (test: "Miniaudio: channels reach the device in order")
 - [ ] `[auto]` **Real time:** `LossDetector`'s methods are called from a `KS_NONBLOCKING` function, so function-effect analysis checks them, and the tests above run clean under `rtsan`. (test: "miniaudio devices are real-time safe")
-- [ ] `[manual]` **Cable pull on Linux:** the hidden test "Cable: a tone through a chosen device" lists the devices, then plays a tone through `OutputController` and a `MiniaudioDeviceSource` for `KS_CABLE_SECONDS` (default 60), printing each state change with its time. It uses the backend in `KS_CABLE_BACKEND` (default `system`) and device number `KS_CABLE_DEVICE` from the list (default: the default device). On the Inpulse 500 through PipeWire's PulseAudio backend:
+- [x] `[manual]` **Cable pull on Linux:** the hidden test "Cable: a tone through a chosen device" lists the devices, then plays a tone through `OutputController` and a `MiniaudioDeviceSource` for `KS_CABLE_SECONDS` (default 60), printing each state change with its time. It uses the backend in `KS_CABLE_BACKEND` (default `system`) and device number `KS_CABLE_DEVICE` from the list (default: the default device). On the Inpulse 500 through PipeWire's PulseAudio backend:
   - pulling the USB cable makes the controller `Freewheeling` within 1 s, and the tone doesn't move to the laptop's speakers;
   - plugging it back in makes it `Playing` within 2 s, with the tone back on the Inpulse.
-- [ ] `[manual]` **Cable pull on macOS:** the same, with CoreAudio.
-- [ ] `[manual]` **Channel order on the Inpulse 500:** through PipeWire's PulseAudio backend, `ks-harness` playing `src/apps/harness/scripts/channels.harness` (a 440 Hz tone on the main bus only, and 880 Hz on the headphone bus only):
+
+  Checked by the maintainer on 2026-11-14 on a Linux laptop. `ks-harness` playing `src/apps/harness/scripts/cable-pull.harness` behaved the same.
+- [x] `[manual]` **Cable pull on macOS:** the same, with CoreAudio.
+
+  Checked by the maintainer on 2026-11-14, with the Inpulse 500 on a Mac. `cable-pull.harness` behaved the same.
+- [x] `[manual]` **Channel order on the Inpulse 500:** through PipeWire's PulseAudio backend, `ks-harness` playing `src/apps/harness/scripts/channels.harness` (a 440 Hz tone on the main bus only, and 880 Hz on the headphone bus only):
   - plays only the low tone through the speakers, and only the high tone, in both ears, through the headphones;
   - while it plays, `pw-dump` shows the stream's format laid out FL FR RL RR, the same as the sink's. Before requirement 18 it was FL FC FR RC.
+
+  Checked by the maintainer on 2026-11-14 on a Linux laptop, and by ear on a Mac through CoreAudio.
 - [ ] `[auto]` **Every CI configuration:** all of the above pass on Linux and on macOS arm64 (`debug`, `release`, `asan`, `tsan`).
 
 ## Out of scope

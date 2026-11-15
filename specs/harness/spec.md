@@ -249,7 +249,9 @@ The tests are in `tests/acceptance/harness/`, with small audio fixtures in `test
 
   (test: the fuzz target, under the `fuzz` preset)
 - [ ] `[auto]` **Real time:** the device tests run clean under `rtsan`.
-- [ ] `[manual]` **Listening:** the example soak script sounds as it describes, without clicks or dropouts, when played for a few minutes through the laptop and then through the Inpulse 500.
+- [x] `[manual]` **Listening:** the example soak script sounds as it describes, without clicks or dropouts, when played for a few minutes through the laptop and then through the Inpulse 500.
+
+  Checked by the maintainer on 2026-11-14: through a Mac's own output (CoreAudio), and through the Inpulse 500 on a Linux laptop (JACK via PipeWire) during the one-hour soak.
 - [ ] `[auto]` **Every CI configuration:** all of the above pass on Linux and on macOS arm64 (`debug`, `release`, `asan`, `tsan`).
 
 ## Out of scope
