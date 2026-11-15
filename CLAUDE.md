@@ -14,7 +14,9 @@ Open-source DJ application, GPL-3.0-or-later. C++23, CMake, vcpkg, Qt 6 Quick, m
 
 Phase 0 is complete (2026-11-09). It delivered the build, the checks and guardrails, CI on Linux and macOS, and the build-loop workflow, proven on its first feature (`ks-tone` options). Still open: listening to `ks-tone` through JACK.
 
-Next is Phase 1, the headless engine and process model. ADR 0003 splits it in two: Phase 1a builds the engine as a library in one process, and Phase 1b separates the processes and adds crash recovery. Phase 1a starts interactively with the shared-memory primitives; see `docs/roadmap.md`. Update this section as phases land.
+Phase 1, the headless engine and process model, is split in two by ADR 0003. Phase 1a, the engine as a library in one process, is complete (2026-11-14). It delivered the shared-memory primitives, the render core and its drivers with device loss, the output safety stage, the deck, the mixer, commands in and state out, the resume state, miniaudio devices, and the development harness (`ks-harness`), soaked for an hour and cable-pulled on the Inpulse 500.
+
+Next is Phase 1b: separate processes (supervisor, engine, decode worker, and the `ks-play` client) and crash recovery. It starts interactively with the shared-memory segments, the sockets, and the supervisor's restart logic; see `docs/roadmap.md`. Update this section as phases land.
 
 ## Build and test
 
