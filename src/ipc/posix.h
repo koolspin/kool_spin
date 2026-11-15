@@ -57,4 +57,19 @@ template <std::invocable Call>
     return fcntl_int(fd, F_SETFD, flags | FD_CLOEXEC) != -1;
 }
 
+/// Sets O_NONBLOCK on `fd`. Returns false, with errno set, if it fails.
+[[nodiscard]] inline bool set_nonblocking(int fd) noexcept {
+    const int flags = fcntl_get(fd, F_GETFL);
+    if (flags == -1) {
+        return false;
+    }
+    return fcntl_int(fd, F_SETFL, flags | O_NONBLOCK) != -1;
+}
+
+/// True if `error` means a non-blocking call would have blocked.
+[[nodiscard]] inline bool would_block(std::error_code error) noexcept {
+    return error == std::errc::resource_unavailable_try_again ||
+           error == std::errc::operation_would_block;
+}
+
 } // namespace ks::ipc::detail
