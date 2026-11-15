@@ -74,6 +74,18 @@ std::vector<FileId> ids_of(std::span<const Fd> fds) {
     return ids;
 }
 
+/// How many descriptors are open without close-on-exec: the ones a child
+/// started now would inherit.
+int inheritable_fd_count() {
+    int count = 0;
+    for (int fd = 0; fd < 4096; ++fd) {
+        if (file_id(fd).has_value() && !is_cloexec(fd)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 /// True if `received` failed with a refused frame, for `reason`.
 bool refused_for(const std::expected<std::optional<ReceivedFrame>, ConnectionFailure>& received,
                  FrameError reason) {
@@ -102,9 +114,13 @@ TEST_CASE("Connections: descriptors stay with their frames", "[connections]") {
     const std::vector<int> fds = raw(files);
     const std::span<const int> all{fds};
 
+    const int inheritable = inheritable_fd_count();
     REQUIRE(sender.send(1, 11, bytes({0x01}), all.subspan(0, 2)));
     REQUIRE(sender.send(2, 12, bytes({0x02, 0x02}), {}));
     REQUIRE(sender.send(3, 13, bytes({}), all.subspan(2, 3)));
+    // The queued duplicates are close-on-exec, so a child started before
+    // flush() doesn't inherit them.
+    REQUIRE(inheritable_fd_count() == inheritable);
     // The sender's own copies can go as soon as send() returns.
     files.clear();
     REQUIRE(sender.flush());
