@@ -75,11 +75,12 @@ bool raw_send(int socket, const std::vector<int>& fds) {
     message.msg_iov = &vector;
     message.msg_iovlen = 1;
     message.msg_control = control.data();
-    message.msg_controllen = control.size();
+    // socklen_t on macOS, size_t on Linux.
+    message.msg_controllen = static_cast<socklen_t>(control.size());
     cmsghdr* const header = CMSG_FIRSTHDR(&message);
     header->cmsg_level = SOL_SOCKET;
     header->cmsg_type = SCM_RIGHTS;
-    header->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
+    header->cmsg_len = static_cast<socklen_t>(CMSG_LEN(sizeof(int) * fds.size()));
     std::memcpy(CMSG_DATA(header), fds.data(), sizeof(int) * fds.size());
     return ::sendmsg(socket, &message, 0) == 1;
 }
