@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <spawn.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -189,6 +190,20 @@ std::expected<pid_t, std::error_code> spawn(const std::filesystem::path& program
                                             std::span<const Inherit> fds) {
     if (!valid(fds)) {
         return std::unexpected{std::make_error_code(std::errc::invalid_argument)};
+    }
+
+    // Refuse a program that can't run before creating a process. On macOS, a
+    // posix_spawn() whose exec fails still creates a child, which the kernel
+    // then ends, so for a moment the caller has a child it never asked for.
+    struct stat status{};
+    if (::stat(program.c_str(), &status) != 0) {
+        return std::unexpected{error_from(errno)};
+    }
+    if (!S_ISREG(status.st_mode)) {
+        return std::unexpected{std::make_error_code(std::errc::permission_denied)};
+    }
+    if (::access(program.c_str(), X_OK) != 0) {
+        return std::unexpected{error_from(errno)};
     }
 
     // Copies of the descriptors to pass on, above every child number.
