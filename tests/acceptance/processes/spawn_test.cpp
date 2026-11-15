@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <expected>
@@ -60,6 +61,26 @@ std::set<int> descriptors_of(const ProbeReport& report) {
         fds.insert(fd);
     }
     return fds;
+}
+
+/// Checks that the probe inherited nothing it wasn't given. `expected` is the
+/// descriptors it should have: those of 0 to 2 that this process has open,
+/// and the given ones. On Linux its descriptors are exactly those. On macOS,
+/// a sanitizer's runtime opens a descriptor of its own in the child before
+/// main(), so the check everywhere is by identity: no other descriptor
+/// refers to one of `ours`, the files this test opened.
+void check_nothing_else(const ProbeReport& report, const std::set<int>& expected,
+                        const std::vector<FileId>& ours) {
+#ifdef __linux__
+    CHECK(descriptors_of(report) == expected);
+#endif
+    for (const auto& [fd, id] : report.fds) {
+        if (expected.contains(fd)) {
+            continue;
+        }
+        CAPTURE(fd);
+        CHECK(std::ranges::find(ours, id) == ours.end());
+    }
 }
 
 /// Puts back the signal mask and the dispositions of SIGINT and SIGPIPE.
@@ -116,6 +137,9 @@ TEST_CASE("Spawning: only the given descriptors", "[spawn]") {
     const Fd leaked_high{60};
 
     const std::set<int> standard = open_standard_descriptors();
+    const std::vector<FileId> ours{file_id(files.at(0).get()).value_or(FileId{}),
+                                   file_id(files.at(1).get()).value_or(FileId{}),
+                                   file_id(leaked.get()).value_or(FileId{})};
 
     SECTION("at 3 and 5") {
         const std::filesystem::path report = dir.path() / "report";
@@ -130,7 +154,7 @@ TEST_CASE("Spawning: only the given descriptors", "[spawn]") {
         std::set<int> expected = standard;
         expected.insert(3);
         expected.insert(5);
-        CHECK(descriptors_of(*found) == expected);
+        check_nothing_else(*found, expected, ours);
         CHECK(found->fds.count(3) == 1);
         CHECK(found->fds.count(5) == 1);
         CHECK(std::optional<FileId>{found->fds.at(3)} == file_id(files.at(0).get()));
@@ -155,7 +179,7 @@ TEST_CASE("Spawning: only the given descriptors", "[spawn]") {
         std::set<int> expected = standard;
         expected.insert(40);
         expected.insert(41);
-        CHECK(descriptors_of(*found) == expected);
+        check_nothing_else(*found, expected, ours);
         REQUIRE(found->fds.count(40) == 1);
         REQUIRE(found->fds.count(41) == 1);
         CHECK(std::optional<FileId>{found->fds.at(41)} == file_id(files.at(0).get()));
