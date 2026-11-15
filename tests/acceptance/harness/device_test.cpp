@@ -83,7 +83,9 @@ TEST_CASE("Device: playing a script on the null backend", "[harness]") {
     REQUIRE(report.has_value());
 
     CHECK(report->played_seconds >= 0.9);
-    CHECK(report->played_seconds <= 1.1);
+    // The stop can take effect several blocks late on a busy machine: macOS CI
+    // runners have played 1.109 s (104 blocks of 512 frames).
+    CHECK(report->played_seconds <= 1.25);
     CHECK(!report->stopped_early);
     CHECK(report->blocks_rendered > 0);
     if constexpr (kExpectRealTime) {
