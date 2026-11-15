@@ -104,11 +104,13 @@ std::expected<std::size_t, std::error_code> send_some(int socket, std::span<cons
     ControlBuffer control;
     if (!fds.empty()) {
         message.msg_control = control.bytes.data();
-        message.msg_controllen = CMSG_SPACE(sizeof(int) * fds.size());
+        // socklen_t on macOS, size_t on Linux; the lengths here are a few
+        // dozen bytes.
+        message.msg_controllen = static_cast<socklen_t>(CMSG_SPACE(sizeof(int) * fds.size()));
         cmsghdr* const header = CMSG_FIRSTHDR(&message);
         header->cmsg_level = SOL_SOCKET;
         header->cmsg_type = SCM_RIGHTS;
-        header->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
+        header->cmsg_len = static_cast<socklen_t>(CMSG_LEN(sizeof(int) * fds.size()));
         std::memcpy(CMSG_DATA(header), fds.data(), sizeof(int) * fds.size());
     }
 
@@ -127,7 +129,7 @@ std::expected<std::size_t, std::error_code> receive_some(int socket, std::span<s
     message.msg_iovlen = 1;
     ControlBuffer control;
     message.msg_control = control.bytes.data();
-    message.msg_controllen = control.bytes.size();
+    message.msg_controllen = static_cast<socklen_t>(control.bytes.size());
 
     const ssize_t received =
         retry_eintr([&] { return ::recvmsg(socket, &message, kReceiveFlags); });
