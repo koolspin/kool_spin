@@ -54,7 +54,8 @@ std::set<int> open_standard_descriptors() {
     return fds;
 }
 
-/// The descriptors in `report`.
+#ifdef __linux__
+/// The descriptors in `report`. Only Linux checks the exact set.
 std::set<int> descriptors_of(const ProbeReport& report) {
     std::set<int> fds;
     for (const auto& [fd, id] : report.fds) {
@@ -62,6 +63,7 @@ std::set<int> descriptors_of(const ProbeReport& report) {
     }
     return fds;
 }
+#endif
 
 /// Checks that the probe inherited nothing it wasn't given. `expected` is the
 /// descriptors it should have: those of 0 to 2 that this process has open,
