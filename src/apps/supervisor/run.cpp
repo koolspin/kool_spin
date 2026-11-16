@@ -60,6 +60,9 @@ using Clock = std::chrono::steady_clock;
 
 // ---- Signals, through a self-pipe (requirement 16) -----------------------------
 
+/// The signals the supervisor handles.
+constexpr std::array<int, 4> kHandledSignals{SIGCHLD, SIGINT, SIGTERM, SIGHUP};
+
 /// The write end of the self-pipe. A signal handler can reach only a global.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): see above
 std::atomic<int> signal_pipe{-1};
@@ -136,6 +139,41 @@ private:
 
     ipc::Fd read_;
     ipc::Fd write_;
+};
+
+/// Blocks the handled signals in this thread while it lives, then restores
+/// the thread's mask. A signal that arrives meanwhile is handled then.
+///
+/// The shared-memory primitives are KS_NONBLOCKING, so RealtimeSanitizer
+/// counts a signal handler that interrupts one as real-time code, and
+/// on_signal()'s write() as a violation. The supervisor isn't real-time,
+/// but it reads shared memory only inside one of these, so no handler runs
+/// there.
+class SignalsBlocked {
+public:
+    SignalsBlocked() noexcept {
+        sigset_t handled{};
+        static_cast<void>(sigemptyset(&handled));
+        for (const int signal : kHandledSignals) {
+            static_cast<void>(sigaddset(&handled, signal));
+        }
+        blocked_ = ::pthread_sigmask(SIG_BLOCK, &handled, &previous_) == 0;
+    }
+
+    SignalsBlocked(const SignalsBlocked&) = delete;
+    SignalsBlocked& operator=(const SignalsBlocked&) = delete;
+    SignalsBlocked(SignalsBlocked&&) = delete;
+    SignalsBlocked& operator=(SignalsBlocked&&) = delete;
+
+    ~SignalsBlocked() {
+        if (blocked_) {
+            static_cast<void>(::pthread_sigmask(SIG_SETMASK, &previous_, nullptr));
+        }
+    }
+
+private:
+    sigset_t previous_{};
+    bool blocked_ = false;
 };
 
 // ---- Small helpers ----------------------------------------------------------
@@ -461,8 +499,7 @@ int Supervisor::start() {
     }
     engine_log_reader_ = std::make_unique<ipc::LogReader>(*engine_log_ring);
 
-    constexpr std::array<int, 4> kSignals{SIGCHLD, SIGINT, SIGTERM, SIGHUP};
-    std::expected<SignalPipe, std::error_code> signals = SignalPipe::install(kSignals);
+    std::expected<SignalPipe, std::error_code> signals = SignalPipe::install(kHandledSignals);
     if (!signals) {
         error(std::format("can't handle signals: {}", signals.error().message()));
         return kExitStartFailed;
@@ -546,6 +583,8 @@ void Supervisor::open_engine_log() {
 }
 
 void Supervisor::drain_engine_log() {
+    // Every call into the reader runs inside this (see SignalsBlocked).
+    const SignalsBlocked blocked;
     if (!engine_log_reader_ || engine_log_reader_->corrupt()) {
         return;
     }
