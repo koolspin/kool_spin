@@ -73,11 +73,13 @@ public:
     Supervisor() { REQUIRE(!dir_.path().empty()); }
 
     /// Starts kool_spin with `engine` as the engine, and `engine_args`
-    /// after "--".
+    /// after "--". Its logs go in the runtime directory, never in the real
+    /// log folder (specs/logs/spec.md decision 8).
     void start(std::string_view engine = kEnginePath,
                const std::vector<std::string>& engine_args = null_backend()) {
-        std::vector<std::string> args{"--runtime-dir", dir_.path().string(), "--engine",
-                                      std::string{engine}, "--"};
+        std::vector<std::string> args{
+            "--runtime-dir", dir_.path().string(), "--log-dir", (dir_.path() / "logs").string(),
+            "--engine",      std::string{engine},  "--"};
         args.insert(args.end(), engine_args.begin(), engine_args.end());
         process_ = ks::processes::test::start(kKoolSpinPath, args);
         REQUIRE(process_.pid() > 0);
@@ -132,10 +134,18 @@ std::expected<Client, std::string> welcomed(const std::filesystem::path& dir,
     return Client{.connection = std::move(*connection), .state = std::move(*state)};
 }
 
-/// The arguments for kool_spin on `dir`, with ks-engine on the null backend.
+/// The arguments for kool_spin on `dir`, with ks-engine on the null backend,
+/// and its logs in `dir` (specs/logs/spec.md decision 8).
 std::vector<std::string> kool_spin_args(const std::filesystem::path& dir) {
-    return {"--runtime-dir", dir.string(), "--engine", std::string{kEnginePath}, "--",
-            "--backend",     "null"};
+    return {"--runtime-dir",
+            dir.string(),
+            "--log-dir",
+            (dir / "logs").string(),
+            "--engine",
+            std::string{kEnginePath},
+            "--",
+            "--backend",
+            "null"};
 }
 
 } // namespace

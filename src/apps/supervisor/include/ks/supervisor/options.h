@@ -26,6 +26,9 @@ inline constexpr int kExitEngineFailed = 3;
 /// kool_spin's command line, parsed. Options not given are empty.
 struct Options {
     std::optional<std::filesystem::path> runtime_dir;
+    /// The folder that holds the session folders (specs/logs/spec.md
+    /// requirement 9).
+    std::optional<std::filesystem::path> log_dir;
     /// The ks-engine executable.
     std::optional<std::filesystem::path> engine;
     /// Everything after "--", for ks-engine, unchecked.

@@ -364,11 +364,18 @@ inline std::optional<Received> detach(Supervised& supervised, std::uint32_t slot
 /// killed when this is destroyed.
 class KoolSpin {
 public:
-    /// Starts kool_spin and waits up to 5 s for supervisor.sock.
+    /// Starts kool_spin and waits up to 5 s for supervisor.sock. Its logs go
+    /// in the runtime directory, never in the real log folder
+    /// (specs/logs/spec.md decision 8).
     KoolSpin() {
         REQUIRE(!dir_.path().empty());
-        std::vector<std::string> args{"--runtime-dir", dir_.path().string(), "--engine",
-                                      std::string{processes::test::kEnginePath}, "--"};
+        std::vector<std::string> args{"--runtime-dir",
+                                      dir_.path().string(),
+                                      "--log-dir",
+                                      (dir_.path() / "logs").string(),
+                                      "--engine",
+                                      std::string{processes::test::kEnginePath},
+                                      "--"};
         const std::vector<std::string> options = processes::test::null_backend();
         args.insert(args.end(), options.begin(), options.end());
         process_ = processes::test::start(processes::test::kKoolSpinPath, args);
