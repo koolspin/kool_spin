@@ -53,6 +53,7 @@ target_include_directories(ks_harness_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/ap
 
 ks_add_test(ks_ipc_tests
     SOURCES
+        ipc/log_format_test.cpp
         ipc/log_test.cpp
         ipc/region_test.cpp
         ipc/seqlock_test.cpp

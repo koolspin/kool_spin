@@ -9,6 +9,7 @@ add_library(ks_ipc STATIC
     frame.cpp
     listener.cpp
     log.cpp
+    log_format.cpp
     messages.cpp
     region.cpp
     runtime_dir.cpp
