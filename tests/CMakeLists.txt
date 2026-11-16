@@ -63,6 +63,7 @@ ks_add_test(ks_ipc_tests
 ks_add_test(ks_supervisor_tests
     SOURCES supervisor/log_dir_test.cpp
             supervisor/log_file_test.cpp
+            supervisor/run_logs_test.cpp
     LIBRARIES ks::supervisor)
 
 ks_add_test(ks_tone_tests
