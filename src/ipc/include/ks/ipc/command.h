@@ -8,7 +8,11 @@
 /// A slot is one cache line: the client's sequence number, the command type,
 /// a target, and a fixed-size payload. There's no variable-length framing, so
 /// the engine decodes each slot on its own, as a pure function of its bytes.
+///
+/// Each client's ring lives in a segment of its own (specs/client-rings/spec.md
+/// requirement 1): the header, then a CommandRing at kSegmentHeaderSize.
 
+#include <ks/ipc/region.h>
 #include <ks/ipc/spsc_ring.h>
 
 #include <array>
@@ -63,5 +67,15 @@ inline constexpr std::size_t kCommandRingCapacity = 256;
 
 /// One client's commands to the engine.
 using CommandRing = SpscRing<CommandSlot, kCommandRingCapacity>;
+
+/// The layout version in a command-ring segment's header.
+inline constexpr std::uint32_t kCommandRingLayoutVersion = 1;
+
+/// A command-ring segment's size: the header, then a CommandRing at
+/// kSegmentHeaderSize.
+inline constexpr std::size_t kCommandRingSegmentSize = kSegmentHeaderSize + sizeof(CommandRing);
+
+static_assert(kSegmentHeaderSize % alignof(CommandRing) == 0,
+              "a command-ring segment's ring is aligned");
 
 } // namespace ks::ipc

@@ -153,7 +153,7 @@ TEST_CASE("Messages: what's refused", "[messages]") {
         {"a NUL", frame(kError, 0, error_body(1, std::string_view{"a\0b", 3})),
          MessageError::BadField},
         {"error code 0", frame(kError, 0, error_body(0, "")), MessageError::BadField},
-        {"error code 3", frame(kError, 0, error_body(3, "")), MessageError::BadField},
+        {"error code 65535", frame(kError, 0, error_body(65'535, "")), MessageError::BadField},
         {"a Ping with request ID 0", frame(kPing, 0, {}), MessageError::WrongRequestId},
         {"a Pong with request ID 0", frame(kPong, 0, {}), MessageError::WrongRequestId},
         {"a Ping with a descriptor", frame(kPing, 1, {}, 1), MessageError::WrongFdCount},

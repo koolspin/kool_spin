@@ -2,6 +2,7 @@
 #include <ks/ipc/messages.h>
 
 #include <ks/ipc/frame.h>
+#include <ks/ipc/state.h>
 
 #include <algorithm>
 #include <array>
@@ -40,8 +41,14 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
     case static_cast<std::uint16_t>(MessageType::Hello):
     case static_cast<std::uint16_t>(MessageType::Stop):
     case static_cast<std::uint16_t>(MessageType::Done):
+    case static_cast<std::uint16_t>(MessageType::OpenRing):
+    case static_cast<std::uint16_t>(MessageType::Attached):
+    case static_cast<std::uint16_t>(MessageType::Detach):
+    case static_cast<std::uint16_t>(MessageType::Detached):
         return TypeRules{.descriptors = 0, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Welcome):
+    case static_cast<std::uint16_t>(MessageType::RingOpened):
+    case static_cast<std::uint16_t>(MessageType::Attach):
         return TypeRules{.descriptors = 1, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Error):
         return TypeRules{.descriptors = 0, .request = RequestRule::Any};
@@ -176,7 +183,32 @@ void append_integer(std::vector<std::byte>& body, std::uint32_t value, std::size
 /// True if `code` is an ErrorCode.
 bool valid_code(std::uint32_t code) noexcept {
     return code == static_cast<std::uint32_t>(ErrorCode::BadMessage) ||
-           code == static_cast<std::uint32_t>(ErrorCode::NotSupported);
+           code == static_cast<std::uint32_t>(ErrorCode::NotSupported) ||
+           code == static_cast<std::uint32_t>(ErrorCode::Unavailable);
+}
+
+/// True if `slot` is a client slot's index (specs/client-rings/spec.md
+/// requirement 3).
+bool valid_slot(std::uint32_t slot) noexcept {
+    return slot < kStateClients;
+}
+
+/// The body of a type that carries only a slot: RingOpened, Attached, or
+/// Detach.
+template <typename Body>
+std::expected<Message, MessageError> slot_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint32_t, MessageError> slot = reader.integer(4);
+    if (!slot) {
+        return std::unexpected{slot.error()};
+    }
+    if (!valid_slot(*slot)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    return Message{.request_id = frame.request_id, .body = Body{.slot = *slot}};
 }
 
 /// An Error message's body.
@@ -271,6 +303,38 @@ std::optional<MessageType> type_of(const Message& message) noexcept {
     if (std::holds_alternative<msg::Ready>(body)) {
         return MessageType::Ready;
     }
+    if (std::holds_alternative<msg::OpenRing>(body)) {
+        return MessageType::OpenRing;
+    }
+    if (std::holds_alternative<msg::RingOpened>(body)) {
+        return MessageType::RingOpened;
+    }
+    if (std::holds_alternative<msg::Attach>(body)) {
+        return MessageType::Attach;
+    }
+    if (std::holds_alternative<msg::Attached>(body)) {
+        return MessageType::Attached;
+    }
+    if (std::holds_alternative<msg::Detach>(body)) {
+        return MessageType::Detach;
+    }
+    if (std::holds_alternative<msg::Detached>(body)) {
+        return MessageType::Detached;
+    }
+    return std::nullopt;
+}
+
+/// The slot that `message` carries, if its type carries one.
+std::optional<std::uint32_t> slot_of(const Message& message) noexcept {
+    if (const auto* const opened = std::get_if<msg::RingOpened>(&message.body)) {
+        return opened->slot;
+    }
+    if (const auto* const attached = std::get_if<msg::Attached>(&message.body)) {
+        return attached->slot;
+    }
+    if (const auto* const detach = std::get_if<msg::Detach>(&message.body)) {
+        return detach->slot;
+    }
     return std::nullopt;
 }
 
@@ -315,6 +379,18 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         return empty_body<msg::Done>(frame);
     case MessageType::Ready:
         return empty_body<msg::Ready>(frame);
+    case MessageType::OpenRing:
+        return empty_body<msg::OpenRing>(frame);
+    case MessageType::RingOpened:
+        return slot_body<msg::RingOpened>(frame);
+    case MessageType::Attach:
+        return empty_body<msg::Attach>(frame);
+    case MessageType::Attached:
+        return slot_body<msg::Attached>(frame);
+    case MessageType::Detach:
+        return slot_body<msg::Detach>(frame);
+    case MessageType::Detached:
+        return empty_body<msg::Detached>(frame);
     }
     return std::unexpected{MessageError::UnknownType};
 }
@@ -341,6 +417,11 @@ std::expected<Frame, MessageError> encode(const Message& message) {
             return std::unexpected{MessageError::BadField};
         }
         append_text(frame.body, name);
+    } else if (const std::optional<std::uint32_t> slot = slot_of(message)) {
+        if (!valid_slot(*slot)) {
+            return std::unexpected{MessageError::BadField};
+        }
+        append_integer(frame.body, *slot, 4);
     }
 
     const std::optional<TypeRules> rules = rules_for(frame.type);

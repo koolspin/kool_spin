@@ -26,11 +26,20 @@
 /// | Stop    | 6      | Empty                         | 0           | Non-zero            |
 /// | Done    | 7      | Empty                         | 0           | The Stop's          |
 /// | Ready   | 8      | Empty                         | 0           | 0                   |
+/// | OpenRing   | 9   | Empty                         | 0           | Non-zero            |
+/// | RingOpened | 10  | Slot (32 bits)                | 1           | The OpenRing's      |
+/// | Attach     | 11  | Empty                         | 1           | Non-zero            |
+/// | Attached   | 12  | Slot (32 bits)                | 0           | The Attach's        |
+/// | Detach     | 13  | Slot (32 bits)                | 0           | Non-zero            |
+/// | Detached   | 14  | Empty                         | 0           | The Detach's        |
 ///
-/// Types 4 to 8 come from specs/processes/spec.md requirement 6. Later steps
-/// add types with the same rules, each in its own spec.
+/// Types 4 to 8 come from specs/processes/spec.md requirement 6, and types 9
+/// to 14 from specs/client-rings/spec.md requirement 3. A slot is a client
+/// slot's index, below kStateClients. Later steps add types with the same
+/// rules, each in its own spec.
 
 #include <ks/ipc/frame.h>
+#include <ks/ipc/state.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -43,14 +52,20 @@ namespace ks::ipc {
 /// The message types. The values are part of the protocol: never renumber or
 /// reuse them. A frame carries the type in 16 bits.
 enum class MessageType : std::uint8_t {
-    Ping = 1,    ///< Asks the peer to answer with a Pong.
-    Pong = 2,    ///< Answers a Ping.
-    Error = 3,   ///< Reports that something the peer sent was refused.
-    Hello = 4,   ///< A client introduces itself to the supervisor.
-    Welcome = 5, ///< The supervisor answers a Hello with the engine-state segment.
-    Stop = 6,    ///< Asks the receiver to fade out and stop.
-    Done = 7,    ///< Answers a Stop, once the receiver has stopped.
-    Ready = 8,   ///< The engine is playing. A notification, with request ID 0.
+    Ping = 1,        ///< Asks the peer to answer with a Pong.
+    Pong = 2,        ///< Answers a Ping.
+    Error = 3,       ///< Reports that something the peer sent was refused.
+    Hello = 4,       ///< A client introduces itself to the supervisor.
+    Welcome = 5,     ///< The supervisor answers a Hello with the engine-state segment.
+    Stop = 6,        ///< Asks the receiver to fade out and stop.
+    Done = 7,        ///< Answers a Stop, once the receiver has stopped.
+    Ready = 8,       ///< The engine is playing. A notification, with request ID 0.
+    OpenRing = 9,    ///< A client asks the supervisor for a command ring.
+    RingOpened = 10, ///< The supervisor answers an OpenRing with the ring segment.
+    Attach = 11,     ///< The supervisor asks the engine to attach a ring segment.
+    Attached = 12,   ///< The engine answers an Attach with the ring's client slot.
+    Detach = 13,     ///< The supervisor asks the engine to detach a client slot's ring.
+    Detached = 14,   ///< The engine answers a Detach once the slot is free again.
 };
 
 /// What an Error message reports. The values are part of the protocol. The
@@ -61,6 +76,10 @@ enum class ErrorCode : std::uint8_t {
     BadMessage = 1,
     /// The sender doesn't accept that message from this peer, and carries on.
     NotSupported = 2,
+    /// The sender takes that request from this peer, but can't do it now, and
+    /// carries on. The peer may ask again later (specs/client-rings/spec.md
+    /// requirement 4).
+    Unavailable = 3,
 };
 
 /// The longest text an Error message carries, in bytes.
@@ -117,13 +136,52 @@ struct Ready {
     friend bool operator==(const Ready&, const Ready&) = default;
 };
 
+/// A client asks the supervisor for a command ring.
+struct OpenRing {
+    friend bool operator==(const OpenRing&, const OpenRing&) = default;
+};
+
+/// The supervisor's answer to an OpenRing. Its one descriptor is the
+/// command-ring segment, which the client maps read-write.
+struct RingOpened {
+    std::uint32_t slot = 0; ///< The ring's client slot, below kStateClients.
+
+    friend bool operator==(const RingOpened&, const RingOpened&) = default;
+};
+
+/// The supervisor asks the engine to attach a ring. Its one descriptor is the
+/// command-ring segment.
+struct Attach {
+    friend bool operator==(const Attach&, const Attach&) = default;
+};
+
+/// The engine's answer to an Attach.
+struct Attached {
+    std::uint32_t slot = 0; ///< The ring's client slot, below kStateClients.
+
+    friend bool operator==(const Attached&, const Attached&) = default;
+};
+
+/// The supervisor asks the engine to detach a client slot's ring.
+struct Detach {
+    std::uint32_t slot = 0; ///< Below kStateClients.
+
+    friend bool operator==(const Detach&, const Detach&) = default;
+};
+
+/// The engine's answer to a Detach, once the slot is free again.
+struct Detached {
+    friend bool operator==(const Detached&, const Detached&) = default;
+};
+
 } // namespace msg
 
 /// A message: its request ID and its body.
 struct Message {
     std::uint32_t request_id = 0;
     std::variant<msg::Ping, msg::Pong, msg::Error, msg::Hello, msg::Welcome, msg::Stop, msg::Done,
-                 msg::Ready>
+                 msg::Ready, msg::OpenRing, msg::RingOpened, msg::Attach, msg::Attached,
+                 msg::Detach, msg::Detached>
         body;
 
     friend bool operator==(const Message&, const Message&) = default;
