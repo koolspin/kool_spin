@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <csignal>
 #include <cstdlib>
@@ -196,6 +197,89 @@ TEST_CASE("Supervisor logs: a session folder that can't be created", "[superviso
         CHECK(reported[1].starts_with("kool_spin: can't start "));
         CHECK(entries(dir.path() / "logs").empty());
     }
+}
+
+namespace {
+
+/// Options for a supervisor in `dir` whose engine, the real one, fails as it
+/// starts, after it has opened its log: --device names a device the null
+/// backend doesn't list. It never sends Ready, so no socket is opened.
+Options failing_engine_in(const fs::path& dir) {
+    Options options = options_in(dir);
+    options.engine = KS_ENGINE_PATH;
+    options.engine_args = {"--backend", "null", "--device", "99"};
+    return options;
+}
+
+} // namespace
+
+TEST_CASE("Supervisor logs: the engine's last lines are drained into ks-engine.log",
+          "[supervisor][logs]") {
+    const TempDir dir;
+    REQUIRE(!dir.path().empty());
+    const Options options = failing_engine_in(dir.path());
+    std::ostringstream out;
+    std::ostringstream err;
+
+    CHECK(run_once(options, out, err) == kExitStartFailed);
+
+    const std::vector<fs::path> sessions = entries(dir.path() / "logs");
+    REQUIRE(sessions.size() == 1);
+    const fs::path& session = sessions.front();
+
+    // The engine's starting failure, read from its ring after it was reaped.
+    const std::vector<std::string> engine = lines_in(session / "ks-engine.log");
+    REQUIRE(engine.size() == 2);
+    CHECK(engine[0].starts_with("# ks-engine log; session started "));
+    CHECK(engine[1].find(" error device 99 isn't listed") != std::string::npos);
+
+    // kool_spin.log says how it ended, after the engine's line. Whether the
+    // engine's closed connection is reported first depends on which the
+    // supervisor sees first, so lines are found rather than counted.
+    const std::vector<std::string> log = lines_in(session / "kool_spin.log");
+    const auto ended = std::ranges::find_if(log, [](const std::string& line) {
+        return line.find(" error ks-engine exited with status 2") != std::string::npos;
+    });
+    REQUIRE(ended != log.end());
+    CHECK(engine[1].substr(0, 26) <= ended->substr(0, 26));
+
+    // Standard error has kool_spin's errors, and none of the engine's lines.
+    for (const std::string& line : lines_of(err.str())) {
+        CHECK(line.starts_with("kool_spin: "));
+    }
+    CHECK(err.str().find("kool_spin: ks-engine exited with status 2") != std::string::npos);
+}
+
+TEST_CASE("Supervisor logs: without log files, the engine's lines go to standard error",
+          "[supervisor][logs]") {
+    const TempDir dir;
+    REQUIRE(!dir.path().empty());
+    Options options = failing_engine_in(dir.path());
+    const fs::path not_a_folder = dir.path() / "not-a-folder";
+    {
+        std::ofstream file{not_a_folder};
+        file << "a file\n";
+    }
+    options.log_dir = not_a_folder;
+    std::ostringstream out;
+    std::ostringstream err;
+
+    CHECK(run_once(options, out, err) == kExitStartFailed);
+
+    // The engine's line comes before how it ended.
+    const std::vector<std::string> reported = lines_of(err.str());
+    REQUIRE(reported.size() >= 4);
+    CHECK(reported[0].starts_with("kool_spin: can't create the log folder "));
+    CHECK(reported[1].starts_with("kool_spin: started ks-engine (process "));
+    const auto engine = std::ranges::find_if(
+        reported, [](const std::string& line) { return line.starts_with("ks-engine: "); });
+    REQUIRE(engine != reported.end());
+    CHECK(engine->find(" error device 99 isn't listed") != std::string::npos);
+    const auto ended = std::ranges::find_if(reported, [](const std::string& line) {
+        return line.starts_with("kool_spin: ks-engine exited with status 2");
+    });
+    CHECK(engine < ended);
+    CHECK(ended != reported.end());
 }
 
 TEST_CASE("Supervisor logs: no session folder before the log is open", "[supervisor][logs]") {

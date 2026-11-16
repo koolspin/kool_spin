@@ -9,6 +9,7 @@
 #include <ks/ipc/listener.h>
 #include <ks/ipc/log.h>
 #include <ks/ipc/messages.h>
+#include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/segment.h>
 #include <ks/ipc/state.h>
@@ -244,11 +245,23 @@ private:
     /// Every report goes through here (specs/logs/spec.md requirements 13
     /// and 15): to kool_spin.log, and, for a warning or an error, to standard
     /// error too. Without a log file, every line goes to standard error.
+    ///
+    /// A kool_spin.log that fails is reported once, on standard error, and
+    /// every later line goes there instead (requirement 13).
     void report(ipc::LogLevel level, std::string_view line) {
-        if (log_) {
+        bool in_file = false;
+        if (log_ && !log_->error()) {
             static_cast<void>(log_->write(steady_now_ns(), level, line));
+            if (const std::optional<std::error_code> failed = log_->error()) {
+                *err_ << "kool_spin: "
+                      << std::format("kool_spin.log failed: {}; log lines go to standard error",
+                                     failed->message())
+                      << '\n';
+            } else {
+                in_file = true;
+            }
         }
-        if (!log_ || level != ipc::LogLevel::Info) {
+        if (!in_file || level != ipc::LogLevel::Info) {
             *err_ << "kool_spin: " << line << '\n' << std::flush;
         }
     }
@@ -267,6 +280,22 @@ private:
     void open_logs();
     /// Creates ks-engine.log in the session folder, if there is one.
     void open_engine_log();
+
+    /// Writes every record in the engine's log ring to ks-engine.log, and
+    /// what was dropped, until the ring is empty (specs/logs/spec.md
+    /// requirement 14). Reads at most a ring's worth, so an engine that
+    /// writes without pause can't hold up the poll loop.
+    void drain_engine_log();
+    /// One of the engine's records, in ks-engine.log or on standard error.
+    void engine_line(const ipc::LogRecord& record);
+    /// A line of the supervisor's own about the engine's log, in
+    /// ks-engine.log or on standard error.
+    void engine_note(ipc::LogLevel level, std::string_view text);
+    /// True if ks-engine.log is there and hasn't failed.
+    [[nodiscard]] bool engine_file() const { return engine_log_ && !engine_log_->error(); }
+    /// After a write to ks-engine.log: reports it, once, if it has just
+    /// failed. Returns whether it still works.
+    bool engine_file_ok();
 
     /// One pass of the poll loop. Returns the exit status once the
     /// supervisor is done.
@@ -323,6 +352,10 @@ private:
     std::unique_ptr<LogFile> log_;
     /// The engine's log segment, kept until the supervisor exits.
     ipc::Fd engine_log_segment_;
+    /// The supervisor's mapping of the engine's log segment, kept until it
+    /// exits, and the reader of its ring.
+    std::unique_ptr<ipc::Region> engine_log_region_;
+    std::unique_ptr<ipc::LogReader> engine_log_reader_;
     /// ks-engine.log; null if it couldn't be created.
     std::unique_ptr<LogFile> engine_log_;
 
@@ -412,6 +445,21 @@ int Supervisor::start() {
         return kExitStartFailed;
     }
     engine_log_segment_ = std::move(*engine_log);
+    std::expected<ipc::Region, ipc::MapFailure> engine_log_region =
+        ipc::Region::map(engine_log_segment_.get(), ipc::SegmentKind::Log, ipc::kLogLayoutVersion,
+                         ipc::Access::ReadWrite);
+    if (!engine_log_region) {
+        error("can't map the engine's log segment");
+        return kExitStartFailed;
+    }
+    engine_log_region_ = std::make_unique<ipc::Region>(std::move(*engine_log_region));
+    // at() checks against the size of the supervisor's own mapping.
+    auto* const engine_log_ring = engine_log_region_->at<ipc::LogSegment>(ipc::kSegmentHeaderSize);
+    if (engine_log_ring == nullptr) {
+        error("the engine's log segment is too small");
+        return kExitStartFailed;
+    }
+    engine_log_reader_ = std::make_unique<ipc::LogReader>(*engine_log_ring);
 
     constexpr std::array<int, 4> kSignals{SIGCHLD, SIGINT, SIGTERM, SIGHUP};
     std::expected<SignalPipe, std::error_code> signals = SignalPipe::install(kSignals);
@@ -497,6 +545,64 @@ void Supervisor::open_engine_log() {
     engine_log_ = std::make_unique<LogFile>(std::move(*log));
 }
 
+void Supervisor::drain_engine_log() {
+    if (!engine_log_reader_ || engine_log_reader_->corrupt()) {
+        return;
+    }
+    for (std::size_t i = 0; i < ipc::kLogRingCapacity; ++i) {
+        const std::optional<ipc::LogRecord> record = engine_log_reader_->next();
+        if (!record) {
+            break;
+        }
+        engine_line(*record);
+    }
+    const std::uint64_t dropped =
+        engine_log_reader_->corrupt() ? 0 : engine_log_reader_->take_dropped();
+    if (engine_log_reader_->corrupt()) {
+        constexpr std::string_view kCorrupt =
+            "the engine's log ring is corrupt; it won't be read again";
+        engine_note(ipc::LogLevel::Error, kCorrupt);
+        error(kCorrupt);
+        return;
+    }
+    if (dropped > 0) {
+        engine_note(ipc::LogLevel::Warning,
+                    std::format("{} {} dropped because the engine's log ring was full", dropped,
+                                dropped == 1 ? "line was" : "lines were"));
+    }
+}
+
+void Supervisor::engine_line(const ipc::LogRecord& record) {
+    if (engine_file()) {
+        static_cast<void>(engine_log_->write(record));
+        if (engine_file_ok()) {
+            return;
+        }
+    }
+    *err_ << "ks-engine: " << ipc::format_log_record(clock_, record) << '\n' << std::flush;
+}
+
+void Supervisor::engine_note(ipc::LogLevel level, std::string_view text) {
+    const std::uint64_t now = steady_now_ns();
+    if (engine_file()) {
+        static_cast<void>(engine_log_->write(now, level, text));
+        if (engine_file_ok()) {
+            return;
+        }
+    }
+    *err_ << "ks-engine: " << ipc::format_log_line(clock_, now, level, text) << '\n' << std::flush;
+}
+
+bool Supervisor::engine_file_ok() {
+    const std::optional<std::error_code> failed = engine_log_->error();
+    if (!failed) {
+        return true;
+    }
+    error(std::format("ks-engine.log failed: {}; the engine's lines go to standard error",
+                      failed->message()));
+    return false;
+}
+
 std::optional<int> Supervisor::step() {
     // The signal pipe, the engine, the listener, then each client.
     std::vector<pollfd> polled;
@@ -512,12 +618,19 @@ std::optional<int> Supervisor::step() {
         polled.push_back(
             {.fd = client.connection.socket(), .events = out_if(client.connection), .revents = 0});
     }
-    const int ready =
-        ::poll(polled.data(), static_cast<nfds_t>(polled.size()), poll_timeout(deadline_));
+    // While the engine runs, its log ring is read at least every
+    // kLogDrainInterval (specs/logs/spec.md requirement 14).
+    int timeout = poll_timeout(deadline_);
+    if (engine_pid_ > 0) {
+        const auto drain = static_cast<int>(kLogDrainInterval.count());
+        timeout = timeout == -1 ? drain : std::min(timeout, drain);
+    }
+    const int ready = ::poll(polled.data(), static_cast<nfds_t>(polled.size()), timeout);
     if (ready == -1 && errno != EINTR) {
         error(std::format("poll failed: {}",
                           std::error_code{errno, std::system_category()}.message()));
     }
+    drain_engine_log();
 
     if (const std::optional<int> status = handle_signals()) {
         return status;
@@ -558,6 +671,8 @@ std::optional<int> Supervisor::handle_signals() {
 
 std::optional<int> Supervisor::engine_exited(int status) {
     engine_pid_ = 0;
+    // Its last lines, before how it ended (requirement 14).
+    drain_engine_log();
     const std::string how = how_it_ended(status);
     const bool clean = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (forced_status_) {
@@ -993,6 +1108,7 @@ void Supervisor::kill_engine() {
     while (::waitpid(engine_pid_, &status, 0) == -1 && errno == EINTR) {
     }
     engine_pid_ = 0;
+    drain_engine_log();
 }
 
 void Supervisor::flush_clients() {
