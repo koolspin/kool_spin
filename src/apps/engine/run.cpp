@@ -6,6 +6,7 @@
 #include <ks/engine/output_controller.h>
 #include <ks/engine/render_core.h>
 #include <ks/engine_app/options.h>
+#include <ks/ipc/command.h>
 #include <ks/ipc/connection.h>
 #include <ks/ipc/fd.h>
 #include <ks/ipc/frame.h>
@@ -184,6 +185,20 @@ std::expected<engine::MiniaudioSourceConfig, StartFailure> source_config(const O
     return config;
 }
 
+/// A client's ring that the supervisor attached (specs/client-rings/spec.md
+/// requirements 6 and 7). The engine keeps the segment's descriptor and its
+/// mapping until the ring has been detached.
+struct AttachedRing {
+    ipc::Fd segment;
+    ipc::Region region;
+    ipc::CommandRing* ring = nullptr;
+    /// A Detach asked for it, with request ID `detach_request`.
+    bool detaching = false;
+    std::uint32_t detach_request = 0;
+    /// Engine::detach() has taken the request; until then, it's retried.
+    bool detach_given = false;
+};
+
 /// The engine process: the control thread's work (requirements 9 to 12).
 class EngineProcess {
 public:
@@ -211,8 +226,20 @@ private:
     int loop();
     /// Handles what the supervisor sent. Returns the request ID of a Stop.
     std::optional<std::uint32_t> read_supervisor(short events);
-    std::optional<std::uint32_t> handle(const ipc::Message& message);
+    std::optional<std::uint32_t> handle(const ipc::Message& message, std::vector<ipc::Fd>& fds);
     void send(const ipc::Message& message);
+    /// Answers `id` with Error Unavailable.
+    void unavailable(std::uint32_t id, std::string text);
+    /// Attaches the ring in `segment` (client-rings requirement 6).
+    void attach_ring(std::uint32_t id, ipc::Fd segment);
+    /// Starts detaching slot `slot`'s ring (client-rings requirement 7).
+    void detach_ring(std::uint32_t id, std::uint32_t slot);
+    /// Asks the engine again to detach each ring whose detach it couldn't
+    /// take: the give ring was full.
+    void retry_detaches();
+    /// Collects the engine's releases. A detached ring's is unmapped, and its
+    /// Detach answered.
+    void collect();
     /// Closes the supervisor's socket: the engine plays on (requirement 12).
     void lose_supervisor(std::string_view why);
     /// Fades out and stops, replies Done if `stop` asked, and returns kExitOk
@@ -231,6 +258,8 @@ private:
     std::unique_ptr<engine::MiniaudioDeviceSource> source_;
     std::unique_ptr<engine::OutputController> controller_;
     std::unique_ptr<ipc::Connection> supervisor_;
+    /// Slot i's ring, while one is attached.
+    std::array<std::unique_ptr<AttachedRing>, engine::kMaxClients> rings_;
 };
 
 std::expected<void, StartFailure> EngineProcess::start() {
@@ -322,8 +351,8 @@ int EngineProcess::loop() {
                                  static_cast<int>(kControlInterval.count())));
 
         controller_->poll();
-        while (engine_->collect()) {
-        }
+        collect();
+        retry_detaches();
         if (signals_->signalled()) {
             report("got a signal");
             return stop(std::nullopt);
@@ -355,7 +384,7 @@ std::optional<std::uint32_t> EngineProcess::read_supervisor(short events) {
             }
             return std::nullopt;
         }
-        const std::optional<ipc::ReceivedFrame>& frame = *received;
+        std::optional<ipc::ReceivedFrame>& frame = *received;
         if (!frame) {
             return std::nullopt;
         }
@@ -367,20 +396,30 @@ std::optional<std::uint32_t> EngineProcess::read_supervisor(short events) {
             lose_supervisor("sent a message that doesn't decode");
             return std::nullopt;
         }
-        if (const std::optional<std::uint32_t> asked = handle(*message)) {
+        if (const std::optional<std::uint32_t> asked = handle(*message, frame->fds)) {
             return asked;
         }
     }
     return std::nullopt;
 }
 
-std::optional<std::uint32_t> EngineProcess::handle(const ipc::Message& message) {
+std::optional<std::uint32_t> EngineProcess::handle(const ipc::Message& message,
+                                                   std::vector<ipc::Fd>& fds) {
     const std::uint32_t id = message.request_id;
     if (std::holds_alternative<ipc::msg::Stop>(message.body)) {
         return id;
     }
     if (std::holds_alternative<ipc::msg::Ping>(message.body)) {
         send(ipc::Message{.request_id = id, .body = ipc::msg::Pong{}});
+    } else if (std::holds_alternative<ipc::msg::Attach>(message.body)) {
+        // decode() checked the count; the connection delivers what it says.
+        if (fds.size() != 1) {
+            unavailable(id, "an Attach without its segment");
+        } else {
+            attach_ring(id, std::move(fds.front()));
+        }
+    } else if (const auto* const detach = std::get_if<ipc::msg::Detach>(&message.body)) {
+        detach_ring(id, detach->slot);
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         report("the supervisor reported an error: " + error->text);
     } else {
@@ -398,6 +437,86 @@ void EngineProcess::send(const ipc::Message& message) {
     const std::expected<ipc::Frame, ipc::MessageError> frame = ipc::encode(message);
     if (!frame || !supervisor_->send(*frame, {}) || !supervisor_->flush()) {
         lose_supervisor("couldn't be written to");
+    }
+}
+
+void EngineProcess::unavailable(std::uint32_t id, std::string text) {
+    send(ipc::Message{
+        .request_id = id,
+        .body = ipc::msg::Error{.code = ipc::ErrorCode::Unavailable, .text = std::move(text)}});
+}
+
+void EngineProcess::attach_ring(std::uint32_t id, ipc::Fd segment) {
+    std::expected<ipc::Region, ipc::MapFailure> region =
+        ipc::Region::map(segment.get(), ipc::SegmentKind::CommandRing,
+                         ipc::kCommandRingLayoutVersion, ipc::Access::ReadWrite);
+    if (!region) {
+        unavailable(id, "the segment isn't a command ring");
+        return;
+    }
+    auto* const ring = region->at<ipc::CommandRing>(ipc::kSegmentHeaderSize);
+    if (ring == nullptr) {
+        unavailable(id, "the segment is too small for a command ring");
+        return;
+    }
+    const std::optional<std::size_t> slot = engine_->attach(*ring);
+    if (!slot) {
+        unavailable(id, "no client slot is free");
+        return;
+    }
+    rings_.at(*slot) = std::make_unique<AttachedRing>(AttachedRing{.segment = std::move(segment),
+                                                                   .region = std::move(*region),
+                                                                   .ring = ring,
+                                                                   .detaching = false,
+                                                                   .detach_request = 0,
+                                                                   .detach_given = false});
+    report(std::format("attached a ring in slot {}", *slot));
+    send(ipc::Message{.request_id = id,
+                      .body = ipc::msg::Attached{.slot = static_cast<std::uint32_t>(*slot)}});
+}
+
+void EngineProcess::detach_ring(std::uint32_t id, std::uint32_t slot) {
+    if (slot >= rings_.size() || !rings_.at(slot)) {
+        unavailable(id, std::format("slot {} holds no ring", slot));
+        return;
+    }
+    AttachedRing& attached = *rings_.at(slot);
+    if (attached.detaching) {
+        unavailable(id, std::format("slot {}'s ring is already being detached", slot));
+        return;
+    }
+    attached.detaching = true;
+    attached.detach_request = id;
+    attached.detach_given = engine_->detach(slot);
+}
+
+void EngineProcess::retry_detaches() {
+    for (std::size_t slot = 0; slot < rings_.size(); ++slot) {
+        AttachedRing* const attached = rings_.at(slot).get();
+        if (attached != nullptr && attached->detaching && !attached->detach_given) {
+            attached->detach_given = engine_->detach(slot);
+        }
+    }
+}
+
+void EngineProcess::collect() {
+    for (std::optional<engine::Released> released = engine_->collect(); released.has_value();
+         released = engine_->collect()) {
+        const ipc::CommandRing* const ring = released->ring;
+        if (ring == nullptr) {
+            continue;
+        }
+        for (std::size_t slot = 0; slot < rings_.size(); ++slot) {
+            std::unique_ptr<AttachedRing>& attached = rings_.at(slot);
+            if (attached && attached->ring == ring) {
+                const std::uint32_t request = attached->detach_request;
+                // Unmaps the segment and closes its descriptor.
+                attached.reset();
+                report(std::format("detached the ring in slot {}", slot));
+                send(ipc::Message{.request_id = request, .body = ipc::msg::Detached{}});
+                break;
+            }
+        }
     }
 }
 

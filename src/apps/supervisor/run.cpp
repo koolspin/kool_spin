@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/supervisor/run.h>
 
+#include <ks/ipc/command.h>
 #include <ks/ipc/connection.h>
 #include <ks/ipc/fd.h>
 #include <ks/ipc/fd_passing.h>
@@ -171,15 +172,46 @@ enum class Phase : std::uint8_t {
     Terminating, ///< Sent the engine SIGTERM after its connection failed.
 };
 
+/// A client's command ring, once the engine has attached it
+/// (specs/client-rings/spec.md requirement 10).
+struct Ring {
+    std::uint32_t slot = 0;
+    /// The supervisor's own descriptor of the segment.
+    ipc::Fd segment;
+};
+
 /// One client's connection.
 struct Client {
     ipc::Connection connection;
+    /// Tells clients apart for answers that come later, from the engine.
+    std::uint64_t id = 0;
     bool welcomed = false;
     std::string name;
     /// The request IDs of its Stops, to answer with Done.
     std::vector<std::uint32_t> stops;
+    /// Its ring, once attached.
+    std::unique_ptr<Ring> ring;
+    /// An Attach for its ring is waiting for the engine's answer.
+    bool opening = false;
     /// Set once it's to be closed.
     bool dropped = false;
+};
+
+/// An Attach sent to the engine, waiting for its answer
+/// (specs/client-rings/spec.md requirement 10).
+struct PendingAttach {
+    std::uint32_t request = 0;        ///< The Attach's request ID.
+    std::uint64_t client = 0;         ///< Client::id.
+    std::uint32_t client_request = 0; ///< The client's OpenRing's request ID.
+    ipc::Fd segment;
+};
+
+/// A Detach sent to the engine, waiting for its answer. The supervisor keeps
+/// its descriptor of the segment until then (requirement 11).
+struct PendingDetach {
+    std::uint32_t request = 0; ///< The Detach's request ID.
+    std::uint32_t slot = 0;
+    ipc::Fd segment;
 };
 
 class Supervisor {
@@ -215,7 +247,22 @@ private:
     void handle_engine(short events);
     void handle_engine_message(const ipc::Message& message);
     void engine_failed(std::string_view why);
-    void send_to_engine(const ipc::Message& message);
+    void send_to_engine(const ipc::Message& message, std::span<const int> fds = {});
+    /// A request ID for a request to the engine; never 0.
+    std::uint32_t next_request();
+    /// The client with Client::id `id`, or null if it has gone or been
+    /// dropped.
+    Client* find_client(std::uint64_t id);
+    /// Handles a client's OpenRing (client-rings requirement 10).
+    void open_ring(Client& client, std::uint32_t id);
+    /// Handles the engine's answers to Attach and Detach. Each returns false
+    /// if `id` answers no such request.
+    bool ring_attached(std::uint32_t id, std::uint32_t slot);
+    bool ring_detached(std::uint32_t id);
+    bool attach_refused(std::uint32_t id, const ipc::msg::Error& error);
+    bool detach_refused(std::uint32_t id, const ipc::msg::Error& error);
+    /// Asks the engine to detach the ring in `slot` (requirement 11).
+    void detach_ring(std::uint32_t slot, ipc::Fd segment);
     void accept_clients();
     void handle_client(Client& client, short events);
     void handle_client_message(Client& client, const ipc::Message& message);
@@ -242,6 +289,9 @@ private:
 
     std::unique_ptr<ipc::Listener> listener_;
     std::vector<Client> clients_;
+    std::uint64_t next_client_ = 1;
+    std::vector<PendingAttach> attaches_;
+    std::vector<PendingDetach> detaches_;
 
     Phase phase_ = Phase::Starting;
     std::optional<Clock::time_point> deadline_;
@@ -488,21 +538,153 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
     if (std::holds_alternative<ipc::msg::Ping>(message.body)) {
         send_to_engine(ipc::Message{.request_id = id, .body = ipc::msg::Pong{}});
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
-        report(std::format("ks-engine reported an error: {}", error->text));
+        if (!attach_refused(id, *error) && !detach_refused(id, *error)) {
+            report(std::format("ks-engine reported an error: {}", error->text));
+        }
+    } else if (const auto* const attached = std::get_if<ipc::msg::Attached>(&message.body)) {
+        if (!ring_attached(id, attached->slot)) {
+            send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "answers no Attach"));
+        }
+    } else if (std::holds_alternative<ipc::msg::Detached>(message.body)) {
+        if (!ring_detached(id)) {
+            send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "answers no Detach"));
+        }
     } else if (!std::holds_alternative<ipc::msg::Pong>(message.body) &&
                !std::holds_alternative<ipc::msg::Done>(message.body)) {
         send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "not from the engine"));
     }
 }
 
-void Supervisor::send_to_engine(const ipc::Message& message) {
+void Supervisor::send_to_engine(const ipc::Message& message, std::span<const int> fds) {
     if (!engine_) {
         return;
     }
     const std::expected<ipc::Frame, ipc::MessageError> frame = ipc::encode(message);
-    if (!frame || !engine_->send(*frame, {}) || !engine_->flush()) {
+    if (!frame || !engine_->send(*frame, fds) || !engine_->flush()) {
         engine_failed("couldn't be written to");
     }
+}
+
+std::uint32_t Supervisor::next_request() {
+    if (next_request_ == 0) {
+        next_request_ = 1;
+    }
+    return next_request_++;
+}
+
+Client* Supervisor::find_client(std::uint64_t id) {
+    for (Client& client : clients_) {
+        if (client.id == id) {
+            return client.dropped ? nullptr : &client;
+        }
+    }
+    return nullptr;
+}
+
+void Supervisor::open_ring(Client& client, std::uint32_t id) {
+    if (client.ring || client.opening) {
+        report(std::format("refused client '{}' a second ring", client.name));
+        send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported,
+                                             "a client has one ring at a time"));
+        return;
+    }
+    if (phase_ != Phase::Running) {
+        report(std::format("refused client '{}' a ring: stopping", client.name));
+        send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported, "stopping"));
+        return;
+    }
+    std::expected<ipc::Fd, std::error_code> segment =
+        factory_->create(ipc::SegmentKind::CommandRing, ipc::kCommandRingLayoutVersion,
+                         ipc::kCommandRingSegmentSize);
+    if (!segment) {
+        const std::string why =
+            std::format("can't create a ring segment: {}", segment.error().message());
+        report(std::format("refused client '{}' a ring: {}", client.name, why));
+        send_to_client(client, error_message(id, ipc::ErrorCode::Unavailable, why));
+        return;
+    }
+    const std::uint32_t request = next_request();
+    const std::array<int, 1> fds{segment->get()};
+    client.opening = true;
+    attaches_.push_back(PendingAttach{.request = request,
+                                      .client = client.id,
+                                      .client_request = id,
+                                      .segment = std::move(*segment)});
+    send_to_engine(ipc::Message{.request_id = request, .body = ipc::msg::Attach{}}, fds);
+}
+
+bool Supervisor::ring_attached(std::uint32_t id, std::uint32_t slot) {
+    const auto found = std::ranges::find(attaches_, id, &PendingAttach::request);
+    if (found == attaches_.end()) {
+        return false;
+    }
+    PendingAttach pending = std::move(*found);
+    attaches_.erase(found);
+    Client* const client = find_client(pending.client);
+    if (client == nullptr) {
+        // Its client left while the ring was being opened.
+        detach_ring(slot, std::move(pending.segment));
+        return true;
+    }
+    client->opening = false;
+    report(std::format("client '{}' opened a ring in slot {}", client->name, slot));
+    const std::array<int, 1> fds{pending.segment.get()};
+    // The ring is the client's before the answer is sent: if sending drops
+    // the client, drop() detaches it.
+    client->ring =
+        std::make_unique<Ring>(Ring{.slot = slot, .segment = std::move(pending.segment)});
+    send_to_client(*client,
+                   ipc::Message{.request_id = pending.client_request,
+                                .body = ipc::msg::RingOpened{.slot = slot}},
+                   fds);
+    return true;
+}
+
+bool Supervisor::ring_detached(std::uint32_t id) {
+    const auto found = std::ranges::find(detaches_, id, &PendingDetach::request);
+    if (found == detaches_.end()) {
+        return false;
+    }
+    report(std::format("the ring in slot {} was detached", found->slot));
+    detaches_.erase(found);
+    return true;
+}
+
+bool Supervisor::attach_refused(std::uint32_t id, const ipc::msg::Error& error) {
+    const auto found = std::ranges::find(attaches_, id, &PendingAttach::request);
+    if (found == attaches_.end()) {
+        return false;
+    }
+    const PendingAttach pending = std::move(*found);
+    attaches_.erase(found);
+    Client* const client = find_client(pending.client);
+    if (client == nullptr) {
+        report(std::format("ks-engine refused a ring: {}", error.text));
+        return true;
+    }
+    client->opening = false;
+    report(std::format("refused client '{}' a ring: {}", client->name, error.text));
+    send_to_client(*client,
+                   error_message(pending.client_request, ipc::ErrorCode::Unavailable, error.text));
+    return true;
+}
+
+bool Supervisor::detach_refused(std::uint32_t id, const ipc::msg::Error& error) {
+    const auto found = std::ranges::find(detaches_, id, &PendingDetach::request);
+    if (found == detaches_.end()) {
+        return false;
+    }
+    report(std::format("ks-engine refused to detach the ring in slot {}: {}", found->slot,
+                       error.text));
+    detaches_.erase(found);
+    return true;
+}
+
+void Supervisor::detach_ring(std::uint32_t slot, ipc::Fd segment) {
+    const std::uint32_t request = next_request();
+    detaches_.push_back(
+        PendingDetach{.request = request, .slot = slot, .segment = std::move(segment)});
+    send_to_engine(ipc::Message{.request_id = request, .body = ipc::msg::Detach{.slot = slot}});
 }
 
 void Supervisor::engine_failed(std::string_view why) {
@@ -541,9 +723,12 @@ void Supervisor::accept_clients() {
             continue;
         }
         clients_.push_back(Client{.connection = ipc::Connection{std::move(*socket)},
+                                  .id = next_client_++,
                                   .welcomed = false,
                                   .name = {},
                                   .stops = {},
+                                  .ring = nullptr,
+                                  .opening = false,
                                   .dropped = false});
     }
 }
@@ -608,6 +793,8 @@ void Supervisor::handle_client_message(Client& client, const ipc::Message& messa
         report(std::format("client '{}' asked to stop", client.name));
         client.stops.push_back(id);
         begin_stop();
+    } else if (std::holds_alternative<ipc::msg::OpenRing>(message.body)) {
+        open_ring(client, id);
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         report(std::format("client '{}' reported an error: {}", client.name, error->text));
     } else {
@@ -647,6 +834,12 @@ void Supervisor::drop(Client& client, std::string_view why) {
     client.dropped = true;
     report(client.name.empty() ? std::format("dropped a client: it {}", why)
                                : std::format("dropped client '{}': it {}", client.name, why));
+    // A ring being opened is detached when the engine's answer comes
+    // (ring_attached()).
+    if (client.ring) {
+        detach_ring(client.ring->slot, std::move(client.ring->segment));
+        client.ring.reset();
+    }
 }
 
 void Supervisor::begin_stop() {
@@ -657,7 +850,7 @@ void Supervisor::begin_stop() {
     listener_.reset();
     phase_ = Phase::Stopping;
     deadline_ = Clock::now() + kEngineStopTimeout;
-    send_to_engine(ipc::Message{.request_id = next_request_++, .body = ipc::msg::Stop{}});
+    send_to_engine(ipc::Message{.request_id = next_request(), .body = ipc::msg::Stop{}});
 }
 
 std::optional<int> Supervisor::deadline_passed() {
