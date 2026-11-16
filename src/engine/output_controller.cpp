@@ -122,6 +122,14 @@ OutputState OutputController::state() const noexcept {
     return state_;
 }
 
+std::uint32_t OutputController::device_sample_rate() const noexcept {
+    return sample_rate_;
+}
+
+std::uint32_t OutputController::device_channels() const noexcept {
+    return channels_;
+}
+
 void OutputController::set_state(OutputState state) noexcept {
     state_ = state;
     core_->set_output_state(state);

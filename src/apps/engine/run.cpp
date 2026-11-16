@@ -10,6 +10,7 @@
 #include <ks/ipc/connection.h>
 #include <ks/ipc/fd.h>
 #include <ks/ipc/frame.h>
+#include <ks/ipc/log.h>
 #include <ks/ipc/messages.h>
 #include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
@@ -206,11 +207,15 @@ public:
 
     int run() {
         if (const std::expected<void, StartFailure> started = start(); !started) {
-            const std::string_view why = started.error().why;
-            if (why.starts_with("ks-engine: ")) {
-                *err_ << why << '\n' << std::flush;
-            } else {
-                report(why);
+            // A starting failure goes to standard error, and to the log too
+            // if it's open (specs/logs/spec.md requirement 18).
+            std::string_view why = started.error().why;
+            if (why.starts_with(kPrefix)) {
+                why.remove_prefix(kPrefix.size());
+            }
+            *err_ << kPrefix << why << '\n' << std::flush;
+            if (log_) {
+                log_->write(ipc::LogLevel::Error, why);
             }
             return started.error().status;
         }
@@ -218,18 +223,33 @@ public:
     }
 
 private:
-    void report(std::string_view line) const {
-        *err_ << "ks-engine: " << line << '\n' << std::flush;
+    static constexpr std::string_view kPrefix = "ks-engine: ";
+
+    /// One report: a line in the log, or on standard error without --log-fd
+    /// (specs/logs/spec.md requirement 18).
+    void report(ipc::LogLevel level, std::string_view line) {
+        if (log_) {
+            log_->write(level, line);
+        } else {
+            *err_ << kPrefix << line << '\n' << std::flush;
+        }
     }
 
     std::expected<void, StartFailure> start();
+    /// Maps --log-fd's segment and starts the log on it (specs/logs/spec.md
+    /// requirement 17).
+    std::expected<void, StartFailure> open_log();
+    /// Logs the output's state if it has changed to playing or freewheeling
+    /// since the last line about it (specs/logs/spec.md requirement 18).
+    void log_output();
     int loop();
     /// Handles what the supervisor sent. Returns the request ID of a Stop.
     std::optional<std::uint32_t> read_supervisor(short events);
     std::optional<std::uint32_t> handle(const ipc::Message& message, std::vector<ipc::Fd>& fds);
     void send(const ipc::Message& message);
-    /// Answers `id` with Error Unavailable.
-    void unavailable(std::uint32_t id, std::string text);
+    /// Refuses `what` ("an Attach" or "a Detach"): answers `id` with Error
+    /// Unavailable, and logs a warning.
+    void unavailable(std::uint32_t id, std::string_view what, std::string text);
     /// Attaches the ring in `segment` (client-rings requirement 6).
     void attach_ring(std::uint32_t id, ipc::Fd segment);
     /// Starts detaching slot `slot`'s ring (client-rings requirement 7).
@@ -243,11 +263,19 @@ private:
     /// Closes the supervisor's socket: the engine plays on (requirement 12).
     void lose_supervisor(std::string_view why);
     /// Fades out and stops, replies Done if `stop` asked, and returns kExitOk
-    /// (requirement 11).
-    int stop(std::optional<std::uint32_t> stop);
+    /// (requirement 11). `why` is for the log.
+    int stop(std::optional<std::uint32_t> stop, std::string_view why);
 
     const Options* options_;
     std::ostream* err_;
+
+    /// The log segment, its mapping, and the writer on it, with --log-fd.
+    /// The engine keeps them until it exits.
+    ipc::Fd log_fd_;
+    std::unique_ptr<ipc::Region> log_region_;
+    std::unique_ptr<ipc::LogWriter> log_;
+    /// The output state in the last line logged about it.
+    engine::OutputState logged_output_ = engine::OutputState::Stopped;
 
     std::unique_ptr<SignalPipe> signals_;
     std::unique_ptr<ipc::LockFile> lock_;
@@ -280,6 +308,16 @@ std::expected<void, StartFailure> EngineProcess::start() {
         return failure(std::format("--state-fd {} isn't open", state_fd));
     }
     state_fd_ = ipc::Fd{state_fd};
+    if (options_->log_fd) {
+        const int log_fd = *options_->log_fd;
+        if (!is_open(log_fd) || !set_flags(log_fd, false)) {
+            return failure(std::format("--log-fd {} isn't open", log_fd));
+        }
+        log_fd_ = ipc::Fd{log_fd};
+        if (std::expected<void, StartFailure> opened = open_log(); !opened) {
+            return opened;
+        }
+    }
 
     // 2. The engine lock.
     const std::filesystem::path dir = options_->runtime_dir.value_or(std::filesystem::path{});
@@ -331,12 +369,49 @@ std::expected<void, StartFailure> EngineProcess::start() {
     }
     controller_ = std::make_unique<engine::OutputController>(*core_, *source_, output);
     controller_->start();
+    log_output();
 
     // 7. Ready.
     supervisor_ = std::make_unique<ipc::Connection>(std::move(supervisor));
     send(ipc::Message{.request_id = 0, .body = ipc::msg::Ready{}});
-    report("ready");
+    report(ipc::LogLevel::Info, "ready");
     return {};
+}
+
+std::expected<void, StartFailure> EngineProcess::open_log() {
+    std::expected<ipc::Region, ipc::MapFailure> region = ipc::Region::map(
+        log_fd_.get(), ipc::SegmentKind::Log, ipc::kLogLayoutVersion, ipc::Access::ReadWrite);
+    if (!region) {
+        return failure("--log-fd isn't a log segment");
+    }
+    log_region_ = std::make_unique<ipc::Region>(std::move(*region));
+    // at() checks against the size of the engine's own mapping.
+    auto* const segment = log_region_->at<ipc::LogSegment>(ipc::kSegmentHeaderSize);
+    if (segment == nullptr) {
+        return failure("the log segment is too small");
+    }
+    log_ = std::make_unique<ipc::LogWriter>(*segment);
+    return {};
+}
+
+void EngineProcess::log_output() {
+    const engine::OutputState state = controller_->state();
+    if (state == logged_output_) {
+        return;
+    }
+    if (state == engine::OutputState::Playing) {
+        report(ipc::LogLevel::Info,
+               std::format("output playing on a device at {} Hz, {} channels",
+                           controller_->device_sample_rate(), controller_->device_channels()));
+    } else if (state == engine::OutputState::Freewheeling) {
+        // The first line about the output: nothing has played yet.
+        report(ipc::LogLevel::Warning, logged_output_ == engine::OutputState::Stopped
+                                           ? "output freewheeling: no device opened"
+                                           : "output freewheeling: the device was lost");
+    } else {
+        return;
+    }
+    logged_output_ = state;
 }
 
 int EngineProcess::loop() {
@@ -351,15 +426,15 @@ int EngineProcess::loop() {
                                  static_cast<int>(kControlInterval.count())));
 
         controller_->poll();
+        log_output();
         collect();
         retry_detaches();
         if (signals_->signalled()) {
-            report("got a signal");
-            return stop(std::nullopt);
+            return stop(std::nullopt, "got a signal");
         }
         if (polled[1].revents != 0 && supervisor_) {
             if (const std::optional<std::uint32_t> asked = read_supervisor(polled[1].revents)) {
-                return stop(asked);
+                return stop(asked, "the supervisor asked");
             }
         }
     }
@@ -414,14 +489,14 @@ std::optional<std::uint32_t> EngineProcess::handle(const ipc::Message& message,
     } else if (std::holds_alternative<ipc::msg::Attach>(message.body)) {
         // decode() checked the count; the connection delivers what it says.
         if (fds.size() != 1) {
-            unavailable(id, "an Attach without its segment");
+            unavailable(id, "an Attach", "an Attach without its segment");
         } else {
             attach_ring(id, std::move(fds.front()));
         }
     } else if (const auto* const detach = std::get_if<ipc::msg::Detach>(&message.body)) {
         detach_ring(id, detach->slot);
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
-        report("the supervisor reported an error: " + error->text);
+        report(ipc::LogLevel::Warning, "the supervisor reported an error: " + error->text);
     } else {
         send(ipc::Message{.request_id = id,
                           .body = ipc::msg::Error{.code = ipc::ErrorCode::NotSupported,
@@ -440,7 +515,8 @@ void EngineProcess::send(const ipc::Message& message) {
     }
 }
 
-void EngineProcess::unavailable(std::uint32_t id, std::string text) {
+void EngineProcess::unavailable(std::uint32_t id, std::string_view what, std::string text) {
+    report(ipc::LogLevel::Warning, std::format("refused {}: {}", what, text));
     send(ipc::Message{
         .request_id = id,
         .body = ipc::msg::Error{.code = ipc::ErrorCode::Unavailable, .text = std::move(text)}});
@@ -451,17 +527,17 @@ void EngineProcess::attach_ring(std::uint32_t id, ipc::Fd segment) {
         ipc::Region::map(segment.get(), ipc::SegmentKind::CommandRing,
                          ipc::kCommandRingLayoutVersion, ipc::Access::ReadWrite);
     if (!region) {
-        unavailable(id, "the segment isn't a command ring");
+        unavailable(id, "an Attach", "the segment isn't a command ring");
         return;
     }
     auto* const ring = region->at<ipc::CommandRing>(ipc::kSegmentHeaderSize);
     if (ring == nullptr) {
-        unavailable(id, "the segment is too small for a command ring");
+        unavailable(id, "an Attach", "the segment is too small for a command ring");
         return;
     }
     const std::optional<std::size_t> slot = engine_->attach(*ring);
     if (!slot) {
-        unavailable(id, "no client slot is free");
+        unavailable(id, "an Attach", "no client slot is free");
         return;
     }
     rings_.at(*slot) = std::make_unique<AttachedRing>(AttachedRing{.segment = std::move(segment),
@@ -470,19 +546,19 @@ void EngineProcess::attach_ring(std::uint32_t id, ipc::Fd segment) {
                                                                    .detaching = false,
                                                                    .detach_request = 0,
                                                                    .detach_given = false});
-    report(std::format("attached a ring in slot {}", *slot));
+    report(ipc::LogLevel::Info, std::format("attached a ring in slot {}", *slot));
     send(ipc::Message{.request_id = id,
                       .body = ipc::msg::Attached{.slot = static_cast<std::uint32_t>(*slot)}});
 }
 
 void EngineProcess::detach_ring(std::uint32_t id, std::uint32_t slot) {
     if (slot >= rings_.size() || !rings_.at(slot)) {
-        unavailable(id, std::format("slot {} holds no ring", slot));
+        unavailable(id, "a Detach", std::format("slot {} holds no ring", slot));
         return;
     }
     AttachedRing& attached = *rings_.at(slot);
     if (attached.detaching) {
-        unavailable(id, std::format("slot {}'s ring is already being detached", slot));
+        unavailable(id, "a Detach", std::format("slot {}'s ring is already being detached", slot));
         return;
     }
     attached.detaching = true;
@@ -512,7 +588,7 @@ void EngineProcess::collect() {
                 const std::uint32_t request = attached->detach_request;
                 // Unmaps the segment and closes its descriptor.
                 attached.reset();
-                report(std::format("detached the ring in slot {}", slot));
+                report(ipc::LogLevel::Info, std::format("detached the ring in slot {}", slot));
                 send(ipc::Message{.request_id = request, .body = ipc::msg::Detached{}});
                 break;
             }
@@ -527,11 +603,11 @@ void EngineProcess::lose_supervisor(std::string_view why) {
     // Send what's queued, such as a final Error, if the socket takes it now.
     [[maybe_unused]] const std::expected<void, std::error_code> flushed = supervisor_->flush();
     supervisor_.reset();
-    report(std::format("the supervisor's socket {}; playing on", why));
+    report(ipc::LogLevel::Warning, std::format("the supervisor's socket {}; playing on", why));
 }
 
-int EngineProcess::stop(std::optional<std::uint32_t> stop) {
-    report("stopping");
+int EngineProcess::stop(std::optional<std::uint32_t> stop, std::string_view why) {
+    report(ipc::LogLevel::Info, std::format("stopping: {}", why));
     controller_->stop();
     if (stop && supervisor_) {
         send(ipc::Message{.request_id = *stop, .body = ipc::msg::Done{}});
@@ -544,7 +620,7 @@ int EngineProcess::stop(std::optional<std::uint32_t> stop) {
             }
         }
     }
-    report("stopped");
+    report(ipc::LogLevel::Info, "stopped");
     return kExitOk;
 }
 

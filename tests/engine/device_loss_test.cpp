@@ -161,15 +161,23 @@ TEST_CASE("The core's output state follows every controller transition", "[engin
     ScriptedSource source;
     OutputController controller{core, source, kQuickRetries};
     REQUIRE(core.output_state() == OutputState::Stopped);
+    REQUIRE(controller.device_sample_rate() == 0U);
+    REQUIRE(controller.device_channels() == 0U);
 
     // A device that starts but never calls back: Playing, then lost.
     source.next = ScriptedSource::Next::Silent;
     controller.start();
     REQUIRE(controller.state() == OutputState::Playing);
     REQUIRE(core.output_state() == OutputState::Playing);
+    // The controller reports the device's format, and keeps it once the
+    // device is lost.
+    REQUIRE(controller.device_sample_rate() == 48'000U);
+    REQUIRE(controller.device_channels() == 2U);
     source.next = ScriptedSource::Next::Unavailable;
     REQUIRE(poll_until(controller, OutputState::Freewheeling, milliseconds{1000}));
     REQUIRE(core.output_state() == OutputState::Freewheeling);
+    REQUIRE(controller.device_sample_rate() == 48'000U);
+    REQUIRE(controller.device_channels() == 2U);
 
     // It returns, still silent, and is dropped again.
     source.next = ScriptedSource::Next::Silent;
