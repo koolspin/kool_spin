@@ -12,6 +12,7 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -56,6 +57,10 @@ public:
 private:
     LogFile(ipc::Fd fd, const ipc::LogClock& clock, std::uint64_t limit,
             std::uint64_t size) noexcept;
+
+    /// Writes `line`, already formatted and without its newline, or the
+    /// limit warning in its place, stamped `time`.
+    bool write_formatted(std::uint64_t time, std::string line);
 
     ipc::Fd fd_;
     ipc::LogClock clock_;

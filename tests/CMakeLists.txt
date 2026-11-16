@@ -60,6 +60,10 @@ ks_add_test(ks_ipc_tests
         ipc/spsc_ring_test.cpp
     LIBRARIES ks::ipc)
 
+ks_add_test(ks_supervisor_tests
+    SOURCES supervisor/log_file_test.cpp
+    LIBRARIES ks::supervisor)
+
 ks_add_test(ks_tone_tests
     SOURCES
         tone/options_test.cpp
