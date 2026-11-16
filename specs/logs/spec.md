@@ -1,6 +1,6 @@
 # Feature: Per-process logs
 
-- **Status:** Approved by the maintainer on 2026-11-15. Protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-15; what reaches standard error ("This spec extends" and decision 3) amended on 2026-11-16, after the build loop's review. Protected: build loops can't change it.
 - **Roadmap:** Phase 1b, step 4a
 - **Built by:** loop
 
@@ -19,7 +19,7 @@ Give every process a log file, with timestamps that line up across processes. Ea
   - **`ks::ipc`:** `SpscRing`, `RingProducer`, and `RingConsumer` (a handle that finds the counters inconsistent marks the ring corrupt and stops using it); `SegmentKind::Log`; `SegmentFactory`, `Region`, and the runtime directory.
   - **`kool_spin` and `ks-engine`** (`specs/processes/spec.md`, `specs/client-rings/spec.md`): both write their reports to standard error, one line each, starting `kool_spin: ` or `ks-engine: `.
   - **`ks::engine::OutputController`:** `state()` gives the output state: stopped, playing, freewheeling, or attaching. It runs on the control thread.
-- **This spec extends** `specs/processes/spec.md`: requirement 8 (the engine's command line), 9 (the engine starting), 13 (the supervisor's command line), 15 (the supervisor starting), 16 (the `poll` loop), and 22 (reports); and `specs/client-rings/spec.md` requirement 13 (reports). Reports become log lines (requirements 15 and 16 here). Everything else in those specs still applies unchanged, including every line they send to standard error.
+- **This spec extends** `specs/processes/spec.md`: requirement 8 (the engine's command line), 9 (the engine starting), 13 (the supervisor's command line), 15 (the supervisor starting), 16 (the `poll` loop), and 22 (reports); and `specs/client-rings/spec.md` requirement 13 (reports). Reports become log lines (requirements 15 and 18 here), so less reaches standard error: with a log file, `kool_spin`'s `info` lines go only to `kool_spin.log`, and with `--log-fd`, the engine's reports go only to its log. Everything else in those specs still applies unchanged, including usage errors and the starting failures that come before a log is open.
 - **The API exists before the code:** the acceptance tests compile against the public headers. Until the maintainer approves this spec and the tests, the function bodies are stubs, and every acceptance test fails.
 
 ## Requirements
@@ -202,7 +202,7 @@ None. The maintainer approved these decisions; the first four are the maintainer
 
 1. **Step 4 is split** (Goal; "Out of scope"). This step, 4a, is built by a loop and adds nothing to the audio thread. Step 4b, the audio thread's events, is built interactively, as `docs/process.md` asks for real-time code.
 2. **One folder per session, ten kept, 16 MiB per file** (requirements 8 to 11). A bug report is one folder. Removing old sessions deletes only `.log` files in folders named like sessions.
-3. **Standard error gets `kool_spin`'s warnings and errors** (requirement 15), besides the lines the earlier specs already send there. The engine's lines go only to its file.
+3. **Standard error gets `kool_spin`'s warnings and errors** (requirement 15), as well as usage errors and failures before the log is open. Everything else goes only to the files: `kool_spin`'s `info` lines, which the earlier specs sent to standard error, and every line of the engine's except its starting failures (requirement 18).
 4. **Lines show local date and time,** converted from the shared steady clock with one offset for the whole session (requirements 5 to 7).
 5. **The log segment goes to the engine at launch,** as descriptor 5 (requirement 12), so the engine can log from its first starting step. The socket-protocol spec expected a message for it; none is needed.
 6. **Fixed-size records:** 256 bytes, with 224 bytes of text, 1,024 to a ring: 256 KiB per process (requirement 1). Longer lines are cut at a character boundary.
