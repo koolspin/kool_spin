@@ -315,6 +315,14 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         return empty_body<msg::Done>(frame);
     case MessageType::Ready:
         return empty_body<msg::Ready>(frame);
+    case MessageType::OpenRing:
+    case MessageType::RingOpened:
+    case MessageType::Attach:
+    case MessageType::Attached:
+    case MessageType::Detach:
+    case MessageType::Detached:
+        // Stub (specs/client-rings/spec.md): not decoded yet.
+        break;
     }
     return std::unexpected{MessageError::UnknownType};
 }
