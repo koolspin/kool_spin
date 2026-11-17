@@ -391,6 +391,12 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         return slot_body<msg::Detach>(frame);
     case MessageType::Detached:
         return empty_body<msg::Detached>(frame);
+    // Stubs until the maintainer approves the acceptance tests.
+    case MessageType::Probe:
+    case MessageType::Probed:
+    case MessageType::Decode:
+    case MessageType::Decoded:
+        return std::unexpected{MessageError::UnknownType};
     }
     return std::unexpected{MessageError::UnknownType};
 }

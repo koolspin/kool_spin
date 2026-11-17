@@ -13,7 +13,8 @@ add_library(ks_ipc STATIC
     messages.cpp
     region.cpp
     runtime_dir.cpp
-    segment.cpp)
+    segment.cpp
+    track_segment.cpp)
 add_library(ks::ipc ALIAS ks_ipc)
 
 target_sources(ks_ipc PUBLIC
@@ -35,7 +36,8 @@ target_sources(ks_ipc PUBLIC
         include/ks/ipc/segment.h
         include/ks/ipc/seqlock.h
         include/ks/ipc/spsc_ring.h
-        include/ks/ipc/state.h)
+        include/ks/ipc/state.h
+        include/ks/ipc/track_segment.h)
 
 target_link_libraries(ks_ipc
     PUBLIC ks::core
