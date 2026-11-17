@@ -61,6 +61,7 @@ std::string read_while_writing(Seqlock<Value>& lock, const std::atomic<bool>& wr
 TEST_CASE("Seqlock: readers never see a torn value across threads", "[seqlock]") {
     constexpr std::uint64_t kMinWrites = 200'000;
     constexpr std::uint64_t kMinReadsEach = 1'000;
+    constexpr std::uint64_t kWritesPerRead = kMinWrites / kMinReadsEach;
     constexpr std::size_t kReaders = 2;
 
     Seqlock<Value> lock{};
@@ -102,7 +103,17 @@ TEST_CASE("Seqlock: readers never see a torn value across threads", "[seqlock]")
         for (std::uint64_t n = 1; !any_reader_failed(); ++n) {
             writer.write(make_value(n));
             last_write = n;
-            const std::uint64_t least = fewest_reads();
+            std::uint64_t least = fewest_reads();
+            // A writer on a core of its own can start each write before a
+            // slow reader, as in the fuzz build, finishes copying the value,
+            // and starve it. So it gets at most kWritesPerRead writes ahead of
+            // the slowest reader's successful reads, then yields until that
+            // reader reads again. Reads still overlap writes nearly all the
+            // time.
+            while (n > (least + 1) * kWritesPerRead && !any_reader_failed() && !watch.stalled()) {
+                std::this_thread::yield();
+                least = fewest_reads();
+            }
             if (least >= kMinReadsEach) {
                 if (n >= kMinWrites) {
                     break;
