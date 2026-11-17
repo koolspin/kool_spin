@@ -16,7 +16,7 @@ Phase 0 is complete (2026-11-09). It delivered the build, the checks and guardra
 
 Phase 1, the headless engine and process model, is split in two by ADR 0003. Phase 1a, the engine as a library in one process, is complete (2026-11-14). It delivered the shared-memory primitives, the render core and its drivers with device loss, the output safety stage, the deck, the mixer, commands in and state out, the resume state, miniaudio devices, and the development harness (`ks-harness`), soaked for an hour and cable-pulled on the Inpulse 500.
 
-Next is Phase 1b: separate processes (supervisor, engine, decode worker, and the `ks-play` client) and crash recovery. It starts interactively with the shared-memory segments, the sockets, and the supervisor's restart logic; see `docs/roadmap.md`. Update this section as phases land.
+Phase 1b, separate processes (supervisor, engine, decode worker, and the `ks-play` client) and crash recovery, is under way; see `docs/roadmap.md`. Steps 1 to 4a are done: the shared-memory segments, the socket protocol, `kool_spin` starting `ks-engine` and welcoming clients, the clients' command rings, and per-process logs. Next is step 4b, the audio thread's events, built interactively. Update this section as steps land.
 
 ## Build and test
 
@@ -27,6 +27,8 @@ Needs `VCPKG_ROOT` set to a vcpkg checkout. On Linux, Clang 21 is picked automat
 - Formatting and clang-tidy: `tools/lint.sh` (reads `build/debug/compile_commands.json`, so configure `debug` first). `tools/lint.sh --fix` applies formatting fixes.
 
 Before committing: the `debug`, `asan`, and `rtsan` workflows pass, and `tools/lint.sh` is clean. Warnings are errors. On a feature branch whose acceptance tests aren't all passing yet, run `ctest --preset <preset> -LE acceptance` instead of the full workflow (see `docs/process.md`).
+
+In a build loop on Linux, Claude Code's sandbox blocks Unix sockets, so every test that starts `kool_spin` fails there, before it checks anything: `can't open the supervisor socket: Operation not permitted`. That isn't the loop's to fix. Write `BLOCKED.md` saying so rather than retrying; the maintainer runs those tests outside the sandbox.
 
 CI (`.github/workflows/ci.yml`) runs every preset on Linux, `debug`/`release`/`asan`/`tsan` on macOS arm64, and lint, on every pull request and on pushes to `main`. The LLVM version is pinned in three places that must agree: `cmake/KsToolchain.cmake`, `tools/lint.sh`, and `ci.yml`. vcpkg is pinned by `builtin-baseline` in `vcpkg.json`; CI checks out exactly that commit.
 
@@ -72,6 +74,8 @@ Code reachable from the audio callback must not:
 
 Mark audio-thread entry points and every function they call `noexcept KS_NONBLOCKING`, from `<ks/core/realtime.h>` (it expands to `[[clang::nonblocking]]`; the build fails if such a function allocates, blocks, or calls an unmarked function). The `rtsan` preset must stay clean. Never suppress a RealtimeSanitizer or function-effect diagnostic without the maintainer's approval.
 
+Under RealtimeSanitizer, a signal handler that interrupts a `KS_NONBLOCKING` function runs as real-time code, even in a process with no audio thread, so its `write()` to a self-pipe is reported. A process that handles signals blocks them with `pthread_sigmask` while it calls `KS_NONBLOCKING` code, such as the shared-memory readers (`SignalsBlocked` in `src/apps/supervisor/run.cpp`), and keeps them blocked on the audio thread. `ks-engine` doesn't yet; step 4b fixes it.
+
 Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks (state out), both in shared memory. Commands carry absolute values ("rate 1.02", not "rate up"), so replaying one is harmless. Objects reach the audio thread through a give ring and leave through a retire ring, which the engine's control thread drains and frees. ADR 0003 has the details, including the memory ordering the seqlock needs.
 
 ## Reliability rules
@@ -88,3 +92,4 @@ Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks
 - Engine output must not depend on how frames are split into blocks: smoothing, gain ramps, and the limiter work per sample and carry their state across blocks. Golden files are compared with a tolerance; block-size tests are bit-exact (ADR 0003).
 - Add dependencies only through `vcpkg.json` (Qt excepted), only when the current phase needs them, and record them in the ADRs.
 - Keep diffs small and reviewable: a human reviews every change.
+- Stage files by name, never with `git add -A` or `git add .`. In a build loop, the sandbox leaves empty, read-only placeholder files, such as `.bashrc`, `.gitconfig`, and `.mcp.json`, at the top of the worktree.
