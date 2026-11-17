@@ -11,9 +11,12 @@
 #include <ks/ipc/log.h>
 
 #include <chrono>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -103,6 +106,56 @@ public:
     /// As tick(), and also a summary for every open window that counted
     /// anything, however short: for when the engine stops.
     [[nodiscard]] std::vector<EventLine> flush(Clock::time_point now);
+
+private:
+    /// The streams, in the order their summaries come (spec requirement 6).
+    enum class Group : std::uint8_t {
+        LateBlocks,
+        NonFinite,
+        Rejections,
+        CorruptRings,
+        Waiting,
+        WaitsEnded,
+        Dropped,
+    };
+
+    /// A stream: a group, and the slot or deck for the groups that have one.
+    struct Key {
+        Group group = Group::LateBlocks;
+        std::uint32_t index = 0;
+
+        auto operator<=>(const Key&) const = default;
+    };
+
+    /// A stream's open window, if it has one.
+    struct Window {
+        Clock::time_point start;
+        Clock::time_point end;
+        /// The events' counts, added up.
+        std::uint64_t count = 0;
+        /// The highest load, for late blocks.
+        double highest_load = 0.0;
+        /// The longest wait, for ended waits.
+        std::chrono::nanoseconds longest{};
+        /// The last rejection, for rejections.
+        std::uint64_t sequence = 0;
+        Rejection rejection = Rejection::UnknownType;
+    };
+
+    /// Takes `event`, on its stream `key`: a first line in `out` if the
+    /// stream is quiet, and otherwise counted in its window.
+    void take(Key key, const AudioEvent& event, Clock::time_point now, std::vector<EventLine>& out);
+    /// Ends every window that has ended by `now`, appending their summaries
+    /// to `out`.
+    void end_windows(Clock::time_point now, std::vector<EventLine>& out);
+    /// The summary of `window`, on stream `key`, with `ending` saying how
+    /// long the window was.
+    [[nodiscard]] static EventLine summary(Key key, const Window& window, std::string_view ending);
+
+    /// The open windows, by stream, so they're visited in summary order.
+    std::map<Key, Window> windows_;
+    /// The dropped-events total in the last call to dropped().
+    std::uint64_t dropped_total_ = 0;
 };
 
 } // namespace ks::engine
