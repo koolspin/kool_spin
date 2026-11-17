@@ -2,6 +2,7 @@
 # through a device with miniaudio. No Qt.
 
 add_library(ks_engine STATIC
+    audio_events.cpp
     block.cpp
     command.cpp
     deck.cpp
@@ -25,6 +26,7 @@ target_sources(ks_engine PUBLIC
     BASE_DIRS include
     FILES
         include/ks/engine/audio_backend.h
+        include/ks/engine/audio_events.h
         include/ks/engine/block.h
         include/ks/engine/command.h
         include/ks/engine/deck.h

@@ -204,6 +204,17 @@ std::optional<Released> Engine::collect() noexcept {
     return released;
 }
 
+// Stubs until the maintainer approves the acceptance tests.
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): a stub
+std::optional<AudioEvent> Engine::take_event() noexcept {
+    return std::nullopt;
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): a stub
+std::uint64_t Engine::dropped_events() const noexcept KS_NONBLOCKING {
+    return 0;
+}
+
 bool Engine::give(const Handover& handover) noexcept {
     return give_producer_.try_push(handover);
 }

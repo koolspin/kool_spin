@@ -12,6 +12,7 @@
 /// 17; ADR 0003 §11).
 
 #include <ks/core/realtime.h>
+#include <ks/engine/audio_events.h>
 #include <ks/engine/block.h>
 #include <ks/engine/command.h>
 #include <ks/engine/interpolator.h>
@@ -151,6 +152,16 @@ public:
     /// Pops one release from the retire ring, or returns nothing if it's
     /// empty.
     [[nodiscard]] std::optional<Released> collect() noexcept;
+
+    /// Pops the oldest event the audio thread recorded, or returns nothing if
+    /// there's none (specs/audio-events/spec.md requirement 4).
+    [[nodiscard]] std::optional<AudioEvent> take_event() noexcept;
+
+    // Any thread.
+
+    /// The events dropped so far because the event ring was full
+    /// (specs/audio-events/spec.md requirements 3 and 4). It only goes up.
+    [[nodiscard]] std::uint64_t dropped_events() const noexcept KS_NONBLOCKING;
 
     // The audio thread.
 
