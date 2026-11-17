@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -444,4 +445,52 @@ TEST_CASE("Engine: the status acknowledges each client slot", "[engine][state]")
         REQUIRE(status.clients.at(i).flags == 0);
         REQUIRE(status.clients.at(i).commands_read == 0);
     }
+}
+
+TEST_CASE("Engine: events taken while the audio thread records them", "[engine][events]") {
+    // The audio thread records one late block per call, as fast as it can,
+    // while the control thread takes them. Under tsan, this checks that the
+    // event ring and the dropped count are shared safely.
+    constexpr std::uint64_t kCalls = 100'000;
+    auto engine = std::make_unique<Engine>();
+    std::array<float, 64> left{};
+    std::array<float, 64> right{};
+    const std::array<std::span<float>, 2> views{std::span{left}, std::span{right}};
+    std::atomic<bool> done{false};
+
+    std::thread audio{[&] {
+        for (std::uint64_t call = 1; call <= kCalls; ++call) {
+            const Block block{.channels = views,
+                              .frames = left.size(),
+                              .sample_rate = kRate,
+                              .host_time =
+                                  std::chrono::steady_clock::time_point{
+                                      std::chrono::nanoseconds{static_cast<std::int64_t>(call)}},
+                              .resumed = false};
+            engine->rendered(block,
+                             ks::engine::RenderStats{.blocks_rendered = call, .late_blocks = call});
+        }
+        done.store(true, std::memory_order_release);
+    }};
+
+    std::uint64_t taken = 0;
+    std::int64_t last = 0;
+    bool in_order = true;
+    for (;;) {
+        // Read before taking: once it's set, every event is in the ring or
+        // counted as dropped.
+        const bool finished = done.load(std::memory_order_acquire);
+        while (const std::optional<ks::engine::AudioEvent> event = engine->take_event()) {
+            const std::int64_t time = event->host_time.time_since_epoch().count();
+            in_order = in_order && time > last && event->count == 1;
+            last = time;
+            ++taken;
+        }
+        if (finished) {
+            break;
+        }
+    }
+    audio.join();
+    CHECK(in_order);
+    CHECK(taken + engine->dropped_events() == kCalls);
 }

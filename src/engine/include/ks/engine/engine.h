@@ -26,6 +26,7 @@
 #include <ks/ipc/state.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -90,8 +91,8 @@ struct Released {
 ///
 /// Two threads use it. The audio thread calls process(), and may call
 /// mixer() and client_stats() between blocks. One control thread at a time
-/// calls load(), unload(), attach(), detach(), and collect(); they never
-/// wait for the audio thread.
+/// calls load(), unload(), attach(), detach(), collect(), and take_event();
+/// they never wait for the audio thread.
 class Engine final : public Graph {
 public:
     /// Builds the interpolator and the mixer, with `map` if it's valid and the
@@ -166,12 +167,17 @@ public:
     // The audio thread.
 
     /// Applies handovers, reads commands, renders the mixer, and releases
-    /// what's no longer used, in that order (requirement 8).
+    /// what's no longer used, in that order (requirement 8). Records the
+    /// block's rejected commands and newly corrupt rings as events
+    /// (specs/audio-events/spec.md requirement 2).
     void process(const Block& block) noexcept KS_NONBLOCKING override;
 
-    /// Publishes each deck's block, then the mixer's, then the status block,
-    /// from what the engine holds after the block, if it was built with a
-    /// state block (specs/state-out/spec.md requirement 17).
+    /// Records the block's late blocks, non-finite samples, and decks that
+    /// started or stopped waiting as events (specs/audio-events/spec.md
+    /// requirement 2). Then, if the engine was built with a state block,
+    /// publishes each deck's block, then the mixer's, then the status block,
+    /// from what the engine holds after the block (specs/state-out/spec.md
+    /// requirement 17).
     void rendered(const Block& block, const RenderStats& stats) noexcept KS_NONBLOCKING override;
 
     /// The mixer and its decks, for reading their state between blocks.
@@ -240,7 +246,14 @@ private:
     /// queue lacks room for what it could add (requirement 13).
     [[nodiscard]] bool apply_handover(const Handover& handover) noexcept KS_NONBLOCKING;
     [[nodiscard]] bool apply_load(std::size_t deck, const Track& track) noexcept KS_NONBLOCKING;
-    void read_commands() noexcept KS_NONBLOCKING;
+    /// Reads each client's commands, and records the block's rejections and
+    /// newly corrupt rings, at `block`'s host time.
+    void read_commands(const Block& block) noexcept KS_NONBLOCKING;
+    /// Pushes `event` to the event ring, or counts it as dropped if the ring
+    /// is full (specs/audio-events/spec.md requirement 3).
+    void record(const AudioEvent& event) noexcept KS_NONBLOCKING;
+    /// rendered()'s events: what changed since the last call.
+    void record_rendered(const Block& block, const RenderStats& stats) noexcept KS_NONBLOCKING;
     /// Free entries in the release queue.
     [[nodiscard]] std::size_t release_room() const noexcept KS_NONBLOCKING;
     /// Appends a release to the queue, merging one reference into the last
@@ -271,18 +284,34 @@ private:
     Interpolator interpolator_;
     Mixer mixer_;
 
-    // The two rings, in private memory: the only state both threads touch.
+    // The three rings, in private memory, and the count of dropped events:
+    // the only state both threads touch.
     ipc::SpscRing<Handover, kHandoverCapacity> give_ring_{};
     ipc::SpscRing<Released, kHandoverCapacity> retire_ring_{};
+    ipc::SpscRing<AudioEvent, kAudioEventCapacity> event_ring_{};
+    /// Written only by the audio thread, from dropped_.
+    std::atomic<std::uint64_t> dropped_events_{0};
 
     // Control thread.
     ipc::RingProducer<Handover, kHandoverCapacity> give_producer_{give_ring_};
     ipc::RingConsumer<Released, kHandoverCapacity> retire_consumer_{retire_ring_};
+    ipc::RingConsumer<AudioEvent, kAudioEventCapacity> event_consumer_{event_ring_};
     std::array<ControlClient, kMaxClients> control_clients_{};
 
     // Audio thread.
     ipc::RingConsumer<Handover, kHandoverCapacity> give_consumer_{give_ring_};
     ipc::RingProducer<Released, kHandoverCapacity> retire_producer_{retire_ring_};
+    ipc::RingProducer<AudioEvent, kAudioEventCapacity> event_producer_{event_ring_};
+    /// Events dropped because the event ring was full.
+    std::uint64_t dropped_ = 0;
+    /// The render core's counts in the last call to rendered()
+    /// (specs/audio-events/spec.md requirement 2).
+    std::uint64_t last_late_blocks_ = 0;
+    std::uint64_t last_non_finite_samples_ = 0;
+    /// Whether each deck was waiting after the last block, and the host
+    /// time of the block in which it started.
+    std::array<bool, kDecks> waiting_{};
+    std::array<std::chrono::steady_clock::time_point, kDecks> waiting_since_{};
     std::array<AudioClient, kMaxClients> audio_clients_{};
     /// Deck d's places are kPlacesPerDeck * d onwards; null when free.
     std::array<const Track*, kPlaces> places_{};

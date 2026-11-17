@@ -204,15 +204,12 @@ std::optional<Released> Engine::collect() noexcept {
     return released;
 }
 
-// Stubs until the maintainer approves the acceptance tests.
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static): a stub
 std::optional<AudioEvent> Engine::take_event() noexcept {
-    return std::nullopt;
+    return event_consumer_.try_pop();
 }
 
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static): a stub
 std::uint64_t Engine::dropped_events() const noexcept KS_NONBLOCKING {
-    return 0;
+    return dropped_events_.load(std::memory_order_relaxed);
 }
 
 bool Engine::give(const Handover& handover) noexcept {
@@ -249,7 +246,7 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
             }
         }
     }
-    read_commands();
+    read_commands(block);
     mixer_.process(block);
     if (fading_) {
         apply_fade(block);
@@ -385,30 +382,104 @@ bool Engine::apply_load(std::size_t deck, const Track& track) noexcept KS_NONBLO
     return true;
 }
 
-void Engine::read_commands() noexcept KS_NONBLOCKING {
-    for (AudioClient& client : audio_clients_) {
+void Engine::read_commands(const Block& block) noexcept KS_NONBLOCKING {
+    // Slots whose rings were found corrupt in this block: their events come
+    // after every slot's rejections (specs/audio-events/spec.md requirement
+    // 2).
+    std::array<bool, kMaxClients> found_corrupt{};
+    for (std::size_t slot = 0; slot < kMaxClients; ++slot) {
+        AudioClient& client = std::span{audio_clients_}[slot];
         if (!client.consumer.has_value() || client.stats.corrupt) {
             continue;
         }
         CommandConsumer& consumer = *client.consumer;
+        AudioEvent rejected{.kind = AudioEventKind::Rejected,
+                            .index = static_cast<std::uint32_t>(slot),
+                            .count = 0,
+                            .host_time = block.host_time};
         for (std::size_t n = 0; n < kCommandsPerBlock; ++n) {
-            const std::optional<ipc::CommandSlot> slot = consumer.try_pop();
-            if (!slot.has_value()) {
+            const std::optional<ipc::CommandSlot> taken = consumer.try_pop();
+            if (!taken.has_value()) {
                 break;
             }
             ++client.stats.commands_read;
-            client.stats.last_sequence = slot->sequence;
-            const std::expected<Command, Rejection> command = decode(*slot);
+            client.stats.last_sequence = taken->sequence;
+            const std::expected<Command, Rejection> command = decode(*taken);
             if (command.has_value()) {
                 apply(*command, mixer_);
             } else {
                 ++client.stats.rejected;
                 client.stats.last_rejection = command.error();
+                ++rejected.count;
+                rejected.sequence = taken->sequence;
+                rejected.rejection = command.error();
             }
+        }
+        if (rejected.count > 0) {
+            record(rejected);
         }
         if (consumer.corrupt()) {
             client.stats.corrupt = true;
+            std::span{found_corrupt}[slot] = true;
         }
+    }
+    for (std::size_t slot = 0; slot < kMaxClients; ++slot) {
+        if (std::span{found_corrupt}[slot]) {
+            record(AudioEvent{.kind = AudioEventKind::CorruptRing,
+                              .index = static_cast<std::uint32_t>(slot),
+                              .count = 1,
+                              .host_time = block.host_time});
+        }
+    }
+}
+
+void Engine::record(const AudioEvent& event) noexcept KS_NONBLOCKING {
+    if (!event_producer_.try_push(event)) {
+        ++dropped_;
+        dropped_events_.store(dropped_, std::memory_order_relaxed);
+    }
+}
+
+void Engine::record_rendered(const Block& block, const RenderStats& stats) noexcept KS_NONBLOCKING {
+    // The render core's counts only go up; a lower count, from some other
+    // core, just becomes the new baseline.
+    if (stats.late_blocks > last_late_blocks_) {
+        record(AudioEvent{.kind = AudioEventKind::LateBlock,
+                          .count = stats.late_blocks - last_late_blocks_,
+                          .load = stats.render_load,
+                          .duration = stats.render_time,
+                          .host_time = block.host_time});
+    }
+    last_late_blocks_ = stats.late_blocks;
+    if (stats.non_finite_samples > last_non_finite_samples_) {
+        record(AudioEvent{.kind = AudioEventKind::NonFinite,
+                          .count = stats.non_finite_samples - last_non_finite_samples_,
+                          .host_time = block.host_time});
+    }
+    last_non_finite_samples_ = stats.non_finite_samples;
+
+    // Every deck that started waiting, then every deck that stopped.
+    for (std::size_t deck = 0; deck < kDecks; ++deck) {
+        if (mixer_.deck(deck).waiting() && !std::span{waiting_}[deck]) {
+            record(AudioEvent{.kind = AudioEventKind::Waiting,
+                              .index = static_cast<std::uint32_t>(deck),
+                              .count = 1,
+                              .host_time = block.host_time});
+            std::span{waiting_since_}[deck] = block.host_time;
+        }
+    }
+    for (std::size_t deck = 0; deck < kDecks; ++deck) {
+        const bool waiting = mixer_.deck(deck).waiting();
+        bool& was_waiting = std::span{waiting_}[deck];
+        if (!waiting && was_waiting) {
+            record(AudioEvent{.kind = AudioEventKind::WaitEnded,
+                              .index = static_cast<std::uint32_t>(deck),
+                              .count = 1,
+                              .duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  block.host_time - std::span{waiting_since_}[deck]),
+                              .host_time = block.host_time});
+        }
+        was_waiting = waiting;
     }
 }
 
@@ -473,6 +544,8 @@ bool Engine::drain(PendingRelease& release) noexcept KS_NONBLOCKING {
 }
 
 void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_NONBLOCKING {
+    // With or without a state block, and before anything is published.
+    record_rendered(block, stats);
     if (!status_writer_.has_value() || !mixer_writer_.has_value()) {
         return;
     }
