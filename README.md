@@ -13,6 +13,7 @@ Requirements:
 - CMake 3.28 or later, and Ninja
 - [vcpkg](https://github.com/microsoft/vcpkg), with `VCPKG_ROOT` pointing at it
 - Linux: Clang 21 (`sudo tools/llvm.sh 21 all` on Ubuntu and Debian)
+- Linux on x86-64: NASM, which FFmpeg's build needs (`sudo apt install nasm`)
 - macOS: Xcode command-line tools
 
 Configure, build, and run the tests in one step:
