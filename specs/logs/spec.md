@@ -184,7 +184,7 @@ Everywhere:
 - [ ] `[auto]` **Fuzzing:** `ks_log_record_fuzz` formats arbitrary bytes as a `LogRecord`, with an arbitrary `LogClock`. Every result is one valid UTF-8 line with no control characters, and it runs 1,000,000 inputs clean under the `fuzz` preset. (test: `tests/acceptance/logs/record_fuzz.cpp`)
 - [ ] `[auto]` **The earlier steps' tests** all still pass. Three protected test helpers change, so that they never write to the real log folder (decision 8): `KoolSpin` in `tests/acceptance/client-rings/rings_support.h`, and `Supervisor::start()` and `kool_spin_args()` in `tests/acceptance/processes/supervisor_test.cpp`, each pass `--log-dir` inside the test's runtime directory.
 - [ ] `[auto]` **Every CI configuration:** all of the above pass on Linux in every preset, and on macOS arm64 in `debug`, `release`, `asan`, and `tsan`.
-- [ ] `[manual]` **Device events:** with `kool_spin` playing through the Inpulse 500, pulling its USB cable and plugging it back in adds a `warning` line about freewheeling and then an `info` line about playing, with the device's rate and channels, to `ks-engine.log`, at the times it happened. Checked on Linux and on macOS, in the default log folder.
+- [x] `[manual]` **Device events:** with `kool_spin` playing through the Inpulse 500, pulling its USB cable and plugging it back in adds a `warning` line about freewheeling and then an `info` line about playing, with the device's rate and channels, to `ks-engine.log`, at the times it happened. Checked on Linux and on macOS, in the default log folder.
 
 ## Out of scope
 

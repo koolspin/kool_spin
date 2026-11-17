@@ -4,7 +4,7 @@
 
 Each process now logs through a ring in a log segment that the supervisor creates (ADR 0003 §13, `specs/logs/spec.md`). `ks-engine` writes its lines into the segment it gets as descriptor 5 (`--log-fd 5`). `kool_spin` reads that ring at least every 100 ms, and once more after the engine has exited. It writes the engine's lines to `ks-engine.log` and its own to `kool_spin.log`, both in one session folder: `YYYY-MM-DD_HH-MM-SS_<pid>`, under `~/.local/state/kool_spin/logs` (`$XDG_STATE_HOME`) on Linux and `~/Library/Logs/kool_spin` on macOS, or under `--log-dir`. It keeps the newest ten sessions and up to 16 MiB per file. Every line shows the local date and time, converted from the shared steady clock with one offset for the whole session. Standard error gets only `kool_spin`'s warnings and errors. Without a log folder, `kool_spin` runs on, and every line goes to standard error.
 
-All 264 acceptance tests pass, and so do the 33 new unit tests. On Linux, all six workflows passed: `debug`, `asan`, `tsan` and `release` (472 tests each), `rtsan` (474), and `fuzz` (477, with `ks_log_record_fuzz` reading 1,000,000 inputs). `tools/lint.sh` is clean. macOS is checked only in CI.
+All 264 acceptance tests pass, and so do the 33 new unit tests. On Linux, all six workflows passed: `debug`, `asan`, `tsan` and `release` (472 tests each), `rtsan` (474), and `fuzz` (477, with `ks_log_record_fuzz` reading 1,000,000 inputs). `tools/lint.sh` is clean. CI passes the same on Linux and on macOS arm64 (`debug`, `release`, `asan`, `tsan`: 472 of 472 each), as of 175130d. The cable pull was checked by hand on Linux and on macOS.
 
 ## What was built, task by task
 
@@ -65,8 +65,8 @@ No requirement was changed. The plan's "Learnings" records each choice where the
 
 ## To check by hand
 
-- [ ] `[manual]` **Device events:** with `kool_spin` playing through the Inpulse 500, pull its USB cable and plug it back in. `ks-engine.log` should get a `warning` line about freewheeling and then an `info` line about playing, with the device's rate and channels, at the times it happened. Check on Linux and on macOS, in the default log folder.
-- [ ] **CI on macOS arm64** (`debug`, `release`, `asan`, `tsan`): build loops build only on Linux.
-- [ ] **Protected paths:** the spec, including the standard-error amendment; `tests/acceptance/logs/`; and the `--log-dir` changes to the processes and client-rings test helpers, which the spec approves (decision 8). They need the `protected-paths-approved` label.
+- [x] `[manual]` **Device events:** with `kool_spin` playing through the Inpulse 500, pull its USB cable and plug it back in. `ks-engine.log` should get a `warning` line about freewheeling and then an `info` line about playing, with the device's rate and channels, at the times it happened. Check on Linux and on macOS, in the default log folder. Checked by the maintainer on both, 2026-11-16.
+- [x] **CI on macOS arm64** (`debug`, `release`, `asan`, `tsan`): build loops build only on Linux. All four pass, 472 of 472 each.
+- [x] **Protected paths:** the spec, including the standard-error amendment and the device-events tick; `tests/acceptance/logs/`; and the `--log-dir` changes to the processes and client-rings test helpers, which the spec approves (decision 8). They need the `protected-paths-approved` label.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
