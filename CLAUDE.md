@@ -16,7 +16,7 @@ Phase 0 is complete (2026-11-09). It delivered the build, the checks and guardra
 
 Phase 1, the headless engine and process model, is split in two by ADR 0003. Phase 1a, the engine as a library in one process, is complete (2026-11-14). It delivered the shared-memory primitives, the render core and its drivers with device loss, the output safety stage, the deck, the mixer, commands in and state out, the resume state, miniaudio devices, and the development harness (`ks-harness`), soaked for an hour and cable-pulled on the Inpulse 500.
 
-Phase 1b, separate processes (supervisor, engine, decode worker, and the `ks-play` client) and crash recovery, is under way; see `docs/roadmap.md`. Steps 1 to 4a are done: the shared-memory segments, the socket protocol, `kool_spin` starting `ks-engine` and welcoming clients, the clients' command rings, and per-process logs. Next is step 4b, the audio thread's events, built interactively. Update this section as steps land.
+Phase 1b, separate processes (supervisor, engine, decode worker, and the `ks-play` client) and crash recovery, is under way; see `docs/roadmap.md`. Steps 1 to 4b are done: the shared-memory segments, the socket protocol, `kool_spin` starting `ks-engine` and welcoming clients, the clients' command rings, per-process logs, and the audio thread's events in the engine's log. Next is step 5: tracks and the decode worker. Update this section as steps land.
 
 ## Build and test
 
@@ -74,7 +74,7 @@ Code reachable from the audio callback must not:
 
 Mark audio-thread entry points and every function they call `noexcept KS_NONBLOCKING`, from `<ks/core/realtime.h>` (it expands to `[[clang::nonblocking]]`; the build fails if such a function allocates, blocks, or calls an unmarked function). The `rtsan` preset must stay clean. Never suppress a RealtimeSanitizer or function-effect diagnostic without the maintainer's approval.
 
-Under RealtimeSanitizer, a signal handler that interrupts a `KS_NONBLOCKING` function runs as real-time code, even in a process with no audio thread, so its `write()` to a self-pipe is reported. A process that handles signals blocks them with `pthread_sigmask` while it calls `KS_NONBLOCKING` code, such as the shared-memory readers (`SignalsBlocked` in `src/apps/supervisor/run.cpp`), and keeps them blocked on the audio thread. `ks-engine` doesn't yet; step 4b fixes it.
+Under RealtimeSanitizer, a signal handler that interrupts a `KS_NONBLOCKING` function runs as real-time code, even in a process with no audio thread, so its `write()` to a self-pipe is reported. A process that handles signals blocks them with `pthread_sigmask` while it calls `KS_NONBLOCKING` code, such as the shared-memory readers (`SignalsBlocked` in `src/apps/supervisor/run.cpp`), and keeps them blocked on the audio thread. `ks-engine` installs no handlers at all: before any thread starts, it blocks its stop signals, so every thread inherits the mask, and its control thread takes them with `sigpending()` and `sigwait()`.
 
 Talk to the audio thread through lock-free SPSC rings (commands in) and seqlocks (state out), both in shared memory. Commands carry absolute values ("rate 1.02", not "rate up"), so replaying one is harmless. Objects reach the audio thread through a give ring and leave through a retire ring, which the engine's control thread drains and frees. ADR 0003 has the details, including the memory ordering the seqlock needs.
 

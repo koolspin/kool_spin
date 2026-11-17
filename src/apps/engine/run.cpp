@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/engine_app/run.h>
 
+#include <ks/engine/audio_events.h>
 #include <ks/engine/engine.h>
 #include <ks/engine/miniaudio_backend.h>
 #include <ks/engine/output_controller.h>
@@ -20,17 +21,16 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
+#include <algorithm>
 #include <array>
-#include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -51,18 +51,50 @@ using Clock = std::chrono::steady_clock;
 /// How long the engine keeps trying to send Done once it has stopped.
 constexpr std::chrono::seconds kDoneTimeout{1};
 
-// ---- Signals, through a self-pipe (requirement 11) -----------------------------
+// ---- Signals (requirement 11; specs/audio-events/spec.md requirement 9) --------
+//
+// No handlers: the stop signals are blocked in every thread, and the control
+// thread takes them on each pass of its loop. Nothing runs asynchronously, so
+// no handler can run on the audio thread, or inside KS_NONBLOCKING code.
 
-/// The write end of the self-pipe. A signal handler can reach only a global.
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): see above
-std::atomic<int> signal_pipe{-1};
-static_assert(std::atomic<int>::is_always_lock_free, "a signal handler reads it");
+/// The signals that stop the engine.
+constexpr std::array<int, 3> kStopSignals{SIGTERM, SIGINT, SIGHUP};
 
-extern "C" void on_signal(int signal) {
-    const int saved = errno;
-    const auto byte = static_cast<unsigned char>(signal);
-    static_cast<void>(::write(signal_pipe.load(std::memory_order_relaxed), &byte, 1));
-    errno = saved;
+/// kStopSignals, as a set.
+sigset_t stop_signals() noexcept {
+    sigset_t set{};
+    static_cast<void>(sigemptyset(&set));
+    for (const int signal : kStopSignals) {
+        static_cast<void>(sigaddset(&set, signal));
+    }
+    return set;
+}
+
+/// Blocks the stop signals in the calling thread, and so in every thread it
+/// creates from then on. Returns the error, if any. The mask stays until the
+/// process exits: unblocked, a second signal sent during the fade-out would
+/// end the engine by its default action.
+std::error_code block_stop_signals() noexcept {
+    const sigset_t set = stop_signals();
+    return std::error_code{::pthread_sigmask(SIG_BLOCK, &set, nullptr), std::system_category()};
+}
+
+/// Takes a pending stop signal, if there is one. True if it took one.
+bool take_stop_signal() noexcept {
+    sigset_t pending{};
+    static_cast<void>(sigemptyset(&pending));
+    if (::sigpending(&pending) != 0) {
+        return false;
+    }
+    if (!std::ranges::any_of(kStopSignals,
+                             [&](int signal) { return sigismember(&pending, signal) == 1; })) {
+        return false;
+    }
+    // One is pending, and every thread blocks it, so this returns at once.
+    const sigset_t set = stop_signals();
+    int taken = 0;
+    static_cast<void>(::sigwait(&set, &taken));
+    return true;
 }
 
 /// Sets FD_CLOEXEC on `fd`, and O_NONBLOCK too if `nonblocking`. False if
@@ -97,59 +129,6 @@ bool is_stream_socket(int fd) noexcept {
     socklen_t size = sizeof type;
     return ::getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &size) == 0 && type == SOCK_STREAM;
 }
-
-/// A self-pipe that handlers for SIGTERM, SIGINT, and SIGHUP write to.
-class SignalPipe {
-public:
-    static std::expected<SignalPipe, std::error_code> install() {
-        std::array<int, 2> ends{-1, -1};
-        if (::pipe(ends.data()) != 0) {
-            return std::unexpected{std::error_code{errno, std::system_category()}};
-        }
-        SignalPipe pipe{ipc::Fd{ends[0]}, ipc::Fd{ends[1]}};
-        if (!set_flags(ends[0], true) || !set_flags(ends[1], true)) {
-            return std::unexpected{std::error_code{errno, std::system_category()}};
-        }
-        signal_pipe.store(ends[1], std::memory_order_relaxed);
-        for (const int signal : {SIGTERM, SIGINT, SIGHUP}) {
-            struct sigaction action{};
-            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access): sigaction's handler is a
-            // union member
-            action.sa_handler = &on_signal;
-            sigemptyset(&action.sa_mask);
-            if (::sigaction(signal, &action, nullptr) != 0) {
-                return std::unexpected{std::error_code{errno, std::system_category()}};
-            }
-        }
-        return pipe;
-    }
-
-    [[nodiscard]] int read_end() const noexcept { return read_.get(); }
-
-    /// True if a signal has arrived since the last call.
-    [[nodiscard]] bool signalled() const noexcept {
-        bool any = false;
-        std::array<unsigned char, 16> bytes{};
-        for (;;) {
-            const ssize_t got = ::read(read_.get(), bytes.data(), bytes.size());
-            if (got > 0) {
-                any = true;
-                continue;
-            }
-            if (got == -1 && errno == EINTR) {
-                continue;
-            }
-            return any;
-        }
-    }
-
-private:
-    SignalPipe(ipc::Fd read, ipc::Fd write) noexcept
-        : read_{std::move(read)}, write_{std::move(write)} {}
-
-    ipc::Fd read_;
-    ipc::Fd write_;
-};
 
 /// Why the engine couldn't start: its exit status, and a one-line reason.
 struct StartFailure {
@@ -242,6 +221,11 @@ private:
     /// Logs the output's state if it has changed to playing or freewheeling
     /// since the last line about it (specs/logs/spec.md requirement 18).
     void log_output();
+    /// Takes every event the audio thread recorded, and the dropped count,
+    /// and logs the lines EventLines makes of them, with summaries for the
+    /// windows that have ended, or, when `stopping`, for every window that
+    /// counted anything (specs/audio-events/spec.md requirement 8).
+    void log_events(bool stopping);
     int loop();
     /// Handles what the supervisor sent. Returns the request ID of a Stop.
     std::optional<std::uint32_t> read_supervisor(short events);
@@ -276,8 +260,9 @@ private:
     std::unique_ptr<ipc::LogWriter> log_;
     /// The output state in the last line logged about it.
     engine::OutputState logged_output_ = engine::OutputState::Stopped;
+    /// Turns the audio thread's events into lines.
+    engine::EventLines event_lines_;
 
-    std::unique_ptr<SignalPipe> signals_;
     std::unique_ptr<ipc::LockFile> lock_;
     ipc::Fd state_fd_;
     std::unique_ptr<ipc::Region> region_;
@@ -291,11 +276,10 @@ private:
 };
 
 std::expected<void, StartFailure> EngineProcess::start() {
-    std::expected<SignalPipe, std::error_code> signals = SignalPipe::install();
-    if (!signals) {
-        return failure("can't handle signals: " + signals.error().message());
+    // Before any thread exists, so that every thread inherits the mask.
+    if (const std::error_code blocked = block_stop_signals(); blocked) {
+        return failure("can't block signals: " + blocked.message());
     }
-    signals_ = std::make_unique<SignalPipe>(std::move(*signals));
 
     // 1. The descriptors.
     const int supervisor_fd = options_->supervisor_fd.value_or(-1);
@@ -414,26 +398,44 @@ void EngineProcess::log_output() {
     logged_output_ = state;
 }
 
+void EngineProcess::log_events(bool stopping) {
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    std::vector<engine::EventLine> lines;
+    const auto keep = [&lines](std::vector<engine::EventLine> more) {
+        lines.insert(lines.end(), std::make_move_iterator(more.begin()),
+                     std::make_move_iterator(more.end()));
+    };
+    while (const std::optional<engine::AudioEvent> event = engine_->take_event()) {
+        keep(event_lines_.add(*event, now));
+    }
+    keep(event_lines_.dropped(engine_->dropped_events(), now));
+    keep(stopping ? event_lines_.flush(now) : event_lines_.tick(now));
+    for (const engine::EventLine& line : lines) {
+        report(line.level, line.text);
+    }
+}
+
 int EngineProcess::loop() {
     for (;;) {
-        std::array<pollfd, 2> polled{
-            pollfd{.fd = signals_->read_end(), .events = POLLIN, .revents = 0},
-            pollfd{.fd = supervisor_ ? supervisor_->socket() : -1,
-                   .events = static_cast<short>(
-                       supervisor_ && supervisor_->has_queued() ? POLLIN | POLLOUT : POLLIN),
-                   .revents = 0}};
-        static_cast<void>(::poll(polled.data(), static_cast<nfds_t>(polled.size()),
-                                 static_cast<int>(kControlInterval.count())));
+        // The supervisor's socket, if it's still open. Signals don't wake
+        // the poll; they wait for the next pass, at most kControlInterval
+        // away.
+        pollfd polled{.fd = supervisor_ ? supervisor_->socket() : -1,
+                      .events = static_cast<short>(
+                          supervisor_ && supervisor_->has_queued() ? POLLIN | POLLOUT : POLLIN),
+                      .revents = 0};
+        static_cast<void>(::poll(&polled, 1, static_cast<int>(kControlInterval.count())));
 
         controller_->poll();
         log_output();
+        log_events(false);
         collect();
         retry_detaches();
-        if (signals_->signalled()) {
+        if (take_stop_signal()) {
             return stop(std::nullopt, "got a signal");
         }
-        if (polled[1].revents != 0 && supervisor_) {
-            if (const std::optional<std::uint32_t> asked = read_supervisor(polled[1].revents)) {
+        if (polled.revents != 0 && supervisor_) {
+            if (const std::optional<std::uint32_t> asked = read_supervisor(polled.revents)) {
                 return stop(asked, "the supervisor asked");
             }
         }
@@ -609,6 +611,8 @@ void EngineProcess::lose_supervisor(std::string_view why) {
 int EngineProcess::stop(std::optional<std::uint32_t> stop, std::string_view why) {
     report(ipc::LogLevel::Info, std::format("stopping: {}", why));
     controller_->stop();
+    // The output is closed: the audio thread records nothing more.
+    log_events(true);
     if (stop && supervisor_) {
         send(ipc::Message{.request_id = *stop, .body = ipc::msg::Done{}});
         const Clock::time_point deadline = Clock::now() + kDoneTimeout;
