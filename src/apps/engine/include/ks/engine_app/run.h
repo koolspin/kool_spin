@@ -19,8 +19,8 @@ inline constexpr std::chrono::milliseconds kControlInterval{10};
 
 /// Does what `options` asks: prints the usage for --help, and otherwise
 /// starts the engine and runs its control thread until it's stopped.
-/// Installs handlers for SIGTERM, SIGINT, and SIGHUP, so call it once, from
-/// main(). Writes the usage to `out`, and reports to `err`. Returns the exit
+/// Blocks SIGTERM, SIGINT, and SIGHUP and installs no handlers, so call it
+/// once, from main(). Writes the usage to `out`, and reports to `err`. Returns the exit
 /// status: kExitOk once stopped, kExitStartFailed if it couldn't start, or
 /// kExitUsageError for a device number that isn't listed.
 [[nodiscard]] int run(const Options& options, std::ostream& out, std::ostream& err);

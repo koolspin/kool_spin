@@ -3,6 +3,7 @@
 
 #include <ks/ipc/frame.h>
 #include <ks/ipc/state.h>
+#include <ks/ipc/track_segment.h>
 
 #include <algorithm>
 #include <array>
@@ -45,10 +46,14 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
     case static_cast<std::uint16_t>(MessageType::Attached):
     case static_cast<std::uint16_t>(MessageType::Detach):
     case static_cast<std::uint16_t>(MessageType::Detached):
+    case static_cast<std::uint16_t>(MessageType::Probed):
+    case static_cast<std::uint16_t>(MessageType::Decoded):
         return TypeRules{.descriptors = 0, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Welcome):
     case static_cast<std::uint16_t>(MessageType::RingOpened):
     case static_cast<std::uint16_t>(MessageType::Attach):
+    case static_cast<std::uint16_t>(MessageType::Probe):
+    case static_cast<std::uint16_t>(MessageType::Decode):
         return TypeRules{.descriptors = 1, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Error):
         return TypeRules{.descriptors = 0, .request = RequestRule::Any};
@@ -136,6 +141,19 @@ public:
         return value;
     }
 
+    /// The next 8-byte little-endian integer.
+    std::expected<std::uint64_t, MessageError> integer64() noexcept {
+        const std::expected<std::uint32_t, MessageError> low = integer(4);
+        if (!low) {
+            return std::unexpected{low.error()};
+        }
+        const std::expected<std::uint32_t, MessageError> high = integer(4);
+        if (!high) {
+            return std::unexpected{high.error()};
+        }
+        return (std::uint64_t{*high} << 32U) | *low;
+    }
+
     /// The next text field, of at most `max_size` bytes.
     std::expected<std::string, MessageError> text(std::size_t max_size) {
         const std::expected<std::uint32_t, MessageError> size = integer(4);
@@ -180,11 +198,39 @@ void append_integer(std::vector<std::byte>& body, std::uint32_t value, std::size
     }
 }
 
+/// Appends `value` to `body`, little-endian, in 8 bytes.
+void append_integer64(std::vector<std::byte>& body, std::uint64_t value) {
+    append_integer(body, static_cast<std::uint32_t>(value & 0xFFFF'FFFFU), 4);
+    append_integer(body, static_cast<std::uint32_t>(value >> 32U), 4);
+}
+
 /// True if `code` is an ErrorCode.
 bool valid_code(std::uint32_t code) noexcept {
     return code == static_cast<std::uint32_t>(ErrorCode::BadMessage) ||
            code == static_cast<std::uint32_t>(ErrorCode::NotSupported) ||
-           code == static_cast<std::uint32_t>(ErrorCode::Unavailable);
+           code == static_cast<std::uint32_t>(ErrorCode::Unavailable) ||
+           code == static_cast<std::uint32_t>(ErrorCode::Refused);
+}
+
+/// True if a Probed's fields are in range (specs/decode-worker/spec.md
+/// requirement 8).
+bool valid_probed(const msg::Probed& probed) noexcept {
+    return probed.sample_rate >= kMinTrackRate && probed.sample_rate <= kMaxTrackRate &&
+           probed.channels >= 1 && probed.channels <= kMaxProbedChannels &&
+           probed.estimated_frames <= kMaxTrackFrames;
+}
+
+/// True if a Decode's limit is in range.
+bool valid_decode(const msg::Decode& decode) noexcept {
+    return decode.max_frames >= 1 && decode.max_frames <= kMaxTrackFrames;
+}
+
+/// True if a Decoded's fields are in range: its status says how decoding
+/// ended.
+bool valid_decoded(const msg::Decoded& decoded) noexcept {
+    return decoded.frames <= kMaxTrackFrames &&
+           (decoded.status == TrackStatus::Complete || decoded.status == TrackStatus::Truncated ||
+            decoded.status == TrackStatus::Failed);
 }
 
 /// True if `slot` is a client slot's index (specs/client-rings/spec.md
@@ -209,6 +255,74 @@ std::expected<Message, MessageError> slot_body(const Frame& frame) {
         return std::unexpected{MessageError::LongBody};
     }
     return Message{.request_id = frame.request_id, .body = Body{.slot = *slot}};
+}
+
+/// A Probed's body.
+std::expected<Message, MessageError> probed_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint32_t, MessageError> rate = reader.integer(4);
+    if (!rate) {
+        return std::unexpected{rate.error()};
+    }
+    const std::expected<std::uint32_t, MessageError> channels = reader.integer(4);
+    if (!channels) {
+        return std::unexpected{channels.error()};
+    }
+    const std::expected<std::uint64_t, MessageError> estimated = reader.integer64();
+    if (!estimated) {
+        return std::unexpected{estimated.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    const msg::Probed probed{
+        .sample_rate = *rate, .channels = *channels, .estimated_frames = *estimated};
+    if (!valid_probed(probed)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id, .body = probed};
+}
+
+/// A Decode's body.
+std::expected<Message, MessageError> decode_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint64_t, MessageError> max_frames = reader.integer64();
+    if (!max_frames) {
+        return std::unexpected{max_frames.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    const msg::Decode decode{.max_frames = *max_frames};
+    if (!valid_decode(decode)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id, .body = decode};
+}
+
+/// A Decoded's body.
+std::expected<Message, MessageError> decoded_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint64_t, MessageError> frames = reader.integer64();
+    if (!frames) {
+        return std::unexpected{frames.error()};
+    }
+    const std::expected<std::uint32_t, MessageError> status = reader.integer(1);
+    if (!status) {
+        return std::unexpected{status.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    // Checked before the cast, so no value outside TrackStatus is made.
+    if (*status > static_cast<std::uint32_t>(TrackStatus::Failed)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    const msg::Decoded decoded{.frames = *frames, .status = static_cast<TrackStatus>(*status)};
+    if (!valid_decoded(decoded)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id, .body = decoded};
 }
 
 /// An Error message's body.
@@ -321,6 +435,18 @@ std::optional<MessageType> type_of(const Message& message) noexcept {
     if (std::holds_alternative<msg::Detached>(body)) {
         return MessageType::Detached;
     }
+    if (std::holds_alternative<msg::Probe>(body)) {
+        return MessageType::Probe;
+    }
+    if (std::holds_alternative<msg::Probed>(body)) {
+        return MessageType::Probed;
+    }
+    if (std::holds_alternative<msg::Decode>(body)) {
+        return MessageType::Decode;
+    }
+    if (std::holds_alternative<msg::Decoded>(body)) {
+        return MessageType::Decoded;
+    }
     return std::nullopt;
 }
 
@@ -391,12 +517,14 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         return slot_body<msg::Detach>(frame);
     case MessageType::Detached:
         return empty_body<msg::Detached>(frame);
-    // Stubs until the maintainer approves the acceptance tests.
     case MessageType::Probe:
+        return empty_body<msg::Probe>(frame);
     case MessageType::Probed:
+        return probed_body(frame);
     case MessageType::Decode:
+        return decode_body(frame);
     case MessageType::Decoded:
-        return std::unexpected{MessageError::UnknownType};
+        return decoded_body(frame);
     }
     return std::unexpected{MessageError::UnknownType};
 }
@@ -423,6 +551,24 @@ std::expected<Frame, MessageError> encode(const Message& message) {
             return std::unexpected{MessageError::BadField};
         }
         append_text(frame.body, name);
+    } else if (const auto* const probed = std::get_if<msg::Probed>(&message.body)) {
+        if (!valid_probed(*probed)) {
+            return std::unexpected{MessageError::BadField};
+        }
+        append_integer(frame.body, probed->sample_rate, 4);
+        append_integer(frame.body, probed->channels, 4);
+        append_integer64(frame.body, probed->estimated_frames);
+    } else if (const auto* const decode = std::get_if<msg::Decode>(&message.body)) {
+        if (!valid_decode(*decode)) {
+            return std::unexpected{MessageError::BadField};
+        }
+        append_integer64(frame.body, decode->max_frames);
+    } else if (const auto* const decoded = std::get_if<msg::Decoded>(&message.body)) {
+        if (!valid_decoded(*decoded)) {
+            return std::unexpected{MessageError::BadField};
+        }
+        append_integer64(frame.body, decoded->frames);
+        append_integer(frame.body, static_cast<std::uint32_t>(decoded->status), 1);
     } else if (const std::optional<std::uint32_t> slot = slot_of(message)) {
         if (!valid_slot(*slot)) {
             return std::unexpected{MessageError::BadField};
