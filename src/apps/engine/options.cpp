@@ -71,9 +71,9 @@ std::expected<int, std::string> parse_fd(std::string_view option, std::string_vi
 }
 
 bool takes_value(std::string_view arg) noexcept {
-    return arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--runtime-dir" ||
-           arg == "--backend" || arg == "--device" || arg == "--rate" || arg == "--channels" ||
-           arg == "--period";
+    return arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd" ||
+           arg == "--runtime-dir" || arg == "--backend" || arg == "--device" || arg == "--rate" ||
+           arg == "--channels" || arg == "--period";
 }
 
 /// The output options, one of which `arg` is.
@@ -116,12 +116,18 @@ std::expected<void, std::string> apply_output(Options& options, std::string_view
 /// Applies `value` to the option `arg`, one of those takes_value() accepts.
 std::expected<void, std::string> apply_value(Options& options, std::string_view arg,
                                              std::string_view value) {
-    if (arg == "--supervisor-fd" || arg == "--state-fd") {
+    if (arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd") {
         const std::expected<int, std::string> fd = parse_fd(arg, value);
         if (!fd) {
             return std::unexpected{fd.error()};
         }
-        return set_once(arg == "--state-fd" ? options.state_fd : options.supervisor_fd, arg, *fd);
+        if (arg == "--state-fd") {
+            return set_once(options.state_fd, arg, *fd);
+        }
+        if (arg == "--log-fd") {
+            return set_once(options.log_fd, arg, *fd);
+        }
+        return set_once(options.supervisor_fd, arg, *fd);
     }
     if (arg == "--runtime-dir") {
         if (value.empty()) {
@@ -140,7 +146,9 @@ std::string usage() {
         "options]\n"
         "\n"
         "The engine process. kool_spin starts it and gives it the first three\n"
-        "options; the output options come from after kool_spin's --.\n"
+        "options, and --log-fd <n>, its log segment; the output options come\n"
+        "from after kool_spin's --. Without --log-fd, it reports to standard\n"
+        "error.\n"
         "\n"
         "Output options:\n"
         "  --backend <name>   the audio backend: system (default), null, pulseaudio,\n"

@@ -39,6 +39,9 @@ struct Options {
     std::optional<int> supervisor_fd;
     /// The engine-state segment.
     std::optional<int> state_fd;
+    /// The log segment, if the supervisor gives one (specs/logs/spec.md
+    /// requirement 16).
+    std::optional<int> log_fd;
     std::optional<std::filesystem::path> runtime_dir;
     std::optional<engine::MiniaudioBackends> backend;
     /// A device number, as `ks-harness --list-devices` numbers them. Checked

@@ -40,6 +40,10 @@ std::string usage() {
            "Options:\n"
            "  --runtime-dir <path>  the runtime directory (default: $XDG_RUNTIME_DIR/kool_spin\n"
            "                        on Linux, $TMPDIR/kool_spin on macOS)\n"
+           "  --log-dir <path>      the folder for each session's log files (default:\n"
+           "                        $XDG_STATE_HOME/kool_spin/logs or\n"
+           "                        ~/.local/state/kool_spin/logs on Linux,\n"
+           "                        ~/Library/Logs/kool_spin on macOS)\n"
            "  --engine <path>       the ks-engine program (default: ks-engine next to\n"
            "                        kool_spin)\n"
            "  --help                print this text and exit\n"
@@ -65,13 +69,17 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
             }
             return options;
         }
-        if (arg == "--runtime-dir" || arg == "--engine") {
+        if (arg == "--runtime-dir" || arg == "--log-dir" || arg == "--engine") {
             if (i + 1 >= args.size()) {
                 return std::unexpected{std::format("kool_spin: {} needs a value", arg)};
             }
-            std::optional<std::filesystem::path>& field =
-                arg == "--engine" ? options.engine : options.runtime_dir;
-            if (auto set = set_path(field, arg, args[++i]); !set) {
+            std::optional<std::filesystem::path>* field = &options.runtime_dir;
+            if (arg == "--engine") {
+                field = &options.engine;
+            } else if (arg == "--log-dir") {
+                field = &options.log_dir;
+            }
+            if (auto set = set_path(*field, arg, args[++i]); !set) {
                 return std::unexpected{std::move(set.error())};
             }
             continue;

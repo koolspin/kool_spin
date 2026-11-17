@@ -7,15 +7,20 @@
 #include <ks/ipc/fd_passing.h>
 #include <ks/ipc/frame.h>
 #include <ks/ipc/listener.h>
+#include <ks/ipc/log.h>
 #include <ks/ipc/messages.h>
+#include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/segment.h>
 #include <ks/ipc/state.h>
+#include <ks/supervisor/log_dir.h>
+#include <ks/supervisor/log_file.h>
 #include <ks/supervisor/options.h>
 #include <ks/supervisor/spawn.h>
 
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -54,6 +59,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 // ---- Signals, through a self-pipe (requirement 16) -----------------------------
+
+/// The signals the supervisor handles.
+constexpr std::array<int, 4> kHandledSignals{SIGCHLD, SIGINT, SIGTERM, SIGHUP};
 
 /// The write end of the self-pipe. A signal handler can reach only a global.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables): see above
@@ -133,6 +141,41 @@ private:
     ipc::Fd write_;
 };
 
+/// Blocks the handled signals in this thread while it lives, then restores
+/// the thread's mask. A signal that arrives meanwhile is handled then.
+///
+/// The shared-memory primitives are KS_NONBLOCKING, so RealtimeSanitizer
+/// counts a signal handler that interrupts one as real-time code, and
+/// on_signal()'s write() as a violation. The supervisor isn't real-time,
+/// but it reads shared memory only inside one of these, so no handler runs
+/// there.
+class SignalsBlocked {
+public:
+    SignalsBlocked() noexcept {
+        sigset_t handled{};
+        static_cast<void>(sigemptyset(&handled));
+        for (const int signal : kHandledSignals) {
+            static_cast<void>(sigaddset(&handled, signal));
+        }
+        blocked_ = ::pthread_sigmask(SIG_BLOCK, &handled, &previous_) == 0;
+    }
+
+    SignalsBlocked(const SignalsBlocked&) = delete;
+    SignalsBlocked& operator=(const SignalsBlocked&) = delete;
+    SignalsBlocked(SignalsBlocked&&) = delete;
+    SignalsBlocked& operator=(SignalsBlocked&&) = delete;
+
+    ~SignalsBlocked() {
+        if (blocked_) {
+            static_cast<void>(::pthread_sigmask(SIG_SETMASK, &previous_, nullptr));
+        }
+    }
+
+private:
+    sigset_t previous_{};
+    bool blocked_ = false;
+};
+
 // ---- Small helpers ----------------------------------------------------------
 
 /// How a process ended, from its wait status, for a report.
@@ -154,6 +197,13 @@ int poll_timeout(std::optional<Clock::time_point> deadline) {
     }
     const auto left = std::chrono::ceil<std::chrono::milliseconds>(*deadline - Clock::now());
     return static_cast<int>(std::clamp<std::int64_t>(left.count(), 0, 60'000));
+}
+
+/// std::chrono::steady_clock now, in nanoseconds: a log line's time.
+std::uint64_t steady_now_ns() {
+    const auto since =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch());
+    return static_cast<std::uint64_t>(since.count());
 }
 
 /// The text of an Error message.
@@ -230,13 +280,60 @@ public:
     }
 
 private:
-    void report(std::string_view line) const {
-        *err_ << "kool_spin: " << line << '\n' << std::flush;
+    /// Every report goes through here (specs/logs/spec.md requirements 13
+    /// and 15): to kool_spin.log, and, for a warning or an error, to standard
+    /// error too. Without a log file, every line goes to standard error.
+    ///
+    /// A kool_spin.log that fails is reported once, on standard error, and
+    /// every later line goes there instead (requirement 13).
+    void report(ipc::LogLevel level, std::string_view line) {
+        bool in_file = false;
+        if (log_ && !log_->error()) {
+            static_cast<void>(log_->write(steady_now_ns(), level, line));
+            if (const std::optional<std::error_code> failed = log_->error()) {
+                *err_ << "kool_spin: "
+                      << std::format("kool_spin.log failed: {}; log lines go to standard error",
+                                     failed->message())
+                      << '\n';
+            } else {
+                in_file = true;
+            }
+        }
+        if (!in_file || level != ipc::LogLevel::Info) {
+            *err_ << "kool_spin: " << line << '\n' << std::flush;
+        }
     }
+    void info(std::string_view line) { report(ipc::LogLevel::Info, line); }
+    void warning(std::string_view line) { report(ipc::LogLevel::Warning, line); }
+    void error(std::string_view line) { report(ipc::LogLevel::Error, line); }
 
     /// Requirement 15, steps 1 to 5. Returns kExitOk, or reports and returns
     /// kExitStartFailed.
     int start();
+
+    /// Reads the session's clock, and creates the log folder, the session
+    /// folder, and kool_spin.log (specs/logs/spec.md requirement 12). If one
+    /// can't be created, warns once, and the supervisor runs without log
+    /// files (requirement 13).
+    void open_logs();
+    /// Creates ks-engine.log in the session folder, if there is one.
+    void open_engine_log();
+
+    /// Writes every record in the engine's log ring to ks-engine.log, and
+    /// what was dropped, until the ring is empty (specs/logs/spec.md
+    /// requirement 14). Reads at most a ring's worth, so an engine that
+    /// writes without pause can't hold up the poll loop.
+    void drain_engine_log();
+    /// One of the engine's records, in ks-engine.log or on standard error.
+    void engine_line(const ipc::LogRecord& record);
+    /// A line of the supervisor's own about the engine's log, in
+    /// ks-engine.log or on standard error.
+    void engine_note(ipc::LogLevel level, std::string_view text);
+    /// True if ks-engine.log is there and hasn't failed.
+    [[nodiscard]] bool engine_file() const { return engine_log_ && !engine_log_->error(); }
+    /// After a write to ks-engine.log: reports it, once, if it has just
+    /// failed. Returns whether it still works.
+    bool engine_file_ok();
 
     /// One pass of the poll loop. Returns the exit status once the
     /// supervisor is done.
@@ -268,8 +365,10 @@ private:
     void handle_client_message(Client& client, const ipc::Message& message);
     void send_to_client(Client& client, const ipc::Message& message, std::span<const int> fds = {});
     void refuse_and_drop(Client& client, std::uint32_t request_id, std::string why);
-    void drop(Client& client, std::string_view why);
-    void begin_stop();
+    /// Drops `client`, and reports it at `level`: info for a client that
+    /// closed its connection, and a warning for anything else.
+    void drop(Client& client, std::string_view why, ipc::LogLevel level = ipc::LogLevel::Warning);
+    void begin_stop(std::string_view why);
     std::optional<int> deadline_passed();
     void kill_engine();
     void flush_clients();
@@ -282,6 +381,21 @@ private:
     std::unique_ptr<ipc::SegmentFactory> factory_;
     ipc::Fd state_;
     std::unique_ptr<SignalPipe> signals_;
+
+    /// Read once, as the session starts: it converts every line's time.
+    ipc::LogClock clock_;
+    /// The session folder; empty if there are no log files.
+    std::filesystem::path session_;
+    /// kool_spin.log; null if there are no log files.
+    std::unique_ptr<LogFile> log_;
+    /// The engine's log segment, kept until the supervisor exits.
+    ipc::Fd engine_log_segment_;
+    /// The supervisor's mapping of the engine's log segment, kept until it
+    /// exits, and the reader of its ring.
+    std::unique_ptr<ipc::Region> engine_log_region_;
+    std::unique_ptr<ipc::LogReader> engine_log_reader_;
+    /// ks-engine.log; null if it couldn't be created.
+    std::unique_ptr<LogFile> engine_log_;
 
     pid_t engine_pid_ = 0;
     std::unique_ptr<ipc::Connection> engine_;
@@ -303,8 +417,8 @@ private:
 int Supervisor::start() {
     dir_ = options_->runtime_dir.value_or(ipc::default_runtime_directory_path());
     if (const auto opened = ipc::open_runtime_directory(dir_); !opened) {
-        report(std::format("can't use the runtime directory {}: {}", dir_.string(),
-                           opened.error().message()));
+        error(std::format("can't use the runtime directory {}: {}", dir_.string(),
+                          opened.error().message()));
         return kExitStartFailed;
     }
 
@@ -312,27 +426,27 @@ int Supervisor::start() {
         ipc::LockFile::acquire(dir_, ipc::kSupervisorLockName);
     if (!lock) {
         if (lock.error().holder) {
-            report(std::format("another supervisor is running (process {})",
-                               lock.error().holder.value_or(0)));
+            error(std::format("another supervisor is running (process {})",
+                              lock.error().holder.value_or(0)));
         } else {
-            report(std::format("can't take the supervisor lock: {}", lock.error().error.message()));
+            error(std::format("can't take the supervisor lock: {}", lock.error().error.message()));
         }
         return kExitStartFailed;
     }
     lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+    open_logs();
 
     const std::expected<ipc::LockState, std::error_code> engine_lock =
         ipc::probe_lock(dir_, ipc::kEngineLockName);
     if (!engine_lock) {
-        report(std::format("can't check the engine lock: {}", engine_lock.error().message()));
+        error(std::format("can't check the engine lock: {}", engine_lock.error().message()));
         return kExitStartFailed;
     }
     if (engine_lock->held) {
-        report(engine_lock->pid
-                   ? std::format("an engine from an earlier session is still running "
-                                 "(process {})",
-                                 *engine_lock->pid)
-                   : std::string{"an engine from an earlier session is still running"});
+        error(engine_lock->pid ? std::format("an engine from an earlier session is still running "
+                                             "(process {})",
+                                             *engine_lock->pid)
+                               : std::string{"an engine from an earlier session is still running"});
         return kExitStartFailed;
     }
 
@@ -343,13 +457,13 @@ int Supervisor::start() {
                    default_engine_path()) {
         engine = std::move(*found);
     } else {
-        report(std::format("can't find ks-engine: {}", found.error().message()));
+        error(std::format("can't find ks-engine: {}", found.error().message()));
         return kExitStartFailed;
     }
 
     std::expected<ipc::SegmentFactory, std::error_code> factory = ipc::SegmentFactory::open(dir_);
     if (!factory) {
-        report(std::format("can't create segments: {}", factory.error().message()));
+        error(std::format("can't create segments: {}", factory.error().message()));
         return kExitStartFailed;
     }
     factory_ = std::make_unique<ipc::SegmentFactory>(std::move(*factory));
@@ -357,39 +471,175 @@ int Supervisor::start() {
         factory_->create(ipc::SegmentKind::EngineState, ipc::kEngineStateLayoutVersion,
                          ipc::kEngineStateSegmentSize);
     if (!state) {
-        report(std::format("can't create the engine-state segment: {}", state.error().message()));
+        error(std::format("can't create the engine-state segment: {}", state.error().message()));
         return kExitStartFailed;
     }
     state_ = std::move(*state);
+    std::expected<ipc::Fd, std::error_code> engine_log =
+        factory_->create(ipc::SegmentKind::Log, ipc::kLogLayoutVersion, ipc::kLogSegmentSize);
+    if (!engine_log) {
+        error(
+            std::format("can't create the engine's log segment: {}", engine_log.error().message()));
+        return kExitStartFailed;
+    }
+    engine_log_segment_ = std::move(*engine_log);
+    std::expected<ipc::Region, ipc::MapFailure> engine_log_region =
+        ipc::Region::map(engine_log_segment_.get(), ipc::SegmentKind::Log, ipc::kLogLayoutVersion,
+                         ipc::Access::ReadWrite);
+    if (!engine_log_region) {
+        error("can't map the engine's log segment");
+        return kExitStartFailed;
+    }
+    engine_log_region_ = std::make_unique<ipc::Region>(std::move(*engine_log_region));
+    // at() checks against the size of the supervisor's own mapping.
+    auto* const engine_log_ring = engine_log_region_->at<ipc::LogSegment>(ipc::kSegmentHeaderSize);
+    if (engine_log_ring == nullptr) {
+        error("the engine's log segment is too small");
+        return kExitStartFailed;
+    }
+    engine_log_reader_ = std::make_unique<ipc::LogReader>(*engine_log_ring);
 
-    constexpr std::array<int, 4> kSignals{SIGCHLD, SIGINT, SIGTERM, SIGHUP};
-    std::expected<SignalPipe, std::error_code> signals = SignalPipe::install(kSignals);
+    std::expected<SignalPipe, std::error_code> signals = SignalPipe::install(kHandledSignals);
     if (!signals) {
-        report(std::format("can't handle signals: {}", signals.error().message()));
+        error(std::format("can't handle signals: {}", signals.error().message()));
         return kExitStartFailed;
     }
     signals_ = std::make_unique<SignalPipe>(std::move(*signals));
 
     std::expected<std::pair<ipc::Fd, ipc::Fd>, std::error_code> pair = ipc::socket_pair();
     if (!pair || !set_nonblocking_cloexec(pair->first.get())) {
-        report("can't create the engine's socket");
+        error("can't create the engine's socket");
         return kExitStartFailed;
     }
-    std::vector<std::string> args{"--supervisor-fd", "3",          "--state-fd", "4",
-                                  "--runtime-dir",   dir_.string()};
+    std::vector<std::string> args{"--supervisor-fd", "3", "--state-fd",    "4",
+                                  "--log-fd",        "5", "--runtime-dir", dir_.string()};
     args.insert(args.end(), options_->engine_args.begin(), options_->engine_args.end());
-    const std::array<Inherit, 2> fds{Inherit{.parent = pair->second.get(), .child = 3},
-                                     Inherit{.parent = state_.get(), .child = 4}};
+    const std::array<Inherit, 3> fds{Inherit{.parent = pair->second.get(), .child = 3},
+                                     Inherit{.parent = state_.get(), .child = 4},
+                                     Inherit{.parent = engine_log_segment_.get(), .child = 5}};
+    open_engine_log();
     const std::expected<pid_t, std::error_code> pid = spawn(engine, args, fds);
     if (!pid) {
-        report(std::format("can't start {}: {}", engine.string(), pid.error().message()));
+        error(std::format("can't start {}: {}", engine.string(), pid.error().message()));
         return kExitStartFailed;
     }
     engine_pid_ = *pid;
     engine_ = std::make_unique<ipc::Connection>(std::move(pair->first));
-    report(std::format("started ks-engine (process {})", engine_pid_));
+    info(std::format("started ks-engine (process {})", engine_pid_));
     deadline_ = Clock::now() + kEngineReadyTimeout;
     return kExitOk;
+}
+
+void Supervisor::open_logs() {
+    clock_ = ipc::LogClock::now();
+    constexpr std::string_view kInstead = "log lines go to standard error";
+    const std::optional<std::filesystem::path> dir =
+        options_->log_dir ? options_->log_dir : default_log_dir();
+    if (!dir) {
+        warning(std::format("no log folder: HOME isn't set to an absolute path; {}", kInstead));
+        return;
+    }
+    if (const std::error_code failed = create_log_dir(*dir)) {
+        warning(std::format("can't create the log folder {}: {}; {}", dir->string(),
+                            failed.message(), kInstead));
+        return;
+    }
+    remove_old_sessions(*dir);
+    const std::optional<std::string> name = session_name(clock_, ::getpid());
+    if (!name) {
+        warning(std::format("can't name a session folder in {}: the clock is out of range; {}",
+                            dir->string(), kInstead));
+        return;
+    }
+    const std::filesystem::path session = *dir / *name;
+    if (::mkdir(session.c_str(), 0700) != 0) {
+        warning(std::format("can't create the session folder {}: {}; {}", session.string(),
+                            std::error_code{errno, std::system_category()}.message(), kInstead));
+        return;
+    }
+    const std::filesystem::path file = session / "kool_spin.log";
+    std::expected<LogFile, std::error_code> log = LogFile::create(file, "kool_spin", clock_);
+    if (!log) {
+        warning(
+            std::format("can't create {}: {}; {}", file.string(), log.error().message(), kInstead));
+        return;
+    }
+    session_ = session;
+    log_ = std::make_unique<LogFile>(std::move(*log));
+}
+
+void Supervisor::open_engine_log() {
+    if (session_.empty()) {
+        return;
+    }
+    const std::filesystem::path file = session_ / "ks-engine.log";
+    std::expected<LogFile, std::error_code> log = LogFile::create(file, "ks-engine", clock_);
+    if (!log) {
+        warning(std::format("can't create {}: {}; the engine's lines go to standard error",
+                            file.string(), log.error().message()));
+        return;
+    }
+    engine_log_ = std::make_unique<LogFile>(std::move(*log));
+}
+
+void Supervisor::drain_engine_log() {
+    // Every call into the reader runs inside this (see SignalsBlocked).
+    const SignalsBlocked blocked;
+    if (!engine_log_reader_ || engine_log_reader_->corrupt()) {
+        return;
+    }
+    for (std::size_t i = 0; i < ipc::kLogRingCapacity; ++i) {
+        const std::optional<ipc::LogRecord> record = engine_log_reader_->next();
+        if (!record) {
+            break;
+        }
+        engine_line(*record);
+    }
+    const std::uint64_t dropped =
+        engine_log_reader_->corrupt() ? 0 : engine_log_reader_->take_dropped();
+    if (engine_log_reader_->corrupt()) {
+        constexpr std::string_view kCorrupt =
+            "the engine's log ring is corrupt; it won't be read again";
+        engine_note(ipc::LogLevel::Error, kCorrupt);
+        error(kCorrupt);
+        return;
+    }
+    if (dropped > 0) {
+        engine_note(ipc::LogLevel::Warning,
+                    std::format("{} {} dropped because the engine's log ring was full", dropped,
+                                dropped == 1 ? "line was" : "lines were"));
+    }
+}
+
+void Supervisor::engine_line(const ipc::LogRecord& record) {
+    if (engine_file()) {
+        static_cast<void>(engine_log_->write(record));
+        if (engine_file_ok()) {
+            return;
+        }
+    }
+    *err_ << "ks-engine: " << ipc::format_log_record(clock_, record) << '\n' << std::flush;
+}
+
+void Supervisor::engine_note(ipc::LogLevel level, std::string_view text) {
+    const std::uint64_t now = steady_now_ns();
+    if (engine_file()) {
+        static_cast<void>(engine_log_->write(now, level, text));
+        if (engine_file_ok()) {
+            return;
+        }
+    }
+    *err_ << "ks-engine: " << ipc::format_log_line(clock_, now, level, text) << '\n' << std::flush;
+}
+
+bool Supervisor::engine_file_ok() {
+    const std::optional<std::error_code> failed = engine_log_->error();
+    if (!failed) {
+        return true;
+    }
+    error(std::format("ks-engine.log failed: {}; the engine's lines go to standard error",
+                      failed->message()));
+    return false;
 }
 
 std::optional<int> Supervisor::step() {
@@ -407,12 +657,19 @@ std::optional<int> Supervisor::step() {
         polled.push_back(
             {.fd = client.connection.socket(), .events = out_if(client.connection), .revents = 0});
     }
-    const int ready =
-        ::poll(polled.data(), static_cast<nfds_t>(polled.size()), poll_timeout(deadline_));
-    if (ready == -1 && errno != EINTR) {
-        report(std::format("poll failed: {}",
-                           std::error_code{errno, std::system_category()}.message()));
+    // While the engine runs, its log ring is read at least every
+    // kLogDrainInterval (specs/logs/spec.md requirement 14).
+    int timeout = poll_timeout(deadline_);
+    if (engine_pid_ > 0) {
+        const auto drain = static_cast<int>(kLogDrainInterval.count());
+        timeout = timeout == -1 ? drain : std::min(timeout, drain);
     }
+    const int ready = ::poll(polled.data(), static_cast<nfds_t>(polled.size()), timeout);
+    if (ready == -1 && errno != EINTR) {
+        error(std::format("poll failed: {}",
+                          std::error_code{errno, std::system_category()}.message()));
+    }
+    drain_engine_log();
 
     if (const std::optional<int> status = handle_signals()) {
         return status;
@@ -436,8 +693,7 @@ std::optional<int> Supervisor::step() {
 std::optional<int> Supervisor::handle_signals() {
     for (const int signal : signals_->take()) {
         if (signal != SIGCHLD) {
-            report(std::format("got signal {}", signal));
-            begin_stop();
+            begin_stop(std::format("got signal {}", signal));
             continue;
         }
         int status = 0;
@@ -454,27 +710,32 @@ std::optional<int> Supervisor::handle_signals() {
 
 std::optional<int> Supervisor::engine_exited(int status) {
     engine_pid_ = 0;
+    // Its last lines, before how it ended (requirement 14).
+    drain_engine_log();
     const std::string how = how_it_ended(status);
+    const bool clean = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (forced_status_) {
-        report(std::format("ks-engine {}", how));
+        // The supervisor is stopping it after a failure it has reported.
+        report(clean ? ipc::LogLevel::Info : ipc::LogLevel::Error,
+               std::format("ks-engine {}", how));
         return forced_status_;
     }
     switch (phase_) {
     case Phase::Starting:
-        report(std::format("ks-engine {} before it was ready", how));
+        error(std::format("ks-engine {} before it was ready", how));
         return kExitStartFailed;
     case Phase::Running:
     case Phase::Terminating:
-        report(std::format("ks-engine {}", how));
+        error(std::format("ks-engine {}", how));
         return kExitEngineFailed;
     case Phase::Stopping:
         break;
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        report(std::format("ks-engine {} while stopping", how));
+    if (!clean) {
+        error(std::format("ks-engine {} while stopping", how));
         return kExitEngineFailed;
     }
-    report("ks-engine stopped");
+    info("ks-engine stopped");
     for (Client& client : clients_) {
         for (const std::uint32_t id : std::exchange(client.stops, {})) {
             send_to_client(client, ipc::Message{.request_id = id, .body = ipc::msg::Done{}});
@@ -522,12 +783,12 @@ void Supervisor::handle_engine(short events) {
 void Supervisor::handle_engine_message(const ipc::Message& message) {
     const std::uint32_t id = message.request_id;
     if (std::holds_alternative<ipc::msg::Ready>(message.body) && phase_ == Phase::Starting) {
-        report("ks-engine is ready");
+        info("ks-engine is ready");
         std::expected<ipc::Listener, std::error_code> listener = ipc::Listener::open(dir_);
         if (!listener) {
-            report(std::format("can't open the supervisor socket: {}", listener.error().message()));
+            error(std::format("can't open the supervisor socket: {}", listener.error().message()));
             forced_status_ = kExitStartFailed;
-            begin_stop();
+            begin_stop("it couldn't start");
             return;
         }
         listener_ = std::make_unique<ipc::Listener>(std::move(*listener));
@@ -539,7 +800,7 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
         send_to_engine(ipc::Message{.request_id = id, .body = ipc::msg::Pong{}});
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         if (!attach_refused(id, *error) && !detach_refused(id, *error)) {
-            report(std::format("ks-engine reported an error: {}", error->text));
+            warning(std::format("ks-engine reported an error: {}", error->text));
         }
     } else if (const auto* const attached = std::get_if<ipc::msg::Attached>(&message.body)) {
         if (!ring_attached(id, attached->slot)) {
@@ -582,14 +843,15 @@ Client* Supervisor::find_client(std::uint64_t id) {
 }
 
 void Supervisor::open_ring(Client& client, std::uint32_t id) {
+    info(std::format("client '{}' asked for a ring", client.name));
     if (client.ring || client.opening) {
-        report(std::format("refused client '{}' a second ring", client.name));
+        warning(std::format("refused client '{}' a second ring", client.name));
         send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported,
                                              "a client has one ring at a time"));
         return;
     }
     if (phase_ != Phase::Running) {
-        report(std::format("refused client '{}' a ring: stopping", client.name));
+        warning(std::format("refused client '{}' a ring: stopping", client.name));
         send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported, "stopping"));
         return;
     }
@@ -599,7 +861,7 @@ void Supervisor::open_ring(Client& client, std::uint32_t id) {
     if (!segment) {
         const std::string why =
             std::format("can't create a ring segment: {}", segment.error().message());
-        report(std::format("refused client '{}' a ring: {}", client.name, why));
+        warning(std::format("refused client '{}' a ring: {}", client.name, why));
         send_to_client(client, error_message(id, ipc::ErrorCode::Unavailable, why));
         return;
     }
@@ -627,7 +889,7 @@ bool Supervisor::ring_attached(std::uint32_t id, std::uint32_t slot) {
         return true;
     }
     client->opening = false;
-    report(std::format("client '{}' opened a ring in slot {}", client->name, slot));
+    info(std::format("client '{}' opened a ring in slot {}", client->name, slot));
     const std::array<int, 1> fds{pending.segment.get()};
     // The ring is the client's before the answer is sent: if sending drops
     // the client, drop() detaches it.
@@ -645,7 +907,7 @@ bool Supervisor::ring_detached(std::uint32_t id) {
     if (found == detaches_.end()) {
         return false;
     }
-    report(std::format("the ring in slot {} was detached", found->slot));
+    info(std::format("the ring in slot {} was detached", found->slot));
     detaches_.erase(found);
     return true;
 }
@@ -659,11 +921,11 @@ bool Supervisor::attach_refused(std::uint32_t id, const ipc::msg::Error& error) 
     attaches_.erase(found);
     Client* const client = find_client(pending.client);
     if (client == nullptr) {
-        report(std::format("ks-engine refused a ring: {}", error.text));
+        warning(std::format("ks-engine refused a ring: {}", error.text));
         return true;
     }
     client->opening = false;
-    report(std::format("refused client '{}' a ring: {}", client->name, error.text));
+    warning(std::format("refused client '{}' a ring: {}", client->name, error.text));
     send_to_client(*client,
                    error_message(pending.client_request, ipc::ErrorCode::Unavailable, error.text));
     return true;
@@ -674,8 +936,8 @@ bool Supervisor::detach_refused(std::uint32_t id, const ipc::msg::Error& error) 
     if (found == detaches_.end()) {
         return false;
     }
-    report(std::format("ks-engine refused to detach the ring in slot {}: {}", found->slot,
-                       error.text));
+    warning(std::format("ks-engine refused to detach the ring in slot {}: {}", found->slot,
+                        error.text));
     detaches_.erase(found);
     return true;
 }
@@ -693,7 +955,7 @@ void Supervisor::engine_failed(std::string_view why) {
         // It's on its way out: wait for it.
         return;
     }
-    report(std::format("ks-engine's connection {}; stopping it", why));
+    error(std::format("ks-engine's connection {}; stopping it", why));
     if (phase_ == Phase::Starting) {
         forced_status_ = kExitStartFailed;
     }
@@ -708,10 +970,10 @@ void Supervisor::accept_clients() {
             listener_->accept(::geteuid());
         if (!accepted) {
             if (accepted.error() == std::errc::permission_denied) {
-                report("refused a connection from another user");
+                warning("refused a connection from another user");
                 continue;
             }
-            report(std::format("can't accept a connection: {}", accepted.error().message()));
+            warning(std::format("can't accept a connection: {}", accepted.error().message()));
             return;
         }
         std::optional<ipc::Fd>& socket = *accepted;
@@ -719,7 +981,7 @@ void Supervisor::accept_clients() {
             return;
         }
         if (clients_.size() >= kMaxConnections) {
-            report(std::format("refused a connection: {} are open already", kMaxConnections));
+            warning(std::format("refused a connection: {} are open already", kMaxConnections));
             continue;
         }
         clients_.push_back(Client{.connection = ipc::Connection{std::move(*socket)},
@@ -747,7 +1009,7 @@ void Supervisor::handle_client(Client& client, short events) {
                 refuse_and_drop(client, 0, "a bad frame");
                 return;
             case ipc::ConnectionError::Closed:
-                drop(client, "disconnected");
+                drop(client, "closed its connection", ipc::LogLevel::Info);
                 return;
             default:
                 drop(client, "closed its connection mid-message");
@@ -778,7 +1040,7 @@ void Supervisor::handle_client_message(Client& client, const ipc::Message& messa
         }
         client.welcomed = true;
         client.name = hello->name;
-        report(std::format("client '{}' said Hello", client.name));
+        info(std::format("client '{}' said Hello", client.name));
         const std::array<int, 1> state{state_.get()};
         send_to_client(client, ipc::Message{.request_id = id, .body = ipc::msg::Welcome{}}, state);
         return;
@@ -790,13 +1052,12 @@ void Supervisor::handle_client_message(Client& client, const ipc::Message& messa
     if (std::holds_alternative<ipc::msg::Ping>(message.body)) {
         send_to_client(client, ipc::Message{.request_id = id, .body = ipc::msg::Pong{}});
     } else if (std::holds_alternative<ipc::msg::Stop>(message.body)) {
-        report(std::format("client '{}' asked to stop", client.name));
         client.stops.push_back(id);
-        begin_stop();
+        begin_stop(std::format("client '{}' asked", client.name));
     } else if (std::holds_alternative<ipc::msg::OpenRing>(message.body)) {
         open_ring(client, id);
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
-        report(std::format("client '{}' reported an error: {}", client.name, error->text));
+        warning(std::format("client '{}' reported an error: {}", client.name, error->text));
     } else {
         send_to_client(client,
                        error_message(id, ipc::ErrorCode::NotSupported, "not from a client"));
@@ -827,13 +1088,14 @@ void Supervisor::refuse_and_drop(Client& client, std::uint32_t request_id, std::
     drop(client, reason);
 }
 
-void Supervisor::drop(Client& client, std::string_view why) {
+void Supervisor::drop(Client& client, std::string_view why, ipc::LogLevel level) {
     if (client.dropped) {
         return;
     }
     client.dropped = true;
-    report(client.name.empty() ? std::format("dropped a client: it {}", why)
-                               : std::format("dropped client '{}': it {}", client.name, why));
+    report(level, client.name.empty()
+                      ? std::format("dropped a client: it {}", why)
+                      : std::format("dropped client '{}': it {}", client.name, why));
     // A ring being opened is detached when the engine's answer comes
     // (ring_attached()).
     if (client.ring) {
@@ -842,11 +1104,11 @@ void Supervisor::drop(Client& client, std::string_view why) {
     }
 }
 
-void Supervisor::begin_stop() {
+void Supervisor::begin_stop(std::string_view why) {
     if (phase_ == Phase::Stopping || phase_ == Phase::Terminating) {
         return;
     }
-    report("stopping");
+    info(std::format("stopping: {}", why));
     listener_.reset();
     phase_ = Phase::Stopping;
     deadline_ = Clock::now() + kEngineStopTimeout;
@@ -859,14 +1121,14 @@ std::optional<int> Supervisor::deadline_passed() {
     }
     switch (phase_) {
     case Phase::Starting:
-        report(std::format("ks-engine didn't report ready within {} s; killing it",
-                           kEngineReadyTimeout.count()));
+        error(std::format("ks-engine didn't report ready within {} s; killing it",
+                          kEngineReadyTimeout.count()));
         kill_engine();
         return kExitStartFailed;
     case Phase::Stopping:
     case Phase::Terminating:
-        report(std::format("ks-engine didn't stop within {} s; killing it",
-                           kEngineStopTimeout.count()));
+        error(std::format("ks-engine didn't stop within {} s; killing it",
+                          kEngineStopTimeout.count()));
         kill_engine();
         return forced_status_.value_or(kExitEngineFailed);
     case Phase::Running:
@@ -885,6 +1147,7 @@ void Supervisor::kill_engine() {
     while (::waitpid(engine_pid_, &status, 0) == -1 && errno == EINTR) {
     }
     engine_pid_ = 0;
+    drain_engine_log();
 }
 
 void Supervisor::flush_clients() {

@@ -3,6 +3,8 @@
 
 # The library holds everything except argument handling, so tests can use it.
 add_library(ks_supervisor STATIC
+    log_dir.cpp
+    log_file.cpp
     options.cpp
     run.cpp
     spawn.cpp)
@@ -12,6 +14,8 @@ target_sources(ks_supervisor PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include
     FILES
+        include/ks/supervisor/log_dir.h
+        include/ks/supervisor/log_file.h
         include/ks/supervisor/options.h
         include/ks/supervisor/run.h
         include/ks/supervisor/spawn.h)

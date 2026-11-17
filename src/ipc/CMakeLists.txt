@@ -8,6 +8,8 @@ add_library(ks_ipc STATIC
     fd_passing.cpp
     frame.cpp
     listener.cpp
+    log.cpp
+    log_format.cpp
     messages.cpp
     region.cpp
     runtime_dir.cpp
@@ -26,6 +28,7 @@ target_sources(ks_ipc PUBLIC
         include/ks/ipc/frame.h
         include/ks/ipc/layout.h
         include/ks/ipc/listener.h
+        include/ks/ipc/log.h
         include/ks/ipc/messages.h
         include/ks/ipc/region.h
         include/ks/ipc/runtime_dir.h

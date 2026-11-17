@@ -53,10 +53,21 @@ target_include_directories(ks_harness_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/ap
 
 ks_add_test(ks_ipc_tests
     SOURCES
+        ipc/log_format_test.cpp
+        ipc/log_test.cpp
         ipc/region_test.cpp
         ipc/seqlock_test.cpp
         ipc/spsc_ring_test.cpp
     LIBRARIES ks::ipc)
+
+ks_add_test(ks_supervisor_tests
+    SOURCES supervisor/log_dir_test.cpp
+            supervisor/log_file_test.cpp
+            supervisor/run_logs_test.cpp
+    LIBRARIES ks::supervisor)
+# run_logs_test.cpp runs the real engine to a starting failure.
+target_compile_definitions(ks_supervisor_tests PRIVATE KS_ENGINE_PATH="$<TARGET_FILE:ks-engine>")
+add_dependencies(ks_supervisor_tests ks-engine)
 
 ks_add_test(ks_tone_tests
     SOURCES

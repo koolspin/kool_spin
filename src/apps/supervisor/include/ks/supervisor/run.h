@@ -26,6 +26,9 @@ inline constexpr std::chrono::seconds kEngineStopTimeout{2};
 inline constexpr std::chrono::seconds kClientFlushTimeout{1};
 /// The most client connections open at once (requirement 18).
 inline constexpr std::size_t kMaxConnections = 16;
+/// The longest the supervisor goes without reading the engine's log ring
+/// (specs/logs/spec.md requirement 14).
+inline constexpr std::chrono::milliseconds kLogDrainInterval{100};
 
 /// `ks-engine` in the directory that holds this process's executable: the
 /// default for --engine (requirement 13).

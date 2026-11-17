@@ -54,6 +54,11 @@ public:
 
     [[nodiscard]] OutputState state() const noexcept;
 
+    /// The sample rate and channel count of the last device that opened, or
+    /// 0 if none has. While Playing, that's the device playing.
+    [[nodiscard]] std::uint32_t device_sample_rate() const noexcept;
+    [[nodiscard]] std::uint32_t device_channels() const noexcept;
+
 private:
     using Clock = std::chrono::steady_clock;
 
