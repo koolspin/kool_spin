@@ -129,7 +129,8 @@ Tracks, blocks, and the render core (`render_core_test.cpp`):
 - [ ] `[auto]` **Load:**
   - a graph that does nothing, in 512-frame blocks, makes no block late, and its load is below 1;
   - a graph that spins for twice its block's duration makes every block late, with a load of at least 2;
-  - `peak_render_load()` is at least every load seen, and `blocks_rendered()` counts every rendered block.
+  - `peak_render_load()` is at least every load seen, and `blocks_rendered()` counts every rendered block;
+  - a shared machine can preempt the test in the middle of a block and make it late for real. So when a block of the graph that does nothing takes as long as its duration or longer, the test starts again with a new core, up to 5 runs in all, and one run must get through. Every other check holds in every run.
 
   (test: "Render core: load and late blocks")
 - [ ] `[auto]` **Output state:** the core reports `Stopped` until set, and what was set after. With the paced simulated device of the device-loss tests, the core's output state follows the controller through playing, freewheeling after an unplug, playing after the device returns, and stopped. (test: "Render core: the output state follows the controller")

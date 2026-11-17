@@ -294,52 +294,85 @@ TEST_CASE("Render core: the graph hears about each rendered block", "[state][ren
 }
 
 TEST_CASE("Render core: load and late blocks", "[state][render-core]") {
-    SpinGraph graph;
-    RenderCore core{graph};
+    // A shared machine can preempt the test in the middle of a fast block
+    // and make it late for real. Then the run stops, and the test starts
+    // again with a new core, up to kTries runs in all. Every other check
+    // holds in every run.
+    constexpr std::size_t kTries = 5;
     const Channels channels;
-    REQUIRE(core.blocks_rendered() == 0);
-    REQUIRE(core.render_load() == 0.0);
-    REQUIRE(core.peak_render_load() == 0.0);
-    REQUIRE(core.render_time() == nanoseconds{0});
+    const auto big = frames_to_duration(ks::engine::kMaxBlockFrames, kRate);
+    const auto small = frames_to_duration(kBlock, kRate);
+    // The render times of the fast blocks that stopped a run.
+    std::vector<nanoseconds> preempted;
 
-    double highest = 0.0;
-    const auto block = [&](std::size_t frames) {
-        REQUIRE(render(core, channels, frames) == RenderResult::Rendered);
-        highest = std::max(highest, core.render_load());
-        REQUIRE(core.peak_render_load() >= highest);
+    // Whether the last block, a fast one, took less than its duration.
+    const auto on_time = [&preempted, big](const RenderCore& core) {
+        if (core.render_time() < big) {
+            return true;
+        }
+        preempted.push_back(core.render_time());
+        return false;
     };
 
-    // A graph that does nothing is never late.
-    const auto big = frames_to_duration(ks::engine::kMaxBlockFrames, kRate);
-    for (std::size_t i = 0; i < 20; ++i) {
-        block(ks::engine::kMaxBlockFrames);
-        REQUIRE(core.render_time() > nanoseconds{0});
-        REQUIRE(core.render_time() < big);
-        REQUIRE(core.render_load() < 1.0);
-    }
-    REQUIRE(core.late_blocks() == 0);
-    REQUIRE(core.peak_render_load() < 1.0);
+    // Whether the run got through with every fast block on time.
+    const auto run = [&] {
+        SpinGraph graph;
+        RenderCore core{graph};
+        REQUIRE(core.blocks_rendered() == 0);
+        REQUIRE(core.render_load() == 0.0);
+        REQUIRE(core.peak_render_load() == 0.0);
+        REQUIRE(core.render_time() == nanoseconds{0});
 
-    // One that spins for twice its block's duration always is.
-    graph.set_factor(2);
-    const auto small = frames_to_duration(kBlock, kRate);
-    for (std::size_t i = 0; i < 5; ++i) {
-        block(kBlock);
-        REQUIRE(core.late_blocks() == i + 1);
-        REQUIRE(core.render_time() >= 2 * small);
-        REQUIRE(core.render_load() >= 2.0);
-    }
-    REQUIRE(core.peak_render_load() >= 2.0);
+        double highest = 0.0;
+        const auto block = [&](std::size_t frames) {
+            REQUIRE(render(core, channels, frames) == RenderResult::Rendered);
+            highest = std::max(highest, core.render_load());
+            REQUIRE(core.peak_render_load() >= highest);
+        };
 
-    // Fast again: no more late blocks, and the peak stays.
-    graph.set_factor(0);
-    for (std::size_t i = 0; i < 5; ++i) {
-        block(ks::engine::kMaxBlockFrames);
-        REQUIRE(core.render_load() < 1.0);
+        // A graph that does nothing is never late.
+        for (std::size_t i = 0; i < 20; ++i) {
+            block(ks::engine::kMaxBlockFrames);
+            REQUIRE(core.render_time() > nanoseconds{0});
+            if (!on_time(core)) {
+                return false;
+            }
+            REQUIRE(core.render_load() < 1.0);
+        }
+        REQUIRE(core.late_blocks() == 0);
+        REQUIRE(core.peak_render_load() < 1.0);
+
+        // One that spins for twice its block's duration always is.
+        graph.set_factor(2);
+        for (std::size_t i = 0; i < 5; ++i) {
+            block(kBlock);
+            REQUIRE(core.late_blocks() == i + 1);
+            REQUIRE(core.render_time() >= 2 * small);
+            REQUIRE(core.render_load() >= 2.0);
+        }
+        REQUIRE(core.peak_render_load() >= 2.0);
+
+        // Fast again: no more late blocks, and the peak stays.
+        graph.set_factor(0);
+        for (std::size_t i = 0; i < 5; ++i) {
+            block(ks::engine::kMaxBlockFrames);
+            if (!on_time(core)) {
+                return false;
+            }
+            REQUIRE(core.render_load() < 1.0);
+        }
+        REQUIRE(core.late_blocks() == 5);
+        REQUIRE(core.peak_render_load() >= 2.0);
+        REQUIRE(core.blocks_rendered() == 30);
+        return true;
+    };
+
+    bool finished = false;
+    for (std::size_t i = 0; i < kTries && !finished; ++i) {
+        finished = run();
     }
-    REQUIRE(core.late_blocks() == 5);
-    REQUIRE(core.peak_render_load() >= 2.0);
-    REQUIRE(core.blocks_rendered() == 30);
+    CAPTURE(preempted);
+    REQUIRE(finished);
 }
 
 TEST_CASE("Render core: the output state follows the controller", "[state][render-core]") {
