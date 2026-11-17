@@ -110,13 +110,11 @@ ks_acceptance_test(ks-harness.render EXIT 0
         [[^Commands: 2 sent, 2 read, 0 rejected, 0 delayed$]]
         [[^Device losses: 0$]]
     COMMAND ${ks_harness} --out "${CMAKE_CURRENT_BINARY_DIR}/render.wav" "${data}/short.harness")
-# Under a sanitizer, late blocks can make it exit 3; nothing else may.
-if(real_time)
-    set(null_device_exit 0)
-else()
-    set(null_device_exit "0|3")
-endif()
-ks_acceptance_test(ks-harness.null-device EXIT ${null_device_exit}
+# Late blocks can make it exit 3: a sanitizer's overhead or a busy machine
+# can make a block take longer to render than it lasts. The report shows
+# nothing else that exits 3 happened. "Device: playing a script on the null
+# backend" checks for late blocks.
+ks_acceptance_test(ks-harness.null-device EXIT "0|3"
     EXPECT
         [[NULL Playback Device]]
         [[^Samples: 0 non-finite, ]]

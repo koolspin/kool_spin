@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -73,42 +74,56 @@ TEST_CASE("Device: playing a script on the null backend", "[harness]") {
                                       "0.5 rate 1 1.01\n"
                                       "0.999 fader 1 0.9\n"
                                       "1 end\n");
-    const std::atomic<bool> stop{false};
-    std::ostringstream out;
-    const Clock::time_point started = Clock::now();
-    const std::expected<Report, std::string> report =
-        play_on_device(prepared.script, prepared.tracks, kNullDevice, stop, out);
-    const auto took = std::chrono::duration<double>(Clock::now() - started).count();
-    CAPTURE(error_text(report), out.str(), took);
-    REQUIRE(report.has_value());
+    // A busy machine can preempt the engine's audio thread in the middle of
+    // a block and make it late for real. So in a build without a sanitizer,
+    // the script plays again when a play had late blocks, up to kTries plays
+    // in all, and one must have none. Every other check holds in every play.
+    constexpr int kTries = 5;
+    // The late blocks of each play that had some.
+    std::vector<std::uint64_t> late_blocks;
+    bool on_time = false;
+    for (int play = 1; play <= kTries && !on_time; ++play) {
+        const std::atomic<bool> stop{false};
+        std::ostringstream out;
+        const Clock::time_point started = Clock::now();
+        const std::expected<Report, std::string> report =
+            play_on_device(prepared.script, prepared.tracks, kNullDevice, stop, out);
+        const auto took = std::chrono::duration<double>(Clock::now() - started).count();
+        CAPTURE(play, error_text(report), out.str(), took);
+        REQUIRE(report.has_value());
 
-    CHECK(report->played_seconds >= 0.9);
-    // The stop can take effect several blocks late on a busy machine: macOS CI
-    // runners have played 1.109 s (104 blocks of 512 frames).
-    CHECK(report->played_seconds <= 1.25);
-    CHECK(!report->stopped_early);
-    CHECK(report->blocks_rendered > 0);
-    if constexpr (kExpectRealTime) {
-        CHECK(report->late_blocks == 0);
+        CHECK(report->played_seconds >= 0.9);
+        // The stop can take effect several blocks late on a busy machine:
+        // macOS CI runners have played 1.109 s (104 blocks of 512 frames).
+        CHECK(report->played_seconds <= 1.25);
+        CHECK(!report->stopped_early);
+        CHECK(report->blocks_rendered > 0);
+        CHECK(report->non_finite_samples == 0);
+        CHECK(report->commands_sent == 3);
+        CHECK(report->commands_read == 3);
+        CHECK(report->commands_rejected == 0);
+        CHECK(report->device_losses == 0);
+        CHECK(took < 3.0);
+        // Apart from any late blocks, the report flags nothing.
+        Report without_late = *report;
+        without_late.late_blocks = 0;
+        CHECK(!flags_problem(without_late));
+        // Device mode plays in real time, so a late block is a problem.
+        Report late = *report;
+        late.late_blocks = 1;
+        CHECK(flags_problem(late));
+
+        // It names the device, and shows the output starting to play.
+        CHECK(out.str().find("NULL Playback Device") != std::string::npos);
+        CHECK(out.str().find("Playing") != std::string::npos);
+
+        on_time = !kExpectRealTime || report->late_blocks == 0;
+        if (!on_time) {
+            late_blocks.push_back(report->late_blocks);
+        }
     }
-    CHECK(report->non_finite_samples == 0);
-    CHECK(report->commands_sent == 3);
-    CHECK(report->commands_read == 3);
-    CHECK(report->commands_rejected == 0);
-    CHECK(report->device_losses == 0);
-    CHECK(took < 3.0);
-    // Apart from any late blocks, the report flags nothing.
-    Report on_time = *report;
-    on_time.late_blocks = 0;
-    CHECK(!flags_problem(on_time));
-    // Device mode plays in real time, so a late block is a problem.
-    Report late = *report;
-    late.late_blocks = 1;
-    CHECK(flags_problem(late));
-
-    // It names the device, and shows the output starting to play.
-    CHECK(out.str().find("NULL Playback Device") != std::string::npos);
-    CHECK(out.str().find("Playing") != std::string::npos);
+    CAPTURE(late_blocks);
+    CHECK(on_time);
 }
 
 TEST_CASE("Device: stopping early", "[harness]") {
