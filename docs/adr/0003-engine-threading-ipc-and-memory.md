@@ -109,11 +109,12 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   - A serialization library would add a dependency to the supervisor.
 - **The supervisor is single-threaded:** one `poll` loop over its sockets, with a self-pipe for `SIGCHLD`.
 - **Loading a track:**
-  1. A client asks the supervisor.
-  2. The supervisor creates a track segment and passes it to a worker and to the engine's control thread at the same time.
-  3. The worker decodes into the segment.
-  4. Meanwhile, the control thread maps the segment, locks it, and builds a track object. It hands the object to the audio thread through an internal ring (section 10).
-  5. Playback can start before decoding finishes (section 9).
+  1. A client asks the supervisor, giving the file's path.
+  2. The supervisor opens the file and starts a worker, giving it the open file. The worker reports the file's sample rate and estimated length, or why it can't decode it.
+  3. If the track fits the per-track cap and the memory budget (section 9), the supervisor creates a track segment and passes it to the worker and to the engine's control thread at the same time.
+  4. The worker decodes into the segment.
+  5. Meanwhile, the control thread maps the segment, locks it, and builds a track object. It hands the object to the audio thread through an internal ring (section 10).
+  6. Playback can start before decoding finishes (section 9).
 
 ### 7. Shared-memory segments
 
