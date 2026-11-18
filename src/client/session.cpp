@@ -56,10 +56,6 @@ Result<Snapshot> Session::snapshot() const {
     return std::unexpected{not_written()};
 }
 
-Result<Snapshot> Session::snapshot_from(ipc::EngineState& /*state*/, Milliseconds /*budget*/) {
-    return std::unexpected{not_written()};
-}
-
 Result<LoadedFile> Session::load_file(std::uint32_t /*deck*/, const std::string& /*path*/,
                                       Milliseconds /*timeout*/) {
     static_cast<void>(impl_);
