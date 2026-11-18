@@ -43,6 +43,10 @@ inline constexpr std::chrono::seconds kWorkerStopTimeout{1};
 /// default for --engine (requirement 13).
 [[nodiscard]] std::expected<std::filesystem::path, std::error_code> default_engine_path();
 
+/// `ks-worker` in the directory that holds this process's executable: the
+/// default for --worker (specs/track-loading/spec.md requirement 9).
+[[nodiscard]] std::expected<std::filesystem::path, std::error_code> default_worker_path();
+
 /// Does what `options` asks: prints the usage for --help, and otherwise runs
 /// the supervisor until it stops. Installs handlers for SIGCHLD, SIGINT,
 /// SIGTERM, and SIGHUP, so call it once, from main(). Writes the usage to

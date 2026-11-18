@@ -70,8 +70,10 @@ ks_add_test(ks_supervisor_tests
             supervisor/run_logs_test.cpp
     LIBRARIES ks::supervisor)
 # run_logs_test.cpp runs the real engine to a starting failure.
-target_compile_definitions(ks_supervisor_tests PRIVATE KS_ENGINE_PATH="$<TARGET_FILE:ks-engine>")
-add_dependencies(ks_supervisor_tests ks-engine)
+target_compile_definitions(ks_supervisor_tests PRIVATE
+    KS_ENGINE_PATH="$<TARGET_FILE:ks-engine>"
+    KS_WORKER_PATH="$<TARGET_FILE:ks-worker>")
+add_dependencies(ks_supervisor_tests ks-engine ks-worker)
 
 ks_add_test(ks_tone_tests
     SOURCES
