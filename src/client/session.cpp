@@ -8,13 +8,13 @@
 #include <ks/ipc/listener.h>
 #include <ks/ipc/region.h>
 
+#include "decode_queue.h"
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
-#include <deque>
 #include <optional>
 #include <span>
 #include <system_error>
@@ -121,7 +121,7 @@ struct Session::Impl {
     std::optional<Error> failed;
     std::uint32_t next_request_id = 1;
     /// DecodeEnded notifications not yet taken (at most 64).
-    std::deque<ipc::msg::DecodeEnded> pending;
+    DecodeQueue pending;
 
     /// The error every call on `impl` returns, if it can't be used: a
     /// moved-from session, or one that is closed or has failed.
@@ -216,6 +216,58 @@ struct Session::Impl {
             if (polled < 0 && errno != EINTR) {
                 return std::unexpected{fail(make_error(ErrorKind::Closed, "poll() failed"))};
             }
+        }
+    }
+
+    /// Sends `body` with the next request ID and waits until `deadline` for
+    /// the reply of type `Reply` with that ID. An Error with that ID is
+    /// Refused; no reply in time is Timeout. Notifications that arrive
+    /// meanwhile are queued, and every other message is ignored.
+    template <typename Reply, typename Body>
+    std::expected<Reply, Error> request(Body body, Clock::time_point deadline) {
+        const std::uint32_t id = next_request_id++;
+        if (auto sent = send(ipc::Message{.request_id = id, .body = std::move(body)}, deadline);
+            !sent) {
+            return std::unexpected{sent.error()};
+        }
+        while (true) {
+            auto incoming = receive_until(deadline);
+            if (!incoming) {
+                return std::unexpected{incoming.error()};
+            }
+            if (!*incoming) {
+                return std::unexpected{make_error(ErrorKind::Timeout, "no reply in time")};
+            }
+            ipc::Message& got = (*incoming)->message;
+            if (got.request_id != id) {
+                pending.offer(got);
+                continue;
+            }
+            if (auto* const error = std::get_if<ipc::msg::Error>(&got.body)) {
+                return std::unexpected{
+                    Error{.kind = ErrorKind::Refused, .code = error->code, .text = error->text}};
+            }
+            if (auto* const reply = std::get_if<Reply>(&got.body)) {
+                return std::move(*reply);
+            }
+            // Not the reply this request waits for: ignored.
+        }
+    }
+
+    /// The first queued DecodeEnded, or the next to arrive by `deadline`.
+    std::expected<ipc::msg::DecodeEnded, Error> next_decode_ended(Clock::time_point deadline) {
+        while (true) {
+            if (std::optional<ipc::msg::DecodeEnded> first = pending.take()) {
+                return *first;
+            }
+            auto incoming = receive_until(deadline);
+            if (!incoming) {
+                return std::unexpected{incoming.error()};
+            }
+            if (!*incoming) {
+                return std::unexpected{make_error(ErrorKind::Timeout, "no DecodeEnded in time")};
+            }
+            pending.offer((*incoming)->message);
         }
     }
 
@@ -336,40 +388,67 @@ Result<Snapshot> Session::snapshot() const {
     return snapshot_from(*impl_->state, kSnapshotBudget);
 }
 
-Result<LoadedFile> Session::load_file(std::uint32_t /*deck*/, const std::string& /*path*/,
-                                      Milliseconds /*timeout*/) {
+Result<LoadedFile> Session::load_file(std::uint32_t deck, const std::string& path,
+                                      Milliseconds timeout) {
+    const Clock::time_point deadline = Clock::now() + timeout;
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    auto loaded = impl_->request<ipc::msg::FileLoaded>(
+        ipc::msg::LoadFile{.deck = deck, .path = path}, deadline);
+    if (!loaded) {
+        return std::unexpected{std::move(loaded.error())};
+    }
+    return LoadedFile{.track_id = loaded->track_id,
+                      .sample_rate = loaded->sample_rate,
+                      .estimated_frames = loaded->estimated_frames};
 }
 
-Result<void> Session::unload_deck(std::uint32_t /*deck*/, Milliseconds /*timeout*/) {
+Result<void> Session::unload_deck(std::uint32_t deck, Milliseconds timeout) {
+    const Clock::time_point deadline = Clock::now() + timeout;
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    auto unloaded =
+        impl_->request<ipc::msg::DeckUnloaded>(ipc::msg::UnloadDeck{.deck = deck}, deadline);
+    if (!unloaded) {
+        return std::unexpected{std::move(unloaded.error())};
+    }
+    return {};
 }
 
-Result<void> Session::stop(Milliseconds /*timeout*/) {
+Result<void> Session::stop(Milliseconds timeout) {
+    const Clock::time_point deadline = Clock::now() + timeout;
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    auto done = impl_->request<ipc::msg::Done>(ipc::msg::Stop{}, deadline);
+    if (!done) {
+        return std::unexpected{std::move(done.error())};
+    }
+    // kool_spin has stopped: the session is over.
+    close();
+    return {};
 }
 
-Result<void> Session::ping(Milliseconds /*timeout*/) {
+Result<void> Session::ping(Milliseconds timeout) {
+    const Clock::time_point deadline = Clock::now() + timeout;
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    auto pong = impl_->request<ipc::msg::Pong>(ipc::msg::Ping{}, deadline);
+    if (!pong) {
+        return std::unexpected{std::move(pong.error())};
+    }
+    return {};
 }
 
-Result<ipc::msg::DecodeEnded> Session::next_decode_ended(Milliseconds /*timeout*/) {
+Result<ipc::msg::DecodeEnded> Session::next_decode_ended(Milliseconds timeout) {
+    const Clock::time_point deadline = Clock::now() + timeout;
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    return impl_->next_decode_ended(deadline);
 }
 
 void Session::close() noexcept {

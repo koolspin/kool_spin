@@ -4,6 +4,7 @@
 
 add_library(ks_client STATIC
     command.cpp
+    decode_queue.h
     session.cpp
     snapshot.cpp)
 add_library(ks::client ALIAS ks_client)
