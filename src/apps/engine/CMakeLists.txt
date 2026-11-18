@@ -3,7 +3,8 @@
 # The library holds everything except argument handling, so tests can use it.
 add_library(ks_engine_app STATIC
     options.cpp
-    run.cpp)
+    run.cpp
+    segment_track.cpp)
 add_library(ks::engine_app ALIAS ks_engine_app)
 
 target_sources(ks_engine_app PUBLIC
@@ -11,7 +12,8 @@ target_sources(ks_engine_app PUBLIC
     BASE_DIRS include
     FILES
         include/ks/engine_app/options.h
-        include/ks/engine_app/run.h)
+        include/ks/engine_app/run.h
+        include/ks/engine_app/segment_track.h)
 
 target_link_libraries(ks_engine_app
     PUBLIC ks::engine ks::ipc

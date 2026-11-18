@@ -7,6 +7,7 @@
 #include <ks/engine/output_controller.h>
 #include <ks/engine/render_core.h>
 #include <ks/engine_app/options.h>
+#include <ks/engine_app/segment_track.h>
 #include <ks/ipc/child_process.h>
 #include <ks/ipc/command.h>
 #include <ks/ipc/connection.h>
@@ -17,6 +18,7 @@
 #include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/state.h>
+#include <ks/ipc/track_segment.h>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -170,8 +172,18 @@ private:
     /// take: the give ring was full.
     void retry_detaches();
     /// Collects the engine's releases. A detached ring's is unmapped, and its
-    /// Detach answered.
+    /// Detach answered. A released track is unmapped, and the supervisor told
+    /// (specs/track-loading/spec.md requirement 6).
     void collect();
+    /// Puts the track in `segment` on a deck, and answers `id`
+    /// (specs/track-loading/spec.md requirement 4).
+    void load_track(std::uint32_t id, const ipc::msg::LoadTrack& load, ipc::Fd segment);
+    /// Passes each track's progress on to the audio thread, faulting in at
+    /// most kFaultInPerPass bytes in all, and logs the tracks that finish
+    /// (specs/track-loading/spec.md requirements 5 and 8).
+    void relay_tracks();
+    /// Logs how `track` finished.
+    void log_finished(const SegmentTrack& track, const TrackFinished& finished);
     /// Closes the supervisor's socket: the engine plays on (requirement 12).
     void lose_supervisor(std::string_view why);
     /// Fades out and stops, replies Done if `stop` asked, and returns kExitOk
@@ -194,6 +206,9 @@ private:
     std::unique_ptr<ipc::LockFile> lock_;
     ipc::Fd state_fd_;
     std::unique_ptr<ipc::Region> region_;
+    /// The tracks the engine holds. Declared before the engine, so they
+    /// outlive it and everything that renders it.
+    std::vector<std::unique_ptr<SegmentTrack>> tracks_;
     std::unique_ptr<engine::Engine> engine_;
     std::unique_ptr<engine::RenderCore> core_;
     std::unique_ptr<engine::MiniaudioDeviceSource> source_;
@@ -358,6 +373,7 @@ int EngineProcess::loop() {
         log_output();
         log_events(false);
         collect();
+        relay_tracks();
         retry_detaches();
         if (ipc::take_stop_signal()) {
             return stop(std::nullopt, "got a signal");
@@ -425,6 +441,13 @@ std::optional<std::uint32_t> EngineProcess::handle(const ipc::Message& message,
         }
     } else if (const auto* const detach = std::get_if<ipc::msg::Detach>(&message.body)) {
         detach_ring(id, detach->slot);
+    } else if (const auto* const load = std::get_if<ipc::msg::LoadTrack>(&message.body)) {
+        // decode() checked the count; the connection delivers what it says.
+        if (fds.size() != 1) {
+            unavailable(id, "a LoadTrack", "a LoadTrack without its segment");
+        } else {
+            load_track(id, *load, std::move(fds.front()));
+        }
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         report(ipc::LogLevel::Warning, "the supervisor reported an error: " + error->text);
     } else {
@@ -508,6 +531,20 @@ void EngineProcess::retry_detaches() {
 void EngineProcess::collect() {
     for (std::optional<engine::Released> released = engine_->collect(); released.has_value();
          released = engine_->collect()) {
+        if (const engine::Track* const track = released->track; track != nullptr) {
+            // Each track has one reference, so its release is its last.
+            const auto found = std::ranges::find_if(
+                tracks_, [track](const auto& held) { return &held->track() == track; });
+            if (found != tracks_.end()) {
+                const std::uint64_t track_id = (*found)->id();
+                // Unmaps the segment and closes its descriptor.
+                tracks_.erase(found);
+                report(ipc::LogLevel::Info, std::format("released track {}", track_id));
+                send(ipc::Message{.request_id = 0,
+                                  .body = ipc::msg::TrackReleased{.track_id = track_id}});
+            }
+            continue;
+        }
         const ipc::CommandRing* const ring = released->ring;
         if (ring == nullptr) {
             continue;
@@ -524,6 +561,66 @@ void EngineProcess::collect() {
             }
         }
     }
+}
+
+void EngineProcess::load_track(std::uint32_t id, const ipc::msg::LoadTrack& load, ipc::Fd segment) {
+    if (std::ranges::any_of(tracks_,
+                            [&load](const auto& held) { return held->id() == load.track_id; })) {
+        unavailable(id, "a LoadTrack", std::format("track {} is already loaded", load.track_id));
+        return;
+    }
+    std::expected<std::unique_ptr<SegmentTrack>, std::string> track =
+        SegmentTrack::map(std::move(segment), load.track_id, load.sample_rate);
+    if (!track) {
+        unavailable(id, "a LoadTrack", std::move(track.error()));
+        return;
+    }
+    if (!engine_->load(load.deck, (*track)->track())) {
+        unavailable(id, "a LoadTrack", "the engine's give ring is full");
+        return;
+    }
+    tracks_.push_back(std::move(*track));
+    report(ipc::LogLevel::Info,
+           std::format("loaded track {} on deck {}", load.track_id, load.deck + 1));
+    send(ipc::Message{.request_id = id, .body = ipc::msg::TrackLoaded{}});
+}
+
+void EngineProcess::relay_tracks() {
+    std::size_t budget = kFaultInPerPass;
+    for (const std::unique_ptr<SegmentTrack>& track : tracks_) {
+        if (track->finished()) {
+            continue;
+        }
+        const TrackPass pass = track->pass(budget);
+        budget -= std::min(budget, pass.faulted);
+        if (pass.finished) {
+            log_finished(*track, *pass.finished);
+        }
+    }
+}
+
+void EngineProcess::log_finished(const SegmentTrack& track, const TrackFinished& finished) {
+    if (finished.corrupt) {
+        report(ipc::LogLevel::Warning,
+               std::format("track {}'s header is corrupt: {}; it ends at frame {}", track.id(),
+                           *finished.corrupt, finished.frames));
+        return;
+    }
+    switch (finished.status) {
+    case ipc::TrackStatus::Complete:
+        report(ipc::LogLevel::Info,
+               std::format("track {} decoded: {} frames", track.id(), finished.frames));
+        return;
+    case ipc::TrackStatus::Truncated:
+        report(ipc::LogLevel::Warning,
+               std::format("track {} was truncated at {} frames", track.id(), finished.frames));
+        return;
+    case ipc::TrackStatus::Failed:
+    case ipc::TrackStatus::Decoding:
+        break;
+    }
+    report(ipc::LogLevel::Warning,
+           std::format("track {} failed after {} frames", track.id(), finished.frames));
 }
 
 void EngineProcess::lose_supervisor(std::string_view why) {
