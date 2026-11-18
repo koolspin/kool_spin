@@ -17,6 +17,10 @@ ks_add_test(ks_core_tests
     SOURCES core/realtime_test.cpp
     LIBRARIES ks::core)
 
+ks_add_test(ks_client_tests
+    SOURCES client/command_test.cpp
+    LIBRARIES ks::client)
+
 ks_add_test(ks_dsp_tests
     SOURCES dsp/sine_oscillator_test.cpp
             dsp/frequency_meter_test.cpp
