@@ -48,16 +48,21 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
     case static_cast<std::uint16_t>(MessageType::Detached):
     case static_cast<std::uint16_t>(MessageType::Probed):
     case static_cast<std::uint16_t>(MessageType::Decoded):
+    case static_cast<std::uint16_t>(MessageType::LoadFile):
+    case static_cast<std::uint16_t>(MessageType::FileLoaded):
+    case static_cast<std::uint16_t>(MessageType::TrackLoaded):
         return TypeRules{.descriptors = 0, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Welcome):
     case static_cast<std::uint16_t>(MessageType::RingOpened):
     case static_cast<std::uint16_t>(MessageType::Attach):
     case static_cast<std::uint16_t>(MessageType::Probe):
     case static_cast<std::uint16_t>(MessageType::Decode):
+    case static_cast<std::uint16_t>(MessageType::LoadTrack):
         return TypeRules{.descriptors = 1, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Error):
         return TypeRules{.descriptors = 0, .request = RequestRule::Any};
     case static_cast<std::uint16_t>(MessageType::Ready):
+    case static_cast<std::uint16_t>(MessageType::TrackReleased):
         return TypeRules{.descriptors = 0, .request = RequestRule::Zero};
     default:
         return std::nullopt;
@@ -233,6 +238,35 @@ bool valid_decoded(const msg::Decoded& decoded) noexcept {
             decoded.status == TrackStatus::Failed);
 }
 
+/// True if `rate` is a rate a track can have.
+bool valid_rate(std::uint32_t rate) noexcept {
+    return rate >= kMinTrackRate && rate <= kMaxTrackRate;
+}
+
+/// True if `deck` is a deck's index (specs/track-loading/spec.md
+/// requirement 1).
+bool valid_deck(std::uint32_t deck) noexcept {
+    return deck < kStateDecks;
+}
+
+/// True if `path` is a LoadFile's path: 1 to kMaxPathSize bytes of text,
+/// starting with '/'.
+bool valid_path(std::span<const std::byte> path) noexcept {
+    return !path.empty() && path.size() <= kMaxPathSize && path.front() == std::byte{'/'} &&
+           valid_text(path);
+}
+
+/// True if a FileLoaded's fields are in range.
+bool valid_file_loaded(const msg::FileLoaded& loaded) noexcept {
+    return loaded.track_id != 0 && valid_rate(loaded.sample_rate) &&
+           loaded.estimated_frames <= kMaxTrackFrames;
+}
+
+/// True if a LoadTrack's fields are in range.
+bool valid_load_track(const msg::LoadTrack& load) noexcept {
+    return load.track_id != 0 && valid_deck(load.deck) && valid_rate(load.sample_rate);
+}
+
 /// True if `slot` is a client slot's index (specs/client-rings/spec.md
 /// requirement 3).
 bool valid_slot(std::uint32_t slot) noexcept {
@@ -323,6 +357,95 @@ std::expected<Message, MessageError> decoded_body(const Frame& frame) {
         return std::unexpected{MessageError::BadField};
     }
     return Message{.request_id = frame.request_id, .body = decoded};
+}
+
+/// A LoadFile's body: the deck, then the path as text.
+std::expected<Message, MessageError> load_file_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint32_t, MessageError> deck = reader.integer(4);
+    if (!deck) {
+        return std::unexpected{deck.error()};
+    }
+    std::expected<std::string, MessageError> path = reader.text(kMaxPathSize);
+    if (!path) {
+        return std::unexpected{path.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    if (!valid_deck(*deck) || !valid_path(std::as_bytes(std::span{*path}))) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id,
+                   .body = msg::LoadFile{.deck = *deck, .path = std::move(*path)}};
+}
+
+/// A FileLoaded's body.
+std::expected<Message, MessageError> file_loaded_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint64_t, MessageError> track_id = reader.integer64();
+    if (!track_id) {
+        return std::unexpected{track_id.error()};
+    }
+    const std::expected<std::uint32_t, MessageError> rate = reader.integer(4);
+    if (!rate) {
+        return std::unexpected{rate.error()};
+    }
+    const std::expected<std::uint64_t, MessageError> estimated = reader.integer64();
+    if (!estimated) {
+        return std::unexpected{estimated.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    const msg::FileLoaded loaded{
+        .track_id = *track_id, .sample_rate = *rate, .estimated_frames = *estimated};
+    if (!valid_file_loaded(loaded)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id, .body = loaded};
+}
+
+/// A LoadTrack's body.
+std::expected<Message, MessageError> load_track_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint64_t, MessageError> track_id = reader.integer64();
+    if (!track_id) {
+        return std::unexpected{track_id.error()};
+    }
+    const std::expected<std::uint32_t, MessageError> deck = reader.integer(4);
+    if (!deck) {
+        return std::unexpected{deck.error()};
+    }
+    const std::expected<std::uint32_t, MessageError> rate = reader.integer(4);
+    if (!rate) {
+        return std::unexpected{rate.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    const msg::LoadTrack load{.track_id = *track_id, .deck = *deck, .sample_rate = *rate};
+    if (!valid_load_track(load)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id, .body = load};
+}
+
+/// A TrackReleased's body.
+std::expected<Message, MessageError> track_released_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint64_t, MessageError> track_id = reader.integer64();
+    if (!track_id) {
+        return std::unexpected{track_id.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    if (*track_id == 0) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id,
+                   .body = msg::TrackReleased{.track_id = *track_id}};
 }
 
 /// An Error message's body.
@@ -447,21 +570,137 @@ std::optional<MessageType> type_of(const Message& message) noexcept {
     if (std::holds_alternative<msg::Decoded>(body)) {
         return MessageType::Decoded;
     }
+    if (std::holds_alternative<msg::LoadFile>(body)) {
+        return MessageType::LoadFile;
+    }
+    if (std::holds_alternative<msg::FileLoaded>(body)) {
+        return MessageType::FileLoaded;
+    }
+    if (std::holds_alternative<msg::LoadTrack>(body)) {
+        return MessageType::LoadTrack;
+    }
+    if (std::holds_alternative<msg::TrackLoaded>(body)) {
+        return MessageType::TrackLoaded;
+    }
+    if (std::holds_alternative<msg::TrackReleased>(body)) {
+        return MessageType::TrackReleased;
+    }
     return std::nullopt;
 }
 
-/// The slot that `message` carries, if its type carries one.
-std::optional<std::uint32_t> slot_of(const Message& message) noexcept {
-    if (const auto* const opened = std::get_if<msg::RingOpened>(&message.body)) {
-        return opened->slot;
+// Each type's fields, appended to a body for encode(). Each returns false,
+// appending nothing, if a field is out of range. Types whose body is empty
+// take the template.
+
+template <typename Fields>
+bool append_fields(std::vector<std::byte>& /*body*/, const Fields& /*fields*/) {
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Error& error) {
+    const auto code = static_cast<std::uint32_t>(error.code);
+    const std::span<const std::byte> text = std::as_bytes(std::span{error.text});
+    if (!valid_code(code) || text.size() > kMaxErrorTextSize || !valid_text(text)) {
+        return false;
     }
-    if (const auto* const attached = std::get_if<msg::Attached>(&message.body)) {
-        return attached->slot;
+    append_integer(body, code, 2);
+    append_text(body, text);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Hello& hello) {
+    const std::span<const std::byte> name = std::as_bytes(std::span{hello.name});
+    if (!valid_name(name)) {
+        return false;
     }
-    if (const auto* const detach = std::get_if<msg::Detach>(&message.body)) {
-        return detach->slot;
+    append_text(body, name);
+    return true;
+}
+
+/// A slot, for the types that carry only one.
+bool append_slot(std::vector<std::byte>& body, std::uint32_t slot) {
+    if (!valid_slot(slot)) {
+        return false;
     }
-    return std::nullopt;
+    append_integer(body, slot, 4);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::RingOpened& opened) {
+    return append_slot(body, opened.slot);
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Attached& attached) {
+    return append_slot(body, attached.slot);
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Detach& detach) {
+    return append_slot(body, detach.slot);
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Probed& probed) {
+    if (!valid_probed(probed)) {
+        return false;
+    }
+    append_integer(body, probed.sample_rate, 4);
+    append_integer(body, probed.channels, 4);
+    append_integer64(body, probed.estimated_frames);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Decode& decode) {
+    if (!valid_decode(decode)) {
+        return false;
+    }
+    append_integer64(body, decode.max_frames);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Decoded& decoded) {
+    if (!valid_decoded(decoded)) {
+        return false;
+    }
+    append_integer64(body, decoded.frames);
+    append_integer(body, static_cast<std::uint32_t>(decoded.status), 1);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::LoadFile& load) {
+    const std::span<const std::byte> path = std::as_bytes(std::span{load.path});
+    if (!valid_deck(load.deck) || !valid_path(path)) {
+        return false;
+    }
+    append_integer(body, load.deck, 4);
+    append_text(body, path);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::FileLoaded& loaded) {
+    if (!valid_file_loaded(loaded)) {
+        return false;
+    }
+    append_integer64(body, loaded.track_id);
+    append_integer(body, loaded.sample_rate, 4);
+    append_integer64(body, loaded.estimated_frames);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::LoadTrack& load) {
+    if (!valid_load_track(load)) {
+        return false;
+    }
+    append_integer64(body, load.track_id);
+    append_integer(body, load.deck, 4);
+    append_integer(body, load.sample_rate, 4);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::TrackReleased& released) {
+    if (released.track_id == 0) {
+        return false;
+    }
+    append_integer64(body, released.track_id);
+    return true;
 }
 
 } // namespace
@@ -526,13 +765,15 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
     case MessageType::Decoded:
         return decoded_body(frame);
     case MessageType::LoadFile:
+        return load_file_body(frame);
     case MessageType::FileLoaded:
+        return file_loaded_body(frame);
     case MessageType::LoadTrack:
+        return load_track_body(frame);
     case MessageType::TrackLoaded:
+        return empty_body<msg::TrackLoaded>(frame);
     case MessageType::TrackReleased:
-        // Stub until specs/track-loading/spec.md is built: rules_for() doesn't
-        // know these types yet, so they never get here.
-        break;
+        return track_released_body(frame);
     }
     return std::unexpected{MessageError::UnknownType};
 }
@@ -545,43 +786,10 @@ std::expected<Frame, MessageError> encode(const Message& message) {
         return std::unexpected{MessageError::UnknownType};
     }
     frame.type = static_cast<std::uint16_t>(*type);
-    if (const auto* const error = std::get_if<msg::Error>(&message.body)) {
-        const auto code = static_cast<std::uint32_t>(error->code);
-        const std::span<const std::byte> text = std::as_bytes(std::span{error->text});
-        if (!valid_code(code) || text.size() > kMaxErrorTextSize || !valid_text(text)) {
-            return std::unexpected{MessageError::BadField};
-        }
-        append_integer(frame.body, code, 2);
-        append_text(frame.body, text);
-    } else if (const auto* const hello = std::get_if<msg::Hello>(&message.body)) {
-        const std::span<const std::byte> name = std::as_bytes(std::span{hello->name});
-        if (!valid_name(name)) {
-            return std::unexpected{MessageError::BadField};
-        }
-        append_text(frame.body, name);
-    } else if (const auto* const probed = std::get_if<msg::Probed>(&message.body)) {
-        if (!valid_probed(*probed)) {
-            return std::unexpected{MessageError::BadField};
-        }
-        append_integer(frame.body, probed->sample_rate, 4);
-        append_integer(frame.body, probed->channels, 4);
-        append_integer64(frame.body, probed->estimated_frames);
-    } else if (const auto* const decode = std::get_if<msg::Decode>(&message.body)) {
-        if (!valid_decode(*decode)) {
-            return std::unexpected{MessageError::BadField};
-        }
-        append_integer64(frame.body, decode->max_frames);
-    } else if (const auto* const decoded = std::get_if<msg::Decoded>(&message.body)) {
-        if (!valid_decoded(*decoded)) {
-            return std::unexpected{MessageError::BadField};
-        }
-        append_integer64(frame.body, decoded->frames);
-        append_integer(frame.body, static_cast<std::uint32_t>(decoded->status), 1);
-    } else if (const std::optional<std::uint32_t> slot = slot_of(message)) {
-        if (!valid_slot(*slot)) {
-            return std::unexpected{MessageError::BadField};
-        }
-        append_integer(frame.body, *slot, 4);
+    const bool valid = std::visit(
+        [&frame](const auto& fields) { return append_fields(frame.body, fields); }, message.body);
+    if (!valid) {
+        return std::unexpected{MessageError::BadField};
     }
 
     const std::optional<TypeRules> rules = rules_for(frame.type);
