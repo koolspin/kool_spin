@@ -1773,6 +1773,12 @@ void Supervisor::worker_ended(Load& load, int status) {
     load.log_reader.reset();
     load.log_region.reset();
     load.log_segment.reset();
+    // Its last messages: one sent just before it exited, such as a refusal,
+    // may still be unread, since signals are handled before sockets in a
+    // pass of the poll loop. Once they're read, the connection closes.
+    if (load.worker) {
+        handle_worker(load, POLLIN);
+    }
     close_worker(load);
     if (!load.probed) {
         refuse_load(load, ipc::ErrorCode::Refused,
