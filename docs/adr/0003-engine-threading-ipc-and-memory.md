@@ -152,8 +152,8 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   - Every track segment is sized at the cap. Pages are committed only when the worker writes them, so the unused part costs address space, not memory. Phase 1b verifies this lazy commitment on macOS.
   - The engine never reads past `frames_ready`.
   - A file whose estimated duration exceeds the cap is refused before decoding. If the estimate was wrong and decoding reaches the cap, the worker stops there and flags the track as truncated. What was decoded keeps playing.
-- **Total budget:** half of physical memory by default, configurable. A load that would exceed it, judged by the decoder's duration estimate, is refused with a clear error.
-- **Progressive playback:** as it decodes, the worker publishes `frames_ready` with release ordering. The engine reads it with acquire ordering. Past that point, the deck plays silence and reports that it's waiting.
+- **Total budget:** half of physical memory by default, configurable. A load that would exceed it, judged by the decoder's duration estimate, is refused with a clear error. A file with no estimate counts as the per-track cap. Once a track has decoded, its actual size counts instead.
+- **Progressive playback:** as it decodes, the worker publishes `frames_ready` with release ordering. The engine's control thread reads it with acquire ordering, checks it, faults in the newly decoded pages, and locks them when it can, before it passes the count on to the audio thread. The audio thread therefore never reads the shared header, and never takes the first page fault on track memory. Past that point, the deck plays silence and reports that it's waiting.
 - **Memory locking:**
   - The engine calls `mlockall(MCL_CURRENT)` after starting and after each device opens.
   - It locks each track in chunks as the track decodes.

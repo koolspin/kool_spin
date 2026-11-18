@@ -36,12 +36,18 @@
 /// | Probed     | 16  | Rate, channels (32 bits each); estimated frames (64) | 0 | The Probe's |
 /// | Decode     | 17  | Max frames (64 bits)          | 1           | Non-zero            |
 /// | Decoded    | 18  | Frames (64 bits); status (8)  | 0           | The Decode's        |
+/// | LoadFile   | 19  | Deck (32 bits); path: text (1 to 4096) | 0  | Non-zero            |
+/// | FileLoaded | 20  | Track ID (64); rate (32); estimated frames (64) | 0 | The LoadFile's |
+/// | LoadTrack  | 21  | Track ID (64); deck (32); rate (32) | 1     | Non-zero            |
+/// | TrackLoaded | 22 | Empty                         | 0           | The LoadTrack's     |
+/// | TrackReleased | 23 | Track ID (64 bits)          | 0           | 0                   |
 ///
 /// Types 4 to 8 come from specs/processes/spec.md requirement 6, types 9 to
-/// 14 from specs/client-rings/spec.md requirement 3, and types 15 to 18 from
-/// specs/decode-worker/spec.md requirement 8. A slot is a client slot's index,
-/// below kStateClients. Later steps add types with the same rules, each in
-/// its own spec.
+/// 14 from specs/client-rings/spec.md requirement 3, types 15 to 18 from
+/// specs/decode-worker/spec.md requirement 8, and types 19 to 23 from
+/// specs/track-loading/spec.md requirement 1. A slot is a client slot's index,
+/// below kStateClients; a deck is a deck's index, below kStateDecks. Later
+/// steps add types with the same rules, each in its own spec.
 
 #include <ks/ipc/frame.h>
 #include <ks/ipc/state.h>
@@ -58,24 +64,29 @@ namespace ks::ipc {
 /// The message types. The values are part of the protocol: never renumber or
 /// reuse them. A frame carries the type in 16 bits.
 enum class MessageType : std::uint8_t {
-    Ping = 1,        ///< Asks the peer to answer with a Pong.
-    Pong = 2,        ///< Answers a Ping.
-    Error = 3,       ///< Reports that something the peer sent was refused.
-    Hello = 4,       ///< A client introduces itself to the supervisor.
-    Welcome = 5,     ///< The supervisor answers a Hello with the engine-state segment.
-    Stop = 6,        ///< Asks the receiver to fade out and stop.
-    Done = 7,        ///< Answers a Stop, once the receiver has stopped.
-    Ready = 8,       ///< The engine is playing. A notification, with request ID 0.
-    OpenRing = 9,    ///< A client asks the supervisor for a command ring.
-    RingOpened = 10, ///< The supervisor answers an OpenRing with the ring segment.
-    Attach = 11,     ///< The supervisor asks the engine to attach a ring segment.
-    Attached = 12,   ///< The engine answers an Attach with the ring's client slot.
-    Detach = 13,     ///< The supervisor asks the engine to detach a client slot's ring.
-    Detached = 14,   ///< The engine answers a Detach once the slot is free again.
-    Probe = 15,      ///< The supervisor asks a worker about a file.
-    Probed = 16,     ///< A worker answers a Probe with the file's rate, channels, and length.
-    Decode = 17,     ///< The supervisor asks a worker to decode the file into a track segment.
-    Decoded = 18,    ///< A worker answers a Decode once decoding has ended.
+    Ping = 1,           ///< Asks the peer to answer with a Pong.
+    Pong = 2,           ///< Answers a Ping.
+    Error = 3,          ///< Reports that something the peer sent was refused.
+    Hello = 4,          ///< A client introduces itself to the supervisor.
+    Welcome = 5,        ///< The supervisor answers a Hello with the engine-state segment.
+    Stop = 6,           ///< Asks the receiver to fade out and stop.
+    Done = 7,           ///< Answers a Stop, once the receiver has stopped.
+    Ready = 8,          ///< The engine is playing. A notification, with request ID 0.
+    OpenRing = 9,       ///< A client asks the supervisor for a command ring.
+    RingOpened = 10,    ///< The supervisor answers an OpenRing with the ring segment.
+    Attach = 11,        ///< The supervisor asks the engine to attach a ring segment.
+    Attached = 12,      ///< The engine answers an Attach with the ring's client slot.
+    Detach = 13,        ///< The supervisor asks the engine to detach a client slot's ring.
+    Detached = 14,      ///< The engine answers a Detach once the slot is free again.
+    Probe = 15,         ///< The supervisor asks a worker about a file.
+    Probed = 16,        ///< A worker answers a Probe with the file's rate, channels, and length.
+    Decode = 17,        ///< The supervisor asks a worker to decode the file into a track segment.
+    Decoded = 18,       ///< A worker answers a Decode once decoding has ended.
+    LoadFile = 19,      ///< A client asks the supervisor to load a file onto a deck.
+    FileLoaded = 20,    ///< The supervisor answers a LoadFile once the engine has the track.
+    LoadTrack = 21,     ///< The supervisor asks the engine to put a track segment on a deck.
+    TrackLoaded = 22,   ///< The engine answers a LoadTrack once it has given the deck the track.
+    TrackReleased = 23, ///< The engine tells the supervisor that no deck holds a track any more.
 };
 
 /// What an Error message reports. The values are part of the protocol. The
@@ -97,6 +108,10 @@ enum class ErrorCode : std::uint8_t {
 
 /// The most channels a Probed message reports.
 inline constexpr std::uint32_t kMaxProbedChannels = 64;
+
+/// The longest path a LoadFile message carries, in bytes. A path has at least
+/// one byte, and starts with '/'.
+inline constexpr std::size_t kMaxPathSize = 4096;
 
 /// The longest text an Error message carries, in bytes.
 inline constexpr std::size_t kMaxErrorTextSize = 1024;
@@ -228,6 +243,58 @@ struct Decoded {
     friend bool operator==(const Decoded&, const Decoded&) = default;
 };
 
+/// A client asks the supervisor to load a file onto a deck.
+struct LoadFile {
+    /// The deck's index, below kStateDecks.
+    std::uint32_t deck = 0;
+    /// An absolute path: UTF-8, 1 to kMaxPathSize bytes, starting with '/'.
+    std::string path;
+
+    friend bool operator==(const LoadFile&, const LoadFile&) = default;
+};
+
+/// The supervisor's answer to a LoadFile, once the engine has the track. The
+/// rate and the estimate are what the worker probed.
+struct FileLoaded {
+    /// The track's ID, never 0: the deck's state block reports it.
+    std::uint64_t track_id = 0;
+    /// The file's rate in Hz, from kMinTrackRate to kMaxTrackRate.
+    std::uint32_t sample_rate = 0;
+    /// The file's length in frames as the decoder estimated it, at most
+    /// kMaxTrackFrames; 0 if it couldn't.
+    std::uint64_t estimated_frames = 0;
+
+    friend bool operator==(const FileLoaded&, const FileLoaded&) = default;
+};
+
+/// The supervisor asks the engine to put a track on a deck. Its one
+/// descriptor is the track segment, which the engine maps read-only.
+struct LoadTrack {
+    /// The track's ID, never 0.
+    std::uint64_t track_id = 0;
+    /// The deck's index, below kStateDecks.
+    std::uint32_t deck = 0;
+    /// The track's rate in Hz, from kMinTrackRate to kMaxTrackRate.
+    std::uint32_t sample_rate = 0;
+
+    friend bool operator==(const LoadTrack&, const LoadTrack&) = default;
+};
+
+/// The engine's answer to a LoadTrack, once it has given the deck the track.
+struct TrackLoaded {
+    friend bool operator==(const TrackLoaded&, const TrackLoaded&) = default;
+};
+
+/// The engine tells the supervisor that no deck holds a track any more, and
+/// that it has unmapped the track's segment. A notification, with request
+/// ID 0.
+struct TrackReleased {
+    /// The track's ID, never 0.
+    std::uint64_t track_id = 0;
+
+    friend bool operator==(const TrackReleased&, const TrackReleased&) = default;
+};
+
 } // namespace msg
 
 /// A message: its request ID and its body.
@@ -235,7 +302,9 @@ struct Message {
     std::uint32_t request_id = 0;
     std::variant<msg::Ping, msg::Pong, msg::Error, msg::Hello, msg::Welcome, msg::Stop, msg::Done,
                  msg::Ready, msg::OpenRing, msg::RingOpened, msg::Attach, msg::Attached,
-                 msg::Detach, msg::Detached, msg::Probe, msg::Probed, msg::Decode, msg::Decoded>
+                 msg::Detach, msg::Detached, msg::Probe, msg::Probed, msg::Decode, msg::Decoded,
+                 msg::LoadFile, msg::FileLoaded, msg::LoadTrack, msg::TrackLoaded,
+                 msg::TrackReleased>
         body;
 
     friend bool operator==(const Message&, const Message&) = default;

@@ -3,8 +3,9 @@
 
 /// @file
 /// kool_spin's command line and exit statuses (specs/processes/spec.md
-/// requirements 13 and 14).
+/// requirements 13 and 14; specs/track-loading/spec.md requirement 9).
 
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <optional>
@@ -23,6 +24,10 @@ inline constexpr int kExitUsageError = 2;
 /// The engine ended unexpectedly, or didn't stop when asked.
 inline constexpr int kExitEngineFailed = 3;
 
+/// The smallest and largest track memory budgets --track-memory takes, in MiB.
+inline constexpr std::uint64_t kMinTrackMemoryMib = 1;
+inline constexpr std::uint64_t kMaxTrackMemoryMib = 1'048'576;
+
 /// kool_spin's command line, parsed. Options not given are empty.
 struct Options {
     std::optional<std::filesystem::path> runtime_dir;
@@ -31,6 +36,11 @@ struct Options {
     std::optional<std::filesystem::path> log_dir;
     /// The ks-engine executable.
     std::optional<std::filesystem::path> engine;
+    /// The ks-worker executable.
+    std::optional<std::filesystem::path> worker;
+    /// The track memory budget, in MiB: kMinTrackMemoryMib to
+    /// kMaxTrackMemoryMib.
+    std::optional<std::uint64_t> track_memory_mib;
     /// Everything after "--", for ks-engine, unchecked.
     std::vector<std::string> engine_args;
     bool help = false;

@@ -59,12 +59,15 @@ private:
     fs::path path_;
 };
 
-/// Options for a supervisor in `dir` whose engine doesn't exist.
+/// Options for a supervisor in `dir` whose engine doesn't exist. Its worker
+/// is the real one: the supervisor refuses to start without one
+/// (specs/track-loading/spec.md requirement 10).
 Options options_in(const fs::path& dir) {
     Options options;
     options.runtime_dir = dir / "run";
     options.log_dir = dir / "logs";
     options.engine = dir / "no-such-engine";
+    options.worker = KS_WORKER_PATH;
     return options;
 }
 
@@ -131,10 +134,12 @@ TEST_CASE("Supervisor logs: a starting failure is in kool_spin.log and on standa
     CHECK(mode_of(session / "kool_spin.log") == 0600U);
 
     const std::vector<std::string> log = lines_in(session / "kool_spin.log");
-    REQUIRE(log.size() == 2);
+    // The header, the track memory budget, then the error.
+    REQUIRE(log.size() == 3);
     CHECK(log[0].starts_with("# kool_spin log; session started "));
-    CHECK(log[1].find(" error can't start ") != std::string::npos);
-    CHECK(log[1].find("no-such-engine") != std::string::npos);
+    CHECK(log[1].find(" info track memory budget: ") != std::string::npos);
+    CHECK(log[2].find(" error can't start ") != std::string::npos);
+    CHECK(log[2].find("no-such-engine") != std::string::npos);
 
     // ks-engine.log is created just before the engine is started, with the
     // session's clock.
@@ -166,12 +171,14 @@ TEST_CASE("Supervisor logs: without a log folder, lines go to standard error",
 
     CHECK(run_once(options, out, err) == kExitStartFailed);
 
-    // One warning saying why, with the path, then the starting failure.
+    // One warning saying why, with the path, the track memory budget (an
+    // info line, here without a log file), then the starting failure.
     const std::vector<std::string> reported = lines_of(err.str());
-    REQUIRE(reported.size() == 2);
+    REQUIRE(reported.size() == 3);
     CHECK(reported[0].starts_with("kool_spin: can't create the log folder "));
     CHECK(reported[0].find(not_a_folder.string()) != std::string::npos);
-    CHECK(reported[1].starts_with("kool_spin: can't start "));
+    CHECK(reported[1].starts_with("kool_spin: track memory budget: "));
+    CHECK(reported[2].starts_with("kool_spin: can't start "));
     CHECK(fs::is_regular_file(not_a_folder));
     CHECK(lines_in(not_a_folder) == std::vector<std::string>{"a file"});
 }
@@ -191,10 +198,11 @@ TEST_CASE("Supervisor logs: a session folder that can't be created", "[superviso
 
     if (::geteuid() != 0) {
         const std::vector<std::string> reported = lines_of(err.str());
-        REQUIRE(reported.size() == 2);
+        REQUIRE(reported.size() == 3);
         CHECK(reported[0].starts_with("kool_spin: can't create the session folder "));
         CHECK(reported[0].find((dir.path() / "logs").string()) != std::string::npos);
-        CHECK(reported[1].starts_with("kool_spin: can't start "));
+        CHECK(reported[1].starts_with("kool_spin: track memory budget: "));
+        CHECK(reported[2].starts_with("kool_spin: can't start "));
         CHECK(entries(dir.path() / "logs").empty());
     }
 }
@@ -268,9 +276,10 @@ TEST_CASE("Supervisor logs: without log files, the engine's lines go to standard
 
     // The engine's line comes before how it ended.
     const std::vector<std::string> reported = lines_of(err.str());
-    REQUIRE(reported.size() >= 4);
+    REQUIRE(reported.size() >= 5);
     CHECK(reported[0].starts_with("kool_spin: can't create the log folder "));
-    CHECK(reported[1].starts_with("kool_spin: started ks-engine (process "));
+    CHECK(reported[1].starts_with("kool_spin: track memory budget: "));
+    CHECK(reported[2].starts_with("kool_spin: started ks-engine (process "));
     const auto engine = std::ranges::find_if(
         reported, [](const std::string& line) { return line.starts_with("ks-engine: "); });
     REQUIRE(engine != reported.end());

@@ -60,14 +60,20 @@ ks_add_test(ks_ipc_tests
         ipc/spsc_ring_test.cpp
     LIBRARIES ks::ipc)
 
+ks_add_test(ks_engine_app_tests
+    SOURCES engine_app/segment_track_test.cpp
+    LIBRARIES ks::engine_app)
+
 ks_add_test(ks_supervisor_tests
     SOURCES supervisor/log_dir_test.cpp
             supervisor/log_file_test.cpp
             supervisor/run_logs_test.cpp
     LIBRARIES ks::supervisor)
 # run_logs_test.cpp runs the real engine to a starting failure.
-target_compile_definitions(ks_supervisor_tests PRIVATE KS_ENGINE_PATH="$<TARGET_FILE:ks-engine>")
-add_dependencies(ks_supervisor_tests ks-engine)
+target_compile_definitions(ks_supervisor_tests PRIVATE
+    KS_ENGINE_PATH="$<TARGET_FILE:ks-engine>"
+    KS_WORKER_PATH="$<TARGET_FILE:ks-worker>")
+add_dependencies(ks_supervisor_tests ks-engine ks-worker)
 
 ks_add_test(ks_tone_tests
     SOURCES
