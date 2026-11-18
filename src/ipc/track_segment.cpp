@@ -36,11 +36,8 @@ std::expected<TrackProgress, TrackHeaderError> read_track(const TrackHeader& hea
 
     const bool complete = (ready & kTrackComplete) != 0;
     const std::uint64_t frames = ready & ~kTrackComplete;
-    const bool finished = status == static_cast<std::uint64_t>(TrackStatus::Complete) ||
-                          status == static_cast<std::uint64_t>(TrackStatus::Truncated) ||
-                          status == static_cast<std::uint64_t>(TrackStatus::Failed);
-    const bool decoding = status == static_cast<std::uint64_t>(TrackStatus::Decoding);
-    if (complete ? !finished : !decoding) {
+    if (status > static_cast<std::uint64_t>(TrackStatus::Failed) ||
+        (complete && status == static_cast<std::uint64_t>(TrackStatus::Decoding))) {
         return std::unexpected{TrackHeaderError::BadStatus};
     }
     // Any frame published, or the end, needs a rate to play at.
@@ -50,7 +47,9 @@ std::expected<TrackProgress, TrackHeaderError> read_track(const TrackHeader& hea
     return TrackProgress{
         // A worker that hasn't started may have no rate yet.
         .sample_rate = valid_rate(rate) ? static_cast<std::uint32_t>(rate) : 0,
-        .status = static_cast<TrackStatus>(status),
+        // The worker stores the final status just before it sets "complete",
+        // so until then a final status means nothing yet.
+        .status = complete ? static_cast<TrackStatus>(status) : TrackStatus::Decoding,
         .frames = std::min(frames, capacity),
         .complete = complete,
     };

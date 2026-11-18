@@ -83,15 +83,18 @@ enum class TrackHeaderError : std::uint8_t {
     /// Frames are ready, or the track is complete, and its rate is outside
     /// kMinTrackRate to kMaxTrackRate.
     BadRate,
-    /// The status isn't a TrackStatus, or doesn't agree with "complete".
+    /// The status isn't a TrackStatus, or the track is complete and still
+    /// Decoding.
     BadStatus,
 };
 
 /// Reads `header` once, as another process may be writing it: `ready` with
 /// acquire ordering first, then the rest, relaxed. `capacity` is the frames
-/// the caller's own mapping holds; the frame count is clamped to it. A header
-/// with no frames, not complete, and status Decoding is valid whatever its
-/// rate: the worker hasn't started.
+/// the caller's own mapping holds; the frame count is clamped to it. A track
+/// that isn't complete reads as Decoding, whatever its status: the worker
+/// stores the final status just before it sets kTrackComplete. A header with
+/// no frames, not complete, and status Decoding is valid whatever its rate:
+/// the worker hasn't started.
 [[nodiscard]] std::expected<TrackProgress, TrackHeaderError> read_track(const TrackHeader& header,
                                                                         std::uint64_t capacity);
 

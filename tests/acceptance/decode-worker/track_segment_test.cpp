@@ -193,12 +193,21 @@ TEST_CASE("Track segment: reading the header", "[decode-worker]") {
         // Complete, but still Decoding.
         CHECK(refusal(header(44'100, TrackStatus::Decoding, 1 | kTrackComplete)) ==
               TrackHeaderError::BadStatus);
-        // Not complete, but finished.
+    }
+
+    SECTION("an incomplete track reads as Decoding, whatever its status") {
+        // The worker stores the final status just before it sets "complete".
         for (const TrackStatus status :
              {TrackStatus::Complete, TrackStatus::Truncated, TrackStatus::Failed}) {
             CAPTURE(static_cast<int>(status));
-            CHECK(refusal(header(44'100, status, 1)) == TrackHeaderError::BadStatus);
-            CHECK(refusal(header(44'100, status, 0)) == TrackHeaderError::BadStatus);
+            CHECK(read(header(44'100, status, 1)) == TrackProgress{.sample_rate = 44'100,
+                                                                   .status = TrackStatus::Decoding,
+                                                                   .frames = 1,
+                                                                   .complete = false});
+            CHECK(read(header(44'100, status, 0)) == TrackProgress{.sample_rate = 44'100,
+                                                                   .status = TrackStatus::Decoding,
+                                                                   .frames = 0,
+                                                                   .complete = false});
         }
     }
 

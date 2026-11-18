@@ -58,9 +58,9 @@ Decode audio files into track segments in a separate, disposable process, `ks-wo
    The samples start at `kTrackSamplesOffset`: interleaved stereo 32-bit floats, frame `n` at `kTrackSamplesOffset + 8n`. The worker writes a frame before publishing it, and never changes a frame once it's published.
 5. **Reading the header:** `read_track(const TrackHeader&, std::uint64_t capacity)` reads it once, as another process may be writing it: `ready` with acquire ordering first, then the rest, relaxed. `capacity` is the frames the caller's own mapping holds. It returns a `TrackProgress` (`sample_rate`, `status`, `frames`, `complete`), with `frames` clamped to `capacity`, or a `TrackHeaderError`:
    - `BadRate`: `frames` is above 0, or the track is complete, and `sample_rate` is outside `kMinTrackRate` to `kMaxTrackRate`;
-   - `BadStatus`: `status` isn't a `TrackStatus`; or the track is complete and its status is `Decoding`; or it isn't complete and its status isn't `Decoding`.
+   - `BadStatus`: `status` isn't a `TrackStatus`; or the track is complete and its status is `Decoding`.
 
-   A header with no frames, not complete, and status `Decoding` is valid whatever its `sample_rate`: the worker hasn't started.
+   A track that isn't complete reads as `Decoding`, whatever its status: the worker stores the final status just before it sets `kTrackComplete`, so a reader can find one without the other for a moment. A header with no frames, not complete, and status `Decoding` is valid whatever its `sample_rate`: the worker hasn't started.
 6. **Writing:** `TrackWriter`, in the same header, writes a track segment that the caller mapped read-write:
    - `TrackWriter(std::span<std::byte> segment)`: the whole mapping, at least `kTrackSamplesOffset` bytes. Its capacity is `(segment.size() - kTrackSamplesOffset) / 8` frames, at most `kMaxTrackFrames`.
    - `start(std::uint32_t sample_rate)`: stores the rate.
@@ -157,7 +157,7 @@ The fixtures are in `tests/acceptance/decode-worker/data/`, made by `make.sh` th
 The track segment (`track_segment_test.cpp`):
 
 - [ ] `[auto]` **The layout:** `TrackHeader`'s fields are at offsets 0, 8, and 16; it's standard-layout and trivially copyable; `kTrackSegmentSize` is `kTrackSamplesOffset` + 2³¹; and `ks::engine`'s three constants equal `ks::ipc`'s. (test: "Track segment: the layout")
-- [ ] `[auto]` **Reading:** `read_track()` accepts a zero-filled header as not started; accepts each status with `complete` as requirement 5 allows; clamps `frames` to the capacity; and refuses each case of requirement 5 with its error: a rate of 0, 7,999, and 384,001 with frames ready, a status of 4, a complete track still `Decoding`, and an incomplete one `Complete`. (test: "Track segment: reading the header")
+- [ ] `[auto]` **Reading:** `read_track()` accepts a zero-filled header as not started; accepts each status with `complete` as requirement 5 allows; clamps `frames` to the capacity; reads an incomplete track whose status is already final as `Decoding`; and refuses each case of requirement 5 with its error: a rate of 0, 7,999, and 384,001 with frames ready, a status of 4, and a complete track still `Decoding`. (test: "Track segment: reading the header")
 - [ ] `[auto]` **Writing:** on a segment from `SegmentFactory`, `TrackWriter` stores what `read_track()` then reads back: the rate after `start()`, the frames after each `publish()`, and the status and frames after `finish()`, with `complete`. (test: "Track segment: writing")
 - [ ] `[auto]` **Fuzzed:** `ks_track_segment_fuzz` runs 1,000,000 inputs clean under the `fuzz` preset. (test: the fuzz target)
 
@@ -231,3 +231,8 @@ These follow from them, and from the ADRs:
 6. **The worker probes before it gets a segment** (requirements 8 and 18). The supervisor can then refuse a load that would exceed the memory budget before creating anything. That's a change to ADR 0003 §6 (requirement 21).
 7. **The worker keeps decoding if the supervisor's socket closes** (requirement 19), as ADR 0003 §12 has the other processes keep running when the supervisor crashes.
 8. **Samples start at 16 KiB** (requirement 3), on a page boundary on both platforms, so step 10 can lock pages as they fill.
+
+Amended during the implementation, with the maintainer's approval:
+
+9. **An incomplete track reads as `Decoding`** (requirement 5). The first version refused an incomplete header with a final status, but the worker writes exactly that for a moment before it sets `kTrackComplete`, and the `tsan` run of "Worker: frames are published as they're decoded" caught a reader refusing it.
+10. **One earlier protected test changes:** `tests/acceptance/client-rings/messages_test.cpp` refused error code 4 as unknown, and 4 is now `Refused` (requirement 8), so that case uses 5. The client-rings step made the same change for code 3.
