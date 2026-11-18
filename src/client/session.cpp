@@ -2,11 +2,14 @@
 
 #include <ks/client/session.h>
 
+#include <ks/ipc/command.h>
 #include <ks/ipc/connection.h>
 #include <ks/ipc/fd.h>
 #include <ks/ipc/frame.h>
 #include <ks/ipc/listener.h>
 #include <ks/ipc/region.h>
+#include <ks/ipc/seqlock.h>
+#include <ks/ipc/spsc_ring.h>
 
 #include "decode_queue.h"
 #include <fcntl.h>
@@ -18,28 +21,33 @@
 #include <optional>
 #include <span>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
-
-// Requests, notifications, and the ring are written by later build passes
-// (specs/ks-play/plan.md): until then those calls return an error.
 
 namespace ks::client {
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using Producer = ipc::RingProducer<ipc::CommandSlot, ipc::kCommandRingCapacity>;
 
-/// The most a snapshot() takes in all (requirement 17).
+/// The most a snapshot() takes in all (requirement 17), and the most one
+/// read of the status block takes.
 constexpr Milliseconds kSnapshotBudget{10};
+/// How long open_ring() waits before asking again after Error Unavailable.
+constexpr Milliseconds kRingRetryInterval{10};
+/// How often the status block is polled for the ring's slot.
+constexpr Milliseconds kAckPollInterval{1};
 
 Error make_error(ErrorKind kind, std::string text) {
     return Error{.kind = kind, .code = ipc::ErrorCode::BadMessage, .text = std::move(text)};
 }
 
-Error not_written() {
-    return make_error(ErrorKind::Protocol, "stub");
+/// Sleeps for `interval`, but not past `deadline`.
+void sleep_until_next(Milliseconds interval, Clock::time_point deadline) {
+    std::this_thread::sleep_until(std::min(Clock::now() + interval, deadline));
 }
 
 Error closed_error() {
@@ -122,6 +130,17 @@ struct Session::Impl {
     std::uint32_t next_request_id = 1;
     /// DecodeEnded notifications not yet taken (at most 64).
     DecodeQueue pending;
+    /// The command-ring segment, mapped read-write, once open_ring() has
+    /// succeeded.
+    std::optional<ipc::Region> ring_region;
+    /// Writes into ring_region's own mapping.
+    std::optional<Producer> producer;
+    /// The ring's client slot, below kStateClients.
+    std::uint32_t slot = 0;
+    std::uint64_t next_sequence = 1;
+    /// The slot's rejected count as of the last wait_applied() (or
+    /// open_ring()).
+    std::uint64_t rejected_seen = 0;
 
     /// The error every call on `impl` returns, if it can't be used: a
     /// moved-from session, or one that is closed or has failed.
@@ -143,8 +162,120 @@ struct Session::Impl {
     /// Drops the connection and the mappings.
     void drop() noexcept {
         connection.reset();
+        producer.reset();
+        ring_region.reset();
         state_region.reset();
         state = nullptr;
+    }
+
+    /// A copy of this session's slot from the status block, read through
+    /// the seqlock. BadState if the block stays unstable for 10 ms or holds
+    /// an invalid rejection code.
+    [[nodiscard]] Result<ipc::ClientAck> read_ack() const {
+        if (state == nullptr) {
+            return std::unexpected{failed.value_or(closed_error())};
+        }
+        const ipc::SeqlockReader<ipc::EngineStatus> reader{state->status};
+        const Clock::time_point deadline = Clock::now() + kSnapshotBudget;
+        std::optional<ipc::EngineStatus> status = reader.try_read();
+        while (!status.has_value() && Clock::now() < deadline) {
+            std::this_thread::yield();
+            status = reader.try_read();
+        }
+        if (!status.has_value()) {
+            return std::unexpected{make_error(ErrorKind::BadState, "unstable seqlock: status")};
+        }
+        // slot was checked against kStateClients when the ring was opened.
+        const ipc::ClientAck ack = std::span{status->clients}[slot];
+        if (ack.last_rejection > static_cast<std::uint64_t>(Rejection::BadValue)) {
+            return std::unexpected{make_error(
+                ErrorKind::BadState, "invalid client " + std::to_string(slot) +
+                                         " last_rejection: " + std::to_string(ack.last_rejection))};
+        }
+        return ack;
+    }
+
+    /// Asks for a ring (again every 10 ms while the answer is Unavailable),
+    /// maps it, and waits until the status block shows its slot attached.
+    Result<std::uint32_t> open_ring(Clock::time_point deadline) {
+        std::vector<ipc::Fd> fds;
+        Result<ipc::msg::RingOpened> opened =
+            request<ipc::msg::RingOpened>(ipc::msg::OpenRing{}, deadline, &fds);
+        while (!opened && opened.error().kind == ErrorKind::Refused &&
+               opened.error().code == ipc::ErrorCode::Unavailable && Clock::now() < deadline) {
+            sleep_until_next(kRingRetryInterval, deadline);
+            opened = request<ipc::msg::RingOpened>(ipc::msg::OpenRing{}, deadline, &fds);
+        }
+        if (!opened) {
+            return std::unexpected{std::move(opened.error())};
+        }
+        if (fds.size() != 1 || opened->slot >= ipc::kStateClients) {
+            return std::unexpected{
+                fail(make_error(ErrorKind::Protocol, "RingOpened needs one descriptor and a "
+                                                     "slot below " +
+                                                         std::to_string(ipc::kStateClients)))};
+        }
+        std::expected<ipc::Region, ipc::MapFailure> region =
+            ipc::Region::map(fds.front().get(), ipc::SegmentKind::CommandRing,
+                             ipc::kCommandRingLayoutVersion, ipc::Access::ReadWrite);
+        if (!region) {
+            return std::unexpected{
+                make_error(ErrorKind::BadSegment, map_error_text(region.error()))};
+        }
+        auto* const ring = region->at<ipc::CommandRing>(ipc::kSegmentHeaderSize);
+        if (ring == nullptr) {
+            return std::unexpected{
+                make_error(ErrorKind::BadSegment, "the segment is too small for a command ring")};
+        }
+        slot = opened->slot;
+        ring_region = std::move(*region);
+        producer.emplace(*ring);
+
+        // Until the engine attaches the ring, the slot may still show its
+        // earlier occupant. A fresh ring has read nothing, and nothing is
+        // sent before this returns, so wait for an attached slot that has
+        // read no commands.
+        while (true) {
+            Result<ipc::ClientAck> ack = read_ack();
+            if (!ack) {
+                return std::unexpected{std::move(ack.error())};
+            }
+            if ((ack->flags & ipc::kClientAttached) != 0 && ack->commands_read == 0) {
+                rejected_seen = ack->rejected;
+                return slot;
+            }
+            if (Clock::now() >= deadline) {
+                return std::unexpected{
+                    make_error(ErrorKind::Timeout, "the engine didn't show slot " +
+                                                       std::to_string(slot) + " attached in time")};
+            }
+            sleep_until_next(kAckPollInterval, deadline);
+        }
+    }
+
+    /// Waits until the slot has read `sequence` (see Session::wait_applied()).
+    Result<Applied> wait_applied(std::uint64_t sequence, Clock::time_point deadline) {
+        while (true) {
+            Result<ipc::ClientAck> ack = read_ack();
+            if (!ack) {
+                return std::unexpected{std::move(ack.error())};
+            }
+            if ((ack->flags & ipc::kClientCorrupt) != 0) {
+                return Applied{.outcome = Outcome::Corrupt};
+            }
+            if (ack->last_sequence >= sequence) {
+                if (ack->rejected > rejected_seen) {
+                    rejected_seen = ack->rejected;
+                    return Applied{.outcome = Outcome::Rejected,
+                                   .rejection = static_cast<Rejection>(ack->last_rejection)};
+                }
+                return Applied{.outcome = Outcome::Applied};
+            }
+            if (Clock::now() >= deadline) {
+                return Applied{.outcome = Outcome::TimedOut};
+            }
+            sleep_until_next(kAckPollInterval, deadline);
+        }
     }
 
     /// Queues `message` and writes it, waiting for the socket until
@@ -222,9 +353,11 @@ struct Session::Impl {
     /// Sends `body` with the next request ID and waits until `deadline` for
     /// the reply of type `Reply` with that ID. An Error with that ID is
     /// Refused; no reply in time is Timeout. Notifications that arrive
-    /// meanwhile are queued, and every other message is ignored.
+    /// meanwhile are queued, and every other message is ignored. The reply's
+    /// descriptors go to `fds`, if given.
     template <typename Reply, typename Body>
-    std::expected<Reply, Error> request(Body body, Clock::time_point deadline) {
+    std::expected<Reply, Error> request(Body body, Clock::time_point deadline,
+                                        std::vector<ipc::Fd>* fds = nullptr) {
         const std::uint32_t id = next_request_id++;
         if (auto sent = send(ipc::Message{.request_id = id, .body = std::move(body)}, deadline);
             !sent) {
@@ -248,6 +381,9 @@ struct Session::Impl {
                     Error{.kind = ErrorKind::Refused, .code = error->code, .text = error->text}};
             }
             if (auto* const reply = std::get_if<Reply>(&got.body)) {
+                if (fds != nullptr) {
+                    *fds = std::move((*incoming)->fds);
+                }
                 return std::move(*reply);
             }
             // Not the reply this request waits for: ignored.
@@ -357,25 +493,52 @@ Session::Session(Session&&) noexcept = default;
 Session& Session::operator=(Session&&) noexcept = default;
 Session::~Session() = default;
 
-Result<std::uint32_t> Session::open_ring(Milliseconds /*timeout*/) {
+Result<std::uint32_t> Session::open_ring(Milliseconds timeout) {
+    const Clock::time_point deadline = Clock::now() + timeout;
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    if (impl_->producer) {
+        return std::unexpected{
+            make_error(ErrorKind::RingAlreadyOpen, "the session has a ring already")};
+    }
+    return impl_->open_ring(deadline);
 }
 
-Result<std::uint64_t> Session::send(const Command& /*command*/) {
+Result<std::uint64_t> Session::send(const Command& command) {
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    if (!impl_->producer) {
+        return std::unexpected{make_error(ErrorKind::NoRing, "the session has no ring")};
+    }
+    Producer& producer = *impl_->producer;
+    if (producer.corrupt()) {
+        return std::unexpected{make_error(ErrorKind::RingUnavailable, "the ring is corrupt")};
+    }
+    const std::uint64_t sequence = impl_->next_sequence;
+    const ipc::CommandSlot slot{.sequence = sequence,
+                                .type = static_cast<std::uint32_t>(command.type),
+                                .target = command.target,
+                                .payload = command.payload};
+    if (!producer.try_push(slot)) {
+        return std::unexpected{make_error(ErrorKind::RingUnavailable, producer.corrupt()
+                                                                          ? "the ring is corrupt"
+                                                                          : "the ring is full")};
+    }
+    ++impl_->next_sequence;
+    return sequence;
 }
 
-Result<Applied> Session::wait_applied(std::uint64_t /*sequence*/, Milliseconds /*timeout*/) {
+Result<Applied> Session::wait_applied(std::uint64_t sequence, Milliseconds timeout) {
+    const Clock::time_point deadline = Clock::now() + timeout;
     if (std::optional<Error> error = Impl::unusable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
-    return std::unexpected{not_written()};
+    if (!impl_->producer) {
+        return std::unexpected{make_error(ErrorKind::NoRing, "the session has no ring")};
+    }
+    return impl_->wait_applied(sequence, deadline);
 }
 
 Result<Snapshot> Session::snapshot() const {
