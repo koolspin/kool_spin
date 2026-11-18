@@ -11,12 +11,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# The tone at `rate`, through the encoder options that follow.
+# The tone at `rate`, through the encoder options that follow. It's made by
+# aevalsrc, at an amplitude of 0.5: lavfi's sine source peaks at 1/8 of full
+# scale.
 tone() {
     local out=$1 rate=$2
     shift 2
-    ffmpeg -nostdin -v error -y -f lavfi -i "sine=frequency=1000:sample_rate=$rate:duration=1" \
-        -af volume=-6dB -ac 2 -map_metadata -1 -fflags +bitexact "$@" "$out"
+    ffmpeg -nostdin -v error -y -f lavfi \
+        -i "aevalsrc=exprs=0.5*sin(2*PI*1000*t):c=stereo:s=$rate:d=1" \
+        -map_metadata -1 -fflags +bitexact "$@" "$out"
 }
 
 tone tone.aiff 44100 -c:a pcm_s16be
