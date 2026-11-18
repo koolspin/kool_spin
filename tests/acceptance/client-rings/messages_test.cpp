@@ -185,9 +185,10 @@ TEST_CASE("Ring messages: what's refused", "[messages]") {
         {.name = "a Detached with a 1-byte body",
          .frame = frame(MessageType::Detached, 1, bytes({0})),
          .error = MessageError::LongBody},
-        // The first error code after Unavailable.
-        {.name = "error code 4",
-         .frame = frame(MessageType::Error, 1, error_body(4)),
+        // The first error code after Refused (specs/decode-worker/spec.md
+        // requirement 8).
+        {.name = "error code 5",
+         .frame = frame(MessageType::Error, 1, error_body(5)),
          .error = MessageError::BadField},
     };
     cases.insert(cases.end(), more.begin(), more.end());
