@@ -51,6 +51,8 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
     case static_cast<std::uint16_t>(MessageType::LoadFile):
     case static_cast<std::uint16_t>(MessageType::FileLoaded):
     case static_cast<std::uint16_t>(MessageType::TrackLoaded):
+    case static_cast<std::uint16_t>(MessageType::UnloadDeck):
+    case static_cast<std::uint16_t>(MessageType::DeckUnloaded):
         return TypeRules{.descriptors = 0, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Welcome):
     case static_cast<std::uint16_t>(MessageType::RingOpened):
@@ -63,6 +65,7 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
         return TypeRules{.descriptors = 0, .request = RequestRule::Any};
     case static_cast<std::uint16_t>(MessageType::Ready):
     case static_cast<std::uint16_t>(MessageType::TrackReleased):
+    case static_cast<std::uint16_t>(MessageType::DecodeEnded):
         return TypeRules{.descriptors = 0, .request = RequestRule::Zero};
     default:
         return std::nullopt;
@@ -254,6 +257,13 @@ bool valid_deck(std::uint32_t deck) noexcept {
 bool valid_path(std::span<const std::byte> path) noexcept {
     return !path.empty() && path.size() <= kMaxPathSize && path.front() == std::byte{'/'} &&
            valid_text(path);
+}
+
+/// True if a DecodeEnded's fields are in range.
+bool valid_decode_ended(const msg::DecodeEnded& ended) noexcept {
+    return ended.track_id != 0 && ended.frames <= kMaxTrackFrames &&
+           (ended.status == TrackStatus::Complete || ended.status == TrackStatus::Truncated ||
+            ended.status == TrackStatus::Failed);
 }
 
 /// True if a FileLoaded's fields are in range.
@@ -448,6 +458,52 @@ std::expected<Message, MessageError> track_released_body(const Frame& frame) {
                    .body = msg::TrackReleased{.track_id = *track_id}};
 }
 
+/// An UnloadDeck's body.
+std::expected<Message, MessageError> unload_deck_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint32_t, MessageError> deck = reader.integer(4);
+    if (!deck) {
+        return std::unexpected{deck.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    if (!valid_deck(*deck)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id, .body = msg::UnloadDeck{.deck = *deck}};
+}
+
+/// A DecodeEnded's body.
+std::expected<Message, MessageError> decode_ended_body(const Frame& frame) {
+    BodyReader reader{frame.body};
+    const std::expected<std::uint64_t, MessageError> track_id = reader.integer64();
+    if (!track_id) {
+        return std::unexpected{track_id.error()};
+    }
+    const std::expected<std::uint64_t, MessageError> frames = reader.integer64();
+    if (!frames) {
+        return std::unexpected{frames.error()};
+    }
+    const std::expected<std::uint32_t, MessageError> status = reader.integer(1);
+    if (!status) {
+        return std::unexpected{status.error()};
+    }
+    if (!reader.done()) {
+        return std::unexpected{MessageError::LongBody};
+    }
+    // Checked before the cast, so no value outside TrackStatus is made.
+    if (*status > static_cast<std::uint32_t>(TrackStatus::Failed)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    const msg::DecodeEnded ended{
+        .track_id = *track_id, .frames = *frames, .status = static_cast<TrackStatus>(*status)};
+    if (!valid_decode_ended(ended)) {
+        return std::unexpected{MessageError::BadField};
+    }
+    return Message{.request_id = frame.request_id, .body = ended};
+}
+
 /// An Error message's body.
 std::expected<msg::Error, MessageError> decode_error(std::span<const std::byte> body) {
     BodyReader reader{body};
@@ -585,6 +641,15 @@ std::optional<MessageType> type_of(const Message& message) noexcept {
     if (std::holds_alternative<msg::TrackReleased>(body)) {
         return MessageType::TrackReleased;
     }
+    if (std::holds_alternative<msg::UnloadDeck>(body)) {
+        return MessageType::UnloadDeck;
+    }
+    if (std::holds_alternative<msg::DeckUnloaded>(body)) {
+        return MessageType::DeckUnloaded;
+    }
+    if (std::holds_alternative<msg::DecodeEnded>(body)) {
+        return MessageType::DecodeEnded;
+    }
     return std::nullopt;
 }
 
@@ -703,6 +768,24 @@ bool append_fields(std::vector<std::byte>& body, const msg::TrackReleased& relea
     return true;
 }
 
+bool append_fields(std::vector<std::byte>& body, const msg::UnloadDeck& unload) {
+    if (!valid_deck(unload.deck)) {
+        return false;
+    }
+    append_integer(body, unload.deck, 4);
+    return true;
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::DecodeEnded& ended) {
+    if (!valid_decode_ended(ended)) {
+        return false;
+    }
+    append_integer64(body, ended.track_id);
+    append_integer64(body, ended.frames);
+    append_integer(body, static_cast<std::uint32_t>(ended.status), 1);
+    return true;
+}
+
 } // namespace
 
 std::expected<Message, MessageError> decode(const Frame& frame) {
@@ -774,6 +857,12 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         return empty_body<msg::TrackLoaded>(frame);
     case MessageType::TrackReleased:
         return track_released_body(frame);
+    case MessageType::UnloadDeck:
+        return unload_deck_body(frame);
+    case MessageType::DeckUnloaded:
+        return empty_body<msg::DeckUnloaded>(frame);
+    case MessageType::DecodeEnded:
+        return decode_ended_body(frame);
     }
     return std::unexpected{MessageError::UnknownType};
 }
