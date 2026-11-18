@@ -18,7 +18,7 @@ ks_add_test(ks_core_tests
     LIBRARIES ks::core)
 
 ks_add_test(ks_client_tests
-    SOURCES client/command_test.cpp client/snapshot_test.cpp
+    SOURCES client/command_test.cpp client/session_test.cpp client/snapshot_test.cpp
     LIBRARIES ks::client)
 
 ks_add_test(ks_dsp_tests
