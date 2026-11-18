@@ -17,14 +17,17 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -267,6 +270,90 @@ TEST_CASE("Supervisor tracks: files it refuses", "[supervisor][tracks]") {
     CHECK(code_of(answer) == ErrorCode::BadMessage);
     CHECK(ks::processes::test::closes(client.connection));
 }
+
+#ifdef __linux__
+namespace {
+
+using ks::track_loading::test::Process;
+
+/// The state /proc/<pid>/stat gives `pid` ('R', 'S', 'Z', and so on), or
+/// '\0' if there's no such process.
+char state_of(pid_t pid) {
+    std::ifstream stat{"/proc/" + std::to_string(pid) + "/stat"};
+    std::string line;
+    std::getline(stat, line);
+    // The state follows the command name, which is in parentheses and may
+    // itself hold any character.
+    const std::size_t close = line.rfind(')');
+    return close != std::string::npos && close + 2 < line.size() ? line[close + 2] : '\0';
+}
+
+/// True if `pid` has a descriptor open on `file`.
+bool holds(pid_t pid, const std::filesystem::path& file) {
+    // Without exceptions: descriptors come and go while it reads.
+    std::error_code error;
+    for (std::filesystem::directory_iterator fd{"/proc/" + std::to_string(pid) + "/fd", error};
+         !error && fd != std::filesystem::directory_iterator{}; fd.increment(error)) {
+        std::error_code ignored;
+        if (std::filesystem::equivalent(fd->path(), file, ignored)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Stops `process` with SIGSTOP, and continues it when it goes out of
+/// scope, whether or not the test got that far.
+class Stopped {
+public:
+    explicit Stopped(const Process& process) : process_{process} { process_.signal(SIGSTOP); }
+    Stopped(const Stopped&) = delete;
+    Stopped& operator=(const Stopped&) = delete;
+    Stopped(Stopped&&) = delete;
+    Stopped& operator=(Stopped&&) = delete;
+    ~Stopped() { process_.signal(SIGCONT); }
+
+private:
+    const Process& process_;
+};
+
+} // namespace
+
+// A pass of kool_spin's poll loop handles signals before sockets, so it can
+// reap a worker before it reads the last message the worker sent
+// (requirement 15). Stopping kool_spin while the fake refuses and exits
+// makes that order certain: when it continues, both are waiting.
+TEST_CASE("Supervisor tracks: a refusal just before the worker exits", "[supervisor][tracks]") {
+    Session session{kFakeWorkerPath};
+    TrackClient client = join(session, "late");
+    const std::filesystem::path track = write_fake(
+        session.dir(), "late-refusal", {.probe_delay_ms = 1'000, .refusal = "the fake refuses"});
+    const std::uint32_t id = send_load(client, 0, track);
+
+    // Once the fake holds the file, it has its Probe, and refuses 1 s later.
+    pid_t worker = 0;
+    REQUIRE(eventually([&] {
+        const std::vector<std::pair<std::uint64_t, pid_t>> pids =
+            worker_pids(session.kool_spin_log());
+        worker = pids.empty() ? 0 : pids.front().second;
+        return worker > 0 && holds(worker, track);
+    }));
+    {
+        const Stopped stopped{session.process()};
+        // Still running, so kool_spin hasn't read its refusal yet.
+        const char state = state_of(worker);
+        CAPTURE(state);
+        REQUIRE((state != '\0' && state != 'Z'));
+        REQUIRE(eventually([&] { return state_of(worker) == 'Z'; }));
+    }
+
+    const std::optional<Received> answer = ks::processes::test::receive(client.connection);
+    CHECK(request_id_of(answer) == id);
+    const msg::Error refusal = required_error(answer);
+    CHECK(refusal.code == ErrorCode::Refused);
+    CHECK(refusal.text == "the fake refuses");
+}
+#endif
 
 TEST_CASE("Supervisor tracks: the memory budget", "[supervisor][tracks]") {
     const Session session{kFakeWorkerPath, {"--track-memory", "1"}};

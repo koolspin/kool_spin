@@ -1590,8 +1590,10 @@ void Supervisor::handle_worker_message(Load& load, const ipc::Message& message) 
 
 void Supervisor::probed(Load& load, const ipc::msg::Probed& probed) {
     load.probed = probed;
-    if (phase_ != Phase::Running) {
-        // Stopping: its client has had its answer.
+    if (phase_ != Phase::Running || load.worker_pid == 0) {
+        // Stopping, and its client has had its answer; or the worker has
+        // ended, and this was among its last messages (worker_ended()): no
+        // one would decode the track.
         close_worker(load);
         return;
     }
@@ -1783,6 +1785,9 @@ void Supervisor::worker_ended(Load& load, int status) {
     if (!load.probed) {
         refuse_load(load, ipc::ErrorCode::Refused,
                     std::format("ks-worker {} before it probed the file", how));
+    } else if (!load.decode_sent) {
+        refuse_load(load, ipc::ErrorCode::Refused,
+                    std::format("ks-worker {} before it decoded the file", how));
     }
     if (load.decode_sent && load.mapping) {
         finish_track(load, how);
