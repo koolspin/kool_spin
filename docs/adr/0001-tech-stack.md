@@ -26,7 +26,7 @@ kool_spin runs as several processes (supervisor, engine, UI, workers), and each 
 | Dependencies | vcpkg manifest mode, pinned baseline, for everything except Qt | Same versions on Linux, macOS, and CI. Add a dependency only when a phase needs it. |
 | UI | Qt 6.8 LTS or later, Qt Quick/QML, in the UI process only; waveforms as `QQuickRhiItem` | GPU rendering via Metal on macOS and Vulkan/OpenGL on Linux. Installed with the Qt installer or aqtinstall: Ubuntu 24.04 ships Qt 6.4, which is too old. |
 | Audio I/O | miniaudio, behind our own `AudioBackend` interface, in the engine process | Linux: JACK API through PipeWire by default, ALSA `hw:` for exclusive access. macOS: CoreAudio. Device-change notifications support ADR 0002's device-loss handling. |
-| Decoding | FFmpeg (libavformat, libavcodec), in worker processes only | |
+| Decoding | FFmpeg (libavformat, libavcodec, libswresample), in worker processes only | libswresample converts decoded audio to interleaved stereo float. It doesn't change the sample rate: tracks stay at the file's rate (ADR 0003 §9). |
 | Tags and cover art | TagLib 2.x, in worker processes only | |
 | Database | SQLite (WAL mode, FTS5) with SQLiteCpp | Hand-written SQL and versioned migrations; no ORM. One process owns the database. |
 | Beat grid and BPM | qm-dsp (vendored), in worker processes | |
