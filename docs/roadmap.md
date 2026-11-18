@@ -107,7 +107,7 @@ Exit criteria:
 - [ ] `[auto]` An engine whose audio thread stops making progress is killed and restarted, and resumes the same way as after a crash.
 - [ ] `[auto]` Killing the supervisor with `kill -9` leaves playback running. Relaunching reports the running engine and can stop it.
 - [ ] `[auto]` Corrupted shared state makes the engine start clean with decks paused; it never crashes.
-- [ ] `[auto]` Deleting a playing track's file doesn't interrupt playback.
+- [x] `[auto]` Deleting a playing track's file doesn't interrupt playback. *"Supervisor tracks: deleting the file while it plays" (pull request #39): a 10-minute WAV is deleted as soon as it loads, and it still decodes in full while the deck plays on, on Linux and macOS. Checking the recorded output for a gap waits for step 7's recording segment.*
 - [ ] `[auto]` After all processes are killed, relaunching restores the previous session with decks paused.
 - [ ] `[manual]` Removing the USB drive that holds a playing track doesn't interrupt it.
 - [ ] `[manual]` The one-hour soak test passes again with all processes running, driven through `ks-play`.
