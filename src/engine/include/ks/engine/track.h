@@ -6,6 +6,7 @@
 /// decoding has got.
 
 #include <ks/core/realtime.h>
+#include <ks/ipc/track_segment.h>
 
 #include <atomic>
 #include <cstdint>
@@ -13,12 +14,13 @@
 
 namespace ks::engine {
 
-/// The lowest track sample rate a deck accepts.
-inline constexpr std::uint32_t kMinTrackRate = 8'000;
-/// The highest track sample rate a deck accepts.
-inline constexpr std::uint32_t kMaxTrackRate = 384'000;
-/// The largest capacity a deck accepts, in frames: 2 GiB of samples.
-inline constexpr std::uint64_t kMaxTrackFrames = std::uint64_t{1} << 28U;
+/// The lowest track sample rate a deck accepts: a track segment's.
+inline constexpr std::uint32_t kMinTrackRate = ipc::kMinTrackRate;
+/// The highest track sample rate a deck accepts: a track segment's.
+inline constexpr std::uint32_t kMaxTrackRate = ipc::kMaxTrackRate;
+/// The largest capacity a deck accepts, in frames: 2 GiB of samples, as a
+/// track segment holds.
+inline constexpr std::uint64_t kMaxTrackFrames = ipc::kMaxTrackFrames;
 
 /// How much of a track is decoded.
 struct TrackReady {

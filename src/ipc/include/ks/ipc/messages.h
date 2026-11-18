@@ -32,14 +32,20 @@
 /// | Attached   | 12  | Slot (32 bits)                | 0           | The Attach's        |
 /// | Detach     | 13  | Slot (32 bits)                | 0           | Non-zero            |
 /// | Detached   | 14  | Empty                         | 0           | The Detach's        |
+/// | Probe      | 15  | Empty                         | 1           | Non-zero            |
+/// | Probed     | 16  | Rate, channels (32 bits each); estimated frames (64) | 0 | The Probe's |
+/// | Decode     | 17  | Max frames (64 bits)          | 1           | Non-zero            |
+/// | Decoded    | 18  | Frames (64 bits); status (8)  | 0           | The Decode's        |
 ///
-/// Types 4 to 8 come from specs/processes/spec.md requirement 6, and types 9
-/// to 14 from specs/client-rings/spec.md requirement 3. A slot is a client
-/// slot's index, below kStateClients. Later steps add types with the same
-/// rules, each in its own spec.
+/// Types 4 to 8 come from specs/processes/spec.md requirement 6, types 9 to
+/// 14 from specs/client-rings/spec.md requirement 3, and types 15 to 18 from
+/// specs/decode-worker/spec.md requirement 8. A slot is a client slot's index,
+/// below kStateClients. Later steps add types with the same rules, each in
+/// its own spec.
 
 #include <ks/ipc/frame.h>
 #include <ks/ipc/state.h>
+#include <ks/ipc/track_segment.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -66,6 +72,10 @@ enum class MessageType : std::uint8_t {
     Attached = 12,   ///< The engine answers an Attach with the ring's client slot.
     Detach = 13,     ///< The supervisor asks the engine to detach a client slot's ring.
     Detached = 14,   ///< The engine answers a Detach once the slot is free again.
+    Probe = 15,      ///< The supervisor asks a worker about a file.
+    Probed = 16,     ///< A worker answers a Probe with the file's rate, channels, and length.
+    Decode = 17,     ///< The supervisor asks a worker to decode the file into a track segment.
+    Decoded = 18,    ///< A worker answers a Decode once decoding has ended.
 };
 
 /// What an Error message reports. The values are part of the protocol. The
@@ -80,7 +90,13 @@ enum class ErrorCode : std::uint8_t {
     /// carries on. The peer may ask again later (specs/client-rings/spec.md
     /// requirement 4).
     Unavailable = 3,
+    /// The sender won't do what was asked, for the reason in the text
+    /// (specs/decode-worker/spec.md requirement 8).
+    Refused = 4,
 };
+
+/// The most channels a Probed message reports.
+inline constexpr std::uint32_t kMaxProbedChannels = 64;
 
 /// The longest text an Error message carries, in bytes.
 inline constexpr std::size_t kMaxErrorTextSize = 1024;
@@ -174,6 +190,44 @@ struct Detached {
     friend bool operator==(const Detached&, const Detached&) = default;
 };
 
+/// The supervisor asks a worker about a file. Its one descriptor is the file,
+/// open for reading.
+struct Probe {
+    friend bool operator==(const Probe&, const Probe&) = default;
+};
+
+/// A worker's answer to a Probe.
+struct Probed {
+    /// The file's rate in Hz, from kMinTrackRate to kMaxTrackRate.
+    std::uint32_t sample_rate = 0;
+    /// The file's channels, from 1 to kMaxProbedChannels.
+    std::uint32_t channels = 0;
+    /// The file's length in frames as the decoder estimates it before
+    /// decoding, at most kMaxTrackFrames; 0 if it can't.
+    std::uint64_t estimated_frames = 0;
+
+    friend bool operator==(const Probed&, const Probed&) = default;
+};
+
+/// The supervisor asks a worker to decode the file it probed. Its one
+/// descriptor is the track segment.
+struct Decode {
+    /// The most frames to decode, from 1 to kMaxTrackFrames.
+    std::uint64_t max_frames = 0;
+
+    friend bool operator==(const Decode&, const Decode&) = default;
+};
+
+/// A worker's answer to a Decode, once decoding has ended.
+struct Decoded {
+    /// The frames decoded, at most kMaxTrackFrames.
+    std::uint64_t frames = 0;
+    /// How decoding ended: any TrackStatus but Decoding.
+    TrackStatus status = TrackStatus::Complete;
+
+    friend bool operator==(const Decoded&, const Decoded&) = default;
+};
+
 } // namespace msg
 
 /// A message: its request ID and its body.
@@ -181,7 +235,7 @@ struct Message {
     std::uint32_t request_id = 0;
     std::variant<msg::Ping, msg::Pong, msg::Error, msg::Hello, msg::Welcome, msg::Stop, msg::Done,
                  msg::Ready, msg::OpenRing, msg::RingOpened, msg::Attach, msg::Attached,
-                 msg::Detach, msg::Detached>
+                 msg::Detach, msg::Detached, msg::Probe, msg::Probed, msg::Decode, msg::Decoded>
         body;
 
     friend bool operator==(const Message&, const Message&) = default;

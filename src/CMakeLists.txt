@@ -1,4 +1,5 @@
 add_subdirectory(core)
+add_subdirectory(decode)
 add_subdirectory(dsp)
 add_subdirectory(engine)
 add_subdirectory(ipc)

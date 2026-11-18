@@ -1,7 +1,8 @@
 name: Set up the build environment
 description: >
-  Installs the compiler toolchain and Ninja, and vcpkg at the commit pinned by
-  vcpkg.json's builtin-baseline, with a cache for vcpkg's built packages.
+  Installs the compiler toolchain and Ninja, NASM on Linux (FFmpeg's build
+  needs it on x86-64), and vcpkg at the commit pinned by vcpkg.json's
+  builtin-baseline, with a cache for vcpkg's built packages.
 
 inputs:
   llvm-version:
@@ -11,7 +12,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install LLVM ${{ inputs.llvm-version }} and Ninja (Linux)
+    - name: Install LLVM ${{ inputs.llvm-version }}, Ninja, and NASM (Linux)
       if: runner.os == 'Linux'
       shell: bash
       run: |
@@ -21,6 +22,7 @@ runs:
           "clang-tidy-${{ inputs.llvm-version }}" \
           "clang-format-${{ inputs.llvm-version }}" \
           "libclang-rt-${{ inputs.llvm-version }}-dev" \
+          nasm \
           ninja-build
 
     - name: Install Ninja (macOS)

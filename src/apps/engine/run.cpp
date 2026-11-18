@@ -7,6 +7,7 @@
 #include <ks/engine/output_controller.h>
 #include <ks/engine/render_core.h>
 #include <ks/engine_app/options.h>
+#include <ks/ipc/child_process.h>
 #include <ks/ipc/command.h>
 #include <ks/ipc/connection.h>
 #include <ks/ipc/fd.h>
@@ -56,79 +57,6 @@ constexpr std::chrono::seconds kDoneTimeout{1};
 // No handlers: the stop signals are blocked in every thread, and the control
 // thread takes them on each pass of its loop. Nothing runs asynchronously, so
 // no handler can run on the audio thread, or inside KS_NONBLOCKING code.
-
-/// The signals that stop the engine.
-constexpr std::array<int, 3> kStopSignals{SIGTERM, SIGINT, SIGHUP};
-
-/// kStopSignals, as a set.
-sigset_t stop_signals() noexcept {
-    sigset_t set{};
-    static_cast<void>(sigemptyset(&set));
-    for (const int signal : kStopSignals) {
-        static_cast<void>(sigaddset(&set, signal));
-    }
-    return set;
-}
-
-/// Blocks the stop signals in the calling thread, and so in every thread it
-/// creates from then on. Returns the error, if any. The mask stays until the
-/// process exits: unblocked, a second signal sent during the fade-out would
-/// end the engine by its default action.
-std::error_code block_stop_signals() noexcept {
-    const sigset_t set = stop_signals();
-    return std::error_code{::pthread_sigmask(SIG_BLOCK, &set, nullptr), std::system_category()};
-}
-
-/// Takes a pending stop signal, if there is one. True if it took one.
-bool take_stop_signal() noexcept {
-    sigset_t pending{};
-    static_cast<void>(sigemptyset(&pending));
-    if (::sigpending(&pending) != 0) {
-        return false;
-    }
-    if (!std::ranges::any_of(kStopSignals,
-                             [&](int signal) { return sigismember(&pending, signal) == 1; })) {
-        return false;
-    }
-    // One is pending, and every thread blocks it, so this returns at once.
-    const sigset_t set = stop_signals();
-    int taken = 0;
-    static_cast<void>(::sigwait(&set, &taken));
-    return true;
-}
-
-/// Sets FD_CLOEXEC on `fd`, and O_NONBLOCK too if `nonblocking`. False if
-/// either fails.
-bool set_flags(int fd, bool nonblocking) noexcept {
-    // NOLINTBEGIN(cppcoreguidelines-pro-type-vararg): fcntl() is variadic
-    const int flags = ::fcntl(fd, F_GETFD);
-    if (flags == -1 || ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
-        return false;
-    }
-    if (!nonblocking) {
-        return true;
-    }
-    const int status = ::fcntl(fd, F_GETFL);
-    return status != -1 && ::fcntl(fd, F_SETFL, status | O_NONBLOCK) != -1;
-    // NOLINTEND(cppcoreguidelines-pro-type-vararg)
-}
-
-/// True if `fd` is open.
-bool is_open(int fd) noexcept {
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): fcntl() is variadic
-    return ::fcntl(fd, F_GETFD) != -1;
-}
-
-/// True if `fd` is a stream socket.
-bool is_stream_socket(int fd) noexcept {
-    struct stat status{};
-    if (::fstat(fd, &status) != 0 || !S_ISSOCK(status.st_mode)) {
-        return false;
-    }
-    int type = 0;
-    socklen_t size = sizeof type;
-    return ::getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &size) == 0 && type == SOCK_STREAM;
-}
 
 /// Why the engine couldn't start: its exit status, and a one-line reason.
 struct StartFailure {
@@ -277,24 +205,24 @@ private:
 
 std::expected<void, StartFailure> EngineProcess::start() {
     // Before any thread exists, so that every thread inherits the mask.
-    if (const std::error_code blocked = block_stop_signals(); blocked) {
+    if (const std::error_code blocked = ipc::block_stop_signals(); blocked) {
         return failure("can't block signals: " + blocked.message());
     }
 
     // 1. The descriptors.
     const int supervisor_fd = options_->supervisor_fd.value_or(-1);
     const int state_fd = options_->state_fd.value_or(-1);
-    if (!is_stream_socket(supervisor_fd) || !set_flags(supervisor_fd, true)) {
+    if (!ipc::adopt_socket(supervisor_fd)) {
         return failure(std::format("--supervisor-fd {} isn't a stream socket", supervisor_fd));
     }
     ipc::Fd supervisor{supervisor_fd};
-    if (!is_open(state_fd) || !set_flags(state_fd, false)) {
+    if (!ipc::adopt_descriptor(state_fd)) {
         return failure(std::format("--state-fd {} isn't open", state_fd));
     }
     state_fd_ = ipc::Fd{state_fd};
     if (options_->log_fd) {
         const int log_fd = *options_->log_fd;
-        if (!is_open(log_fd) || !set_flags(log_fd, false)) {
+        if (!ipc::adopt_descriptor(log_fd)) {
             return failure(std::format("--log-fd {} isn't open", log_fd));
         }
         log_fd_ = ipc::Fd{log_fd};
@@ -431,7 +359,7 @@ int EngineProcess::loop() {
         log_events(false);
         collect();
         retry_detaches();
-        if (take_stop_signal()) {
+        if (ipc::take_stop_signal()) {
             return stop(std::nullopt, "got a signal");
         }
         if (polled.revents != 0 && supervisor_) {
