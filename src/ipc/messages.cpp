@@ -525,6 +525,14 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         return decode_body(frame);
     case MessageType::Decoded:
         return decoded_body(frame);
+    case MessageType::LoadFile:
+    case MessageType::FileLoaded:
+    case MessageType::LoadTrack:
+    case MessageType::TrackLoaded:
+    case MessageType::TrackReleased:
+        // Stub until specs/track-loading/spec.md is built: rules_for() doesn't
+        // know these types yet, so they never get here.
+        break;
     }
     return std::unexpected{MessageError::UnknownType};
 }
