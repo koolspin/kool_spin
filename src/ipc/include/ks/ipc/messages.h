@@ -91,9 +91,10 @@ enum class MessageType : std::uint8_t {
     LoadTrack = 21,     ///< The supervisor asks the engine to put a track segment on a deck.
     TrackLoaded = 22,   ///< The engine answers a LoadTrack once it has given the deck the track.
     TrackReleased = 23, ///< The engine tells the supervisor that no deck holds a track any more.
-    UnloadDeck = 24,    ///< A client asks the supervisor, and the supervisor the engine, to unload a deck.
-    DeckUnloaded = 25,  ///< Answers an UnloadDeck.
-    DecodeEnded = 26,   ///< The supervisor tells a client how decoding of its load ended.
+    UnloadDeck =
+        24, ///< A client asks the supervisor, and the supervisor the engine, to unload a deck.
+    DeckUnloaded = 25, ///< Answers an UnloadDeck.
+    DecodeEnded = 26,  ///< The supervisor tells a client how decoding of its load ended.
 };
 
 /// What an Error message reports. The values are part of the protocol. The

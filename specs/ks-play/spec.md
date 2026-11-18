@@ -185,7 +185,7 @@ The client library (`session_test.cpp`), with `kool_spin` running the null backe
 
 Everywhere:
 
-- [ ] `[auto]` **The earlier steps' tests** all still pass. One protected test changes: any case that uses type 24, 25, or 26 as an unknown type uses 65,535 instead.
+- [ ] `[auto]` **The earlier steps' tests** all still pass. Three protected test helpers change, because a `DecodeEnded` can now arrive between a client's request and its answer: `load()` in `tests/acceptance/track-loading/tracks_support.h`, `open_ring()` in `tests/acceptance/client-rings/rings_support.h`, and one read in "Supervisor tracks: the latest load wins" skip it. No existing test used types 24 to 26 as unknown.
 - [ ] `[auto]` **Every CI configuration:** all of the above pass on Linux in every preset, and on macOS arm64 in `debug`, `release`, `asan`, and `tsan`.
 - [ ] `[manual]` **By hand:** the maintainer runs `kool_spin` with the real backend on the Inpulse 500, and with `ks-play` loads two tracks, plays them, moves the crossfader, and watches `ks-play status --watch` while the audio plays, with no underruns caused by `ks-play` running.
 

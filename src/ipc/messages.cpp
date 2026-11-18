@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -570,87 +571,25 @@ bool request_id_follows(std::uint32_t request_id, RequestRule rule) noexcept {
 
 /// The type of `message`'s body, or nothing if it has none (a variant left
 /// valueless by an exception).
+static_assert(std::is_same_v<std::variant_alternative_t<0, decltype(Message::body)>, msg::Ping>);
+static_assert(std::is_same_v<
+              std::variant_alternative_t<static_cast<std::size_t>(MessageType::TrackReleased) - 1,
+                                         decltype(Message::body)>,
+              msg::TrackReleased>);
+static_assert(std::is_same_v<
+              std::variant_alternative_t<static_cast<std::size_t>(MessageType::DecodeEnded) - 1,
+                                         decltype(Message::body)>,
+              msg::DecodeEnded>);
+static_assert(std::variant_size_v<decltype(Message::body)> ==
+              static_cast<std::size_t>(MessageType::DecodeEnded));
+
 std::optional<MessageType> type_of(const Message& message) noexcept {
-    const auto& body = message.body;
-    if (std::holds_alternative<msg::Ping>(body)) {
-        return MessageType::Ping;
+    // The variant's alternatives are in the order of the types, which start
+    // at 1.
+    if (message.body.valueless_by_exception()) {
+        return std::nullopt;
     }
-    if (std::holds_alternative<msg::Pong>(body)) {
-        return MessageType::Pong;
-    }
-    if (std::holds_alternative<msg::Error>(body)) {
-        return MessageType::Error;
-    }
-    if (std::holds_alternative<msg::Hello>(body)) {
-        return MessageType::Hello;
-    }
-    if (std::holds_alternative<msg::Welcome>(body)) {
-        return MessageType::Welcome;
-    }
-    if (std::holds_alternative<msg::Stop>(body)) {
-        return MessageType::Stop;
-    }
-    if (std::holds_alternative<msg::Done>(body)) {
-        return MessageType::Done;
-    }
-    if (std::holds_alternative<msg::Ready>(body)) {
-        return MessageType::Ready;
-    }
-    if (std::holds_alternative<msg::OpenRing>(body)) {
-        return MessageType::OpenRing;
-    }
-    if (std::holds_alternative<msg::RingOpened>(body)) {
-        return MessageType::RingOpened;
-    }
-    if (std::holds_alternative<msg::Attach>(body)) {
-        return MessageType::Attach;
-    }
-    if (std::holds_alternative<msg::Attached>(body)) {
-        return MessageType::Attached;
-    }
-    if (std::holds_alternative<msg::Detach>(body)) {
-        return MessageType::Detach;
-    }
-    if (std::holds_alternative<msg::Detached>(body)) {
-        return MessageType::Detached;
-    }
-    if (std::holds_alternative<msg::Probe>(body)) {
-        return MessageType::Probe;
-    }
-    if (std::holds_alternative<msg::Probed>(body)) {
-        return MessageType::Probed;
-    }
-    if (std::holds_alternative<msg::Decode>(body)) {
-        return MessageType::Decode;
-    }
-    if (std::holds_alternative<msg::Decoded>(body)) {
-        return MessageType::Decoded;
-    }
-    if (std::holds_alternative<msg::LoadFile>(body)) {
-        return MessageType::LoadFile;
-    }
-    if (std::holds_alternative<msg::FileLoaded>(body)) {
-        return MessageType::FileLoaded;
-    }
-    if (std::holds_alternative<msg::LoadTrack>(body)) {
-        return MessageType::LoadTrack;
-    }
-    if (std::holds_alternative<msg::TrackLoaded>(body)) {
-        return MessageType::TrackLoaded;
-    }
-    if (std::holds_alternative<msg::TrackReleased>(body)) {
-        return MessageType::TrackReleased;
-    }
-    if (std::holds_alternative<msg::UnloadDeck>(body)) {
-        return MessageType::UnloadDeck;
-    }
-    if (std::holds_alternative<msg::DeckUnloaded>(body)) {
-        return MessageType::DeckUnloaded;
-    }
-    if (std::holds_alternative<msg::DecodeEnded>(body)) {
-        return MessageType::DecodeEnded;
-    }
-    return std::nullopt;
+    return static_cast<MessageType>(message.body.index() + 1);
 }
 
 // Each type's fields, appended to a body for encode(). Each returns false,

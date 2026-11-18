@@ -91,11 +91,13 @@ TEST_CASE("Play messages: round trip", "[messages]") {
             {.request_id = 0,
              .body = msg::DecodeEnded{.track_id = 1, .frames = 0, .status = TrackStatus::Complete}},
             {.request_id = 0,
-             .body = msg::DecodeEnded{
-                 .track_id = 9, .frames = kMaxTrackFrames, .status = TrackStatus::Truncated}},
+             .body = msg::DecodeEnded{.track_id = 9,
+                                      .frames = kMaxTrackFrames,
+                                      .status = TrackStatus::Truncated}},
             {.request_id = 0,
-             .body = msg::DecodeEnded{
-                 .track_id = kLargestId, .frames = 20'480, .status = TrackStatus::Failed}},
+             .body = msg::DecodeEnded{.track_id = kLargestId,
+                                      .frames = 20'480,
+                                      .status = TrackStatus::Failed}},
         };
         for (std::size_t i = 0; i < messages.size(); ++i) {
             CAPTURE(i);
@@ -191,17 +193,16 @@ TEST_CASE("Play messages: what's refused", "[messages]") {
         MessageError error;
     };
     const std::vector<Bad> bad{
-        {"deck 4",
-         {.request_id = 1, .body = msg::UnloadDeck{.deck = 4}},
-         MessageError::BadField},
+        {"deck 4", {.request_id = 1, .body = msg::UnloadDeck{.deck = 4}}, MessageError::BadField},
         {"a DecodeEnded for track 0",
          {.request_id = 0,
           .body = msg::DecodeEnded{.track_id = 0, .frames = 1, .status = TrackStatus::Complete}},
          MessageError::BadField},
         {"a DecodeEnded with more than the cap",
          {.request_id = 0,
-          .body = msg::DecodeEnded{
-              .track_id = 1, .frames = kMaxTrackFrames + 1, .status = TrackStatus::Complete}},
+          .body = msg::DecodeEnded{.track_id = 1,
+                                   .frames = kMaxTrackFrames + 1,
+                                   .status = TrackStatus::Complete}},
          MessageError::BadField},
         {"a DecodeEnded still decoding",
          {.request_id = 0,

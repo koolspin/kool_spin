@@ -42,6 +42,7 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -319,6 +320,15 @@ struct PendingDetach {
     ipc::Fd segment;
 };
 
+/// An UnloadDeck sent to the engine, waiting for its answer
+/// (specs/ks-play/spec.md requirement 5).
+struct PendingUnload {
+    std::uint32_t request = 0;        ///< The UnloadDeck's request ID.
+    std::uint64_t client = 0;         ///< Client::id.
+    std::uint32_t client_request = 0; ///< The client's UnloadDeck's request ID.
+    std::uint32_t deck = 0;
+};
+
 /// Where the engine has got with a load's track (specs/track-loading/spec.md
 /// requirements 12 and 17).
 enum class EngineHold : std::uint8_t {
@@ -346,6 +356,12 @@ struct Load {
     std::uint32_t client_request = 0;
     /// The client has had its answer, or been refused.
     bool answered = false;
+    /// The client has had its FileLoaded.
+    bool file_loaded = false;
+    /// How decoding ended, once it has, and whether the client has been
+    /// told (specs/ks-play/spec.md requirement 8).
+    std::optional<ipc::msg::DecodeEnded> ended;
+    bool notified = false;
 
     /// The worker's process ID until it's reaped, then 0.
     pid_t worker_pid = 0;
@@ -461,6 +477,9 @@ private:
     std::optional<int> engine_exited(int status);
     void handle_engine(short events);
     void handle_engine_message(const ipc::Message& message);
+    /// Handles the engine's TrackLoaded, DeckUnloaded, and TrackReleased.
+    /// Returns false for any other message.
+    bool handle_engine_track_message(const ipc::Message& message);
     void engine_failed(std::string_view why);
     void send_to_engine(const ipc::Message& message, std::span<const int> fds = {});
     /// A request ID for a request to the engine; never 0.
@@ -512,6 +531,17 @@ private:
     void probed(Load& load, const ipc::msg::Probed& probed);
     /// Handles a worker's Decoded.
     void decoded(Load& load, const ipc::msg::Decoded& decoded);
+    /// Records how `load`'s decoding ended (specs/ks-play/spec.md
+    /// requirement 8) and tells its client if it can be told.
+    void decoding_ended(Load& load, std::uint64_t frames, ipc::TrackStatus status);
+    /// Sends `load`'s client its DecodeEnded, once it has had FileLoaded,
+    /// and decoding has ended, and not before or twice.
+    void notify_decode_ended(Load& load);
+    /// Handles a client's UnloadDeck (specs/ks-play/spec.md requirement 5),
+    /// and the engine's answers to the UnloadDecks it sent.
+    void unload_deck(Client& client, std::uint32_t id, const ipc::msg::UnloadDeck& request);
+    bool deck_unloaded(std::uint32_t id);
+    bool unload_refused(std::uint32_t id, const ipc::msg::Error& error);
     void send_to_worker(Load& load, const ipc::Message& message, std::span<const int> fds = {});
     /// Closes a worker's connection, saying why at `level` if `why` isn't
     /// empty, and sends it SIGTERM if `stop`.
@@ -577,6 +607,7 @@ private:
     std::uint64_t next_client_ = 1;
     std::vector<PendingAttach> attaches_;
     std::vector<PendingDetach> detaches_;
+    std::vector<PendingUnload> unloads_;
 
     /// The worker program, the track memory budget in bytes, and every load
     /// not yet over.
@@ -588,6 +619,9 @@ private:
     /// Each deck's latest load: the track ID of the last LoadFile a worker
     /// was started for (requirement 13).
     std::array<std::uint64_t, ipc::kStateDecks> latest_{};
+    /// What latest_ holds for a deck whose latest request was an unload:
+    /// never a track ID (IDs count up from 1).
+    static constexpr std::uint64_t kUnloaded = std::numeric_limits<std::uint64_t>::max();
     /// ks-worker.log; null until the first worker starts, or if it couldn't
     /// be created.
     std::unique_ptr<LogFile> worker_log_;
@@ -1014,20 +1048,11 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
         send_to_engine(ipc::Message{.request_id = id, .body = ipc::msg::Pong{}});
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         if (!attach_refused(id, *error) && !detach_refused(id, *error) &&
-            !load_track_refused(id, *error)) {
+            !load_track_refused(id, *error) && !unload_refused(id, *error)) {
             warning(std::format("ks-engine reported an error: {}", error->text));
         }
-    } else if (std::holds_alternative<ipc::msg::TrackLoaded>(message.body)) {
-        if (!track_loaded(id)) {
-            send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "answers no LoadTrack"));
-        }
-    } else if (const auto* const released = std::get_if<ipc::msg::TrackReleased>(&message.body)) {
-        if (!track_released(released->track_id)) {
-            warning(std::format("ks-engine released track {}, which it doesn't hold",
-                                released->track_id));
-            send_to_engine(
-                error_message(id, ipc::ErrorCode::NotSupported, "no such track is held"));
-        }
+    } else if (handle_engine_track_message(message)) {
+        // Done.
     } else if (const auto* const attached = std::get_if<ipc::msg::Attached>(&message.body)) {
         if (!ring_attached(id, attached->slot)) {
             send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "answers no Attach"));
@@ -1040,6 +1065,30 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
                !std::holds_alternative<ipc::msg::Done>(message.body)) {
         send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "not from the engine"));
     }
+}
+
+bool Supervisor::handle_engine_track_message(const ipc::Message& message) {
+    const std::uint32_t id = message.request_id;
+    if (std::holds_alternative<ipc::msg::TrackLoaded>(message.body)) {
+        if (!track_loaded(id)) {
+            send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "answers no LoadTrack"));
+        }
+    } else if (std::holds_alternative<ipc::msg::DeckUnloaded>(message.body)) {
+        if (!deck_unloaded(id)) {
+            send_to_engine(
+                error_message(id, ipc::ErrorCode::NotSupported, "answers no UnloadDeck"));
+        }
+    } else if (const auto* const released = std::get_if<ipc::msg::TrackReleased>(&message.body)) {
+        if (!track_released(released->track_id)) {
+            warning(std::format("ks-engine released track {}, which it doesn't hold",
+                                released->track_id));
+            send_to_engine(
+                error_message(id, ipc::ErrorCode::NotSupported, "no such track is held"));
+        }
+    } else {
+        return false;
+    }
+    return true;
 }
 
 void Supervisor::send_to_engine(const ipc::Message& message, std::span<const int> fds) {
@@ -1284,6 +1333,8 @@ void Supervisor::handle_client_message(Client& client, const ipc::Message& messa
         open_ring(client, id);
     } else if (const auto* const load = std::get_if<ipc::msg::LoadFile>(&message.body)) {
         load_file(client, id, *load);
+    } else if (const auto* const unload = std::get_if<ipc::msg::UnloadDeck>(&message.body)) {
+        unload_deck(client, id, *unload);
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         warning(std::format("client '{}' reported an error: {}", client.name, error->text));
     } else {
@@ -1598,8 +1649,10 @@ void Supervisor::probed(Load& load, const ipc::msg::Probed& probed) {
         return;
     }
     if (std::span{latest_}[load.deck] != load.track_id) {
+        const bool unloaded = std::span{latest_}[load.deck] == kUnloaded;
         refuse_load(load, ipc::ErrorCode::Refused,
-                    std::format("a later load for deck {} replaced it", load.deck + 1));
+                    unloaded ? std::format("deck {} was unloaded", load.deck + 1)
+                             : std::format("a later load for deck {} replaced it", load.deck + 1));
         close_worker(load);
         return;
     }
@@ -1650,9 +1703,70 @@ void Supervisor::probed(Load& load, const ipc::msg::Probed& probed) {
                    fds);
 }
 
-void Supervisor::decoded(Load& load, const ipc::msg::Decoded& decoded) {
+void Supervisor::decoding_ended(Load& load, std::uint64_t frames, ipc::TrackStatus status) {
     load.decode_ended = true;
-    load.reserved = decoded.frames * ipc::kTrackFrameSize;
+    load.reserved = frames * ipc::kTrackFrameSize;
+    load.ended =
+        ipc::msg::DecodeEnded{.track_id = load.track_id, .frames = frames, .status = status};
+    notify_decode_ended(load);
+}
+
+void Supervisor::notify_decode_ended(Load& load) {
+    if (load.notified || !load.file_loaded || !load.ended) {
+        return;
+    }
+    load.notified = true;
+    if (Client* const client = find_client(load.client)) {
+        send_to_client(*client, ipc::Message{.request_id = 0, .body = *load.ended});
+    }
+}
+
+void Supervisor::unload_deck(Client& client, std::uint32_t id,
+                             const ipc::msg::UnloadDeck& request) {
+    info(std::format("client '{}' asked to unload deck {}", client.name, request.deck + 1));
+    if (phase_ != Phase::Running) {
+        send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported, "stopping"));
+        return;
+    }
+    // A load that is still probing must not put its track on the deck later.
+    std::span{latest_}[request.deck] = kUnloaded;
+    const std::uint32_t request_id = next_request();
+    unloads_.push_back(PendingUnload{
+        .request = request_id, .client = client.id, .client_request = id, .deck = request.deck});
+    send_to_engine(ipc::Message{.request_id = request_id, .body = request});
+}
+
+bool Supervisor::deck_unloaded(std::uint32_t id) {
+    const auto found = std::ranges::find(unloads_, id, &PendingUnload::request);
+    if (found == unloads_.end()) {
+        return false;
+    }
+    const PendingUnload pending = *found;
+    unloads_.erase(found);
+    if (Client* const client = find_client(pending.client)) {
+        send_to_client(*client, ipc::Message{.request_id = pending.client_request,
+                                             .body = ipc::msg::DeckUnloaded{}});
+    }
+    return true;
+}
+
+bool Supervisor::unload_refused(std::uint32_t id, const ipc::msg::Error& error) {
+    const auto found = std::ranges::find(unloads_, id, &PendingUnload::request);
+    if (found == unloads_.end()) {
+        return false;
+    }
+    const PendingUnload pending = *found;
+    unloads_.erase(found);
+    warning(std::format("ks-engine refused to unload deck {}: {}", pending.deck + 1, error.text));
+    if (Client* const client = find_client(pending.client)) {
+        send_to_client(*client, error_message(pending.client_request, ipc::ErrorCode::Unavailable,
+                                              error.text));
+    }
+    return true;
+}
+
+void Supervisor::decoded(Load& load, const ipc::msg::Decoded& decoded) {
+    decoding_ended(load, decoded.frames, decoded.status);
     switch (decoded.status) {
     case ipc::TrackStatus::Complete:
         info(std::format("track {} decoded: {} frames", load.track_id, decoded.frames));
@@ -1717,6 +1831,9 @@ bool Supervisor::track_loaded(std::uint32_t id) {
                                         .track_id = load.track_id,
                                         .sample_rate = load.probed->sample_rate,
                                         .estimated_frames = load.probed->estimated_frames}});
+        load.file_loaded = true;
+        // Decoding may have ended before the engine answered.
+        notify_decode_ended(load);
     }
     return true;
 }
@@ -1807,8 +1924,7 @@ void Supervisor::finish_track(Load& load, std::string_view how) {
     if (progress && progress->complete) {
         // The worker finished it itself, if without a Decoded.
         if (!load.decode_ended) {
-            load.decode_ended = true;
-            load.reserved = progress->frames * ipc::kTrackFrameSize;
+            decoding_ended(load, progress->frames, progress->status);
         }
         return;
     }
@@ -1816,8 +1932,7 @@ void Supervisor::finish_track(Load& load, std::string_view how) {
     ipc::TrackWriter writer{load.mapping->bytes()};
     writer.start(load.probed->sample_rate);
     writer.finish(ipc::TrackStatus::Failed, frames);
-    load.decode_ended = true;
-    load.reserved = frames * ipc::kTrackFrameSize;
+    decoding_ended(load, frames, ipc::TrackStatus::Failed);
     error(std::format("track {}: ks-worker {} without finishing the track; it ends at frame {}",
                       load.track_id, how, frames));
 }
