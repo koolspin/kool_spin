@@ -10,8 +10,14 @@
 #include <ks/ipc/track_segment.h>
 
 #include "status_format.h"
+#include <pthread.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <ostream>
 #include <span>
@@ -37,6 +43,13 @@ constexpr Milliseconds kDecodePoll{1'000};
 
 /// How long `status --watch` waits for each interval's `Pong`.
 constexpr Milliseconds kWatchPing{1'000};
+
+/// Exit statuses for SIGINT and SIGTERM (requirement 29): 128 + the signal.
+constexpr int kExitInterrupted = 130;
+constexpr int kExitTerminated = 143;
+
+/// The longest `status --watch` sleeps before it looks at its stop flag.
+constexpr Milliseconds kStopCheck{50};
 
 std::string_view error_code_name(ipc::ErrorCode code) noexcept {
     switch (code) {
@@ -166,22 +179,47 @@ int print_snapshot(Session& session, std::ostream& out, std::ostream& err) {
     return finish(out, err);
 }
 
+/// Sleeps for `interval` in steps of at most kStopCheck. Returns false, early,
+/// once `stop` is set.
+bool sleep_unless_stopped(Milliseconds interval, const std::atomic<bool>& stop) {
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + interval;
+    for (;;) {
+        if (stop.load(std::memory_order_acquire)) {
+            return false;
+        }
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            return true;
+        }
+        std::this_thread::sleep_for(
+            std::min<std::chrono::steady_clock::duration>(deadline - now, kStopCheck));
+    }
+}
+
 /// `status`, and `status --watch` (requirement 25). A watch asks the
 /// supervisor for a `Pong` every interval: the state segment stays mapped
 /// after kool_spin dies, so only the connection tells (plan, "Decisions").
-int do_status(Session& session, const Status& status, std::ostream& out, std::ostream& err) {
+/// It ends with status 0 once `stop` is set (requirement 29).
+int do_status(Session& session, const Status& status, const std::atomic<bool>& stop,
+              std::ostream& out, std::ostream& err) {
     if (!status.watch) {
         return print_snapshot(session, out, err);
     }
     const Milliseconds interval{status.interval_ms};
     for (bool first = true;; first = false) {
+        if (stop.load(std::memory_order_acquire)) {
+            return kExitOk;
+        }
         if (!first) {
             out << "---\n";
         }
         if (const int printed = print_snapshot(session, out, err); printed != kExitOk) {
             return printed;
         }
-        std::this_thread::sleep_for(interval);
+        if (!sleep_unless_stopped(interval, stop)) {
+            return kExitOk;
+        }
         if (const client::Result<void> alive = session.ping(kWatchPing); !alive) {
             return report(err, alive.error());
         }
@@ -204,20 +242,10 @@ int do_ping(Session& session, std::ostream& out, std::ostream& err) {
     return finish(out, err);
 }
 
-} // namespace
-
-int run(const Invocation& invocation, std::ostream& out, std::ostream& err) {
-    if (std::holds_alternative<Help>(invocation.request)) {
-        out << usage();
-        return finish(out, err);
-    }
-    if (const Load* load = std::get_if<Load>(&invocation.request);
-        load != nullptr && !std::filesystem::path{load->path}.is_absolute()) {
-        // Only when the working directory couldn't be read (main_entry()).
-        err << "ks-play: can't make the path absolute: " << load->path << '\n';
-        return kExitFailed;
-    }
-
+/// Connects and does the one command: run()'s worker thread. `stop` is set
+/// when `status --watch` gets SIGINT or SIGTERM.
+int work(const Invocation& invocation, const std::atomic<bool>& stop, std::ostream& out,
+         std::ostream& err) {
     client::Result<Session> session = Session::connect(invocation.name, invocation.runtime_dir);
     if (!session) {
         if (session.error().kind == ErrorKind::NotReachable) {
@@ -238,7 +266,7 @@ int run(const Invocation& invocation, std::ostream& out, std::ostream& err) {
             } else if constexpr (std::is_same_v<T, Control>) {
                 return do_control(*session, request, out, err);
             } else if constexpr (std::is_same_v<T, Status>) {
-                return do_status(*session, request, out, err);
+                return do_status(*session, request, stop, out, err);
             } else if constexpr (std::is_same_v<T, Stop>) {
                 return do_stop(*session, out, err);
             } else if constexpr (std::is_same_v<T, Ping>) {
@@ -250,6 +278,133 @@ int run(const Invocation& invocation, std::ostream& out, std::ostream& err) {
             }
         },
         invocation.request);
+}
+
+/// The worker's private signal: it wakes the waiting thread when the work is
+/// done.
+constexpr int kWakeSignal = SIGUSR1;
+
+/// SIGINT, SIGTERM, and kWakeSignal: blocked in every thread while run()
+/// works, and taken with sigwait(). No handler is installed, so
+/// RealtimeSanitizer never sees one interrupt KS_NONBLOCKING code (CLAUDE.md;
+/// plan, "Decisions").
+sigset_t waited_signals() noexcept {
+    sigset_t set{};
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+    sigaddset(&set, kWakeSignal);
+    return set;
+}
+
+/// Takes every waited signal still pending, such as a SIGINT that came after
+/// the work was done, so that none ends the process once the mask is
+/// restored.
+void drain_waited_signals(const sigset_t& set) noexcept {
+    for (;;) {
+        sigset_t pending{};
+        sigemptyset(&pending);
+        if (sigpending(&pending) != 0) {
+            return;
+        }
+        bool took = false;
+        for (const int signal : {SIGINT, SIGTERM, kWakeSignal}) {
+            if (sigismember(&set, signal) == 1 && sigismember(&pending, signal) == 1) {
+                sigset_t one{};
+                sigemptyset(&one);
+                sigaddset(&one, signal);
+                int taken = 0;
+                took = sigwait(&one, &taken) == 0 || took;
+            }
+        }
+        if (!took) {
+            return;
+        }
+    }
+}
+
+/// Ignores SIGPIPE while it lives (requirement 29: a closed standard output
+/// is a failed write, status 1), then puts back what was there.
+class SigpipeIgnored {
+public:
+    SigpipeIgnored() noexcept : previous_{std::signal(SIGPIPE, SIG_IGN)} {}
+    SigpipeIgnored(const SigpipeIgnored&) = delete;
+    SigpipeIgnored& operator=(const SigpipeIgnored&) = delete;
+    SigpipeIgnored(SigpipeIgnored&&) = delete;
+    SigpipeIgnored& operator=(SigpipeIgnored&&) = delete;
+    ~SigpipeIgnored() {
+        if (previous_ != SIG_ERR) {
+            std::signal(SIGPIPE, previous_);
+        }
+    }
+
+private:
+    using Handler = void (*)(int);
+    Handler previous_;
+};
+
+} // namespace
+
+int run(const Invocation& invocation, std::ostream& out, std::ostream& err) {
+    if (std::holds_alternative<Help>(invocation.request)) {
+        out << usage();
+        return finish(out, err);
+    }
+    if (const Load* load = std::get_if<Load>(&invocation.request);
+        load != nullptr && !std::filesystem::path{load->path}.is_absolute()) {
+        // Only when the working directory couldn't be read (main_entry()).
+        err << "ks-play: can't make the path absolute: " << load->path << '\n';
+        return kExitFailed;
+    }
+
+    const SigpipeIgnored sigpipe_ignored;
+    const sigset_t signals = waited_signals();
+    sigset_t previous{};
+    if (const int blocked = pthread_sigmask(SIG_BLOCK, &signals, &previous); blocked != 0) {
+        err << "ks-play: can't block signals: " << std::generic_category().message(blocked) << '\n';
+        return kExitFailed;
+    }
+    const Status* const status = std::get_if<Status>(&invocation.request);
+    const bool watch = status != nullptr && status->watch;
+
+    // The worker inherits the mask. When it finishes, it sets `done` and
+    // wakes this thread with kWakeSignal.
+    std::atomic<bool> stop{false};
+    std::atomic<bool> done{false};
+    int result = kExitFailed;
+    const pthread_t waiting = pthread_self();
+    std::thread worker;
+    try {
+        worker = std::thread{[&] {
+            result = work(invocation, stop, out, err);
+            done.store(true, std::memory_order_release);
+            pthread_kill(waiting, kWakeSignal);
+        }};
+    } catch (const std::system_error& error) {
+        pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+        err << "ks-play: can't start a thread: " << error.what() << '\n';
+        return kExitFailed;
+    }
+
+    for (;;) {
+        int signal = 0;
+        if (sigwait(&signals, &signal) != 0 || done.load(std::memory_order_acquire)) {
+            break;
+        }
+        if (signal == kWakeSignal) {
+            continue; // Not the worker's: it sets `done` first.
+        }
+        if (!watch) {
+            // Ending the process closes the connection; no destructor races
+            // the worker (requirement 29).
+            std::_Exit(signal == SIGINT ? kExitInterrupted : kExitTerminated);
+        }
+        stop.store(true, std::memory_order_release);
+    }
+    worker.join();
+    drain_waited_signals(signals);
+    pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+    return stop.load(std::memory_order_acquire) ? kExitOk : result;
 }
 
 int main_entry(int argc, const char* const* argv, std::ostream& out, std::ostream& err) {
