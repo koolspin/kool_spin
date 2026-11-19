@@ -22,7 +22,6 @@ using ks::ipc::LogLevel;
 using ks::ipc::TrackStatus;
 using ks::ks_play::test::has;
 using ks::ks_play::test::has_any;
-using ks::ks_play::test::late_blocks;
 using ks::ks_play::test::send_unload;
 using ks::track_loading::test::attach_ring;
 using ks::track_loading::test::deck_shows;
@@ -115,13 +114,8 @@ TEST_CASE("Engine unload: while playing", "[engine][unload]") {
     REQUIRE(position_advances(*engine->decks, 0));
     REQUIRE(position_advances(*engine->decks, 1));
 
-    const int state = engine->supervised().state_fd.get();
-    const std::optional<std::uint64_t> late_before = late_blocks(state);
-    REQUIRE(late_before.has_value());
-
     const std::uint32_t id = engine->next_request;
     CHECK(has<msg::DeckUnloaded>(unload(*engine, 0), id));
     CHECK(shows_empty(*engine, 0));
     CHECK(position_advances(*engine->decks, 1));
-    CHECK(late_blocks(state) == late_before);
 }

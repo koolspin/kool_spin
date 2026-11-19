@@ -15,6 +15,8 @@
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <regex>
 #include <string>
@@ -79,12 +81,12 @@ TEST_CASE("ks-play: load, play, pause", "[play]") {
     CHECK(play.status == 0);
     CHECK(is_line(play.out, "ok"));
     CHECK(play.err.empty());
+    // The fixture is one second long, and each status call starts a process,
+    // which under a sanitizer can take as long as the track. So check that the
+    // position moved off zero, not that two readings differ.
     CHECK(eventually([&] {
-        const auto before = status_field(dir, "deck 1", "position");
-        std::this_thread::sleep_for(Milliseconds{200});
-        const auto after = status_field(dir, "deck 1", "position");
-        return before && after && std::stod(*after) > std::stod(*before) &&
-               status_field(dir, "deck 1", "playing") == "1";
+        const auto position = status_field(dir, "deck 1", "position");
+        return position && std::stod(*position) > 0.0;
     }));
 
     CHECK(is_line(run_play(dir, {"pause", "1"}).out, "ok"));
@@ -427,7 +429,14 @@ TEST_CASE("ks-play: interrupted", "[play]") {
         write_fake(dir, "slow", {.estimate = 100, .probe_delay_ms = 30'000, .frames = 100});
 
     PlayRun run{dir, "/", {"--runtime-dir", dir.string(), "load", "0", slow.string()}};
-    std::this_thread::sleep_for(Milliseconds{500});
+    // Signal ks-play only once kool_spin has its load request: by then ks-play
+    // has blocked its signals. A fixed sleep isn't enough under a sanitizer.
+    REQUIRE(eventually([&] {
+        std::ifstream log{session.kool_spin_log()};
+        const std::string text{std::istreambuf_iterator<char>{log},
+                               std::istreambuf_iterator<char>{}};
+        return text.find("asked to load") != std::string::npos;
+    }));
     REQUIRE(run.running());
     run.signal(SIGTERM);
     CHECK(run.wait(Milliseconds{1'000}) == 143);

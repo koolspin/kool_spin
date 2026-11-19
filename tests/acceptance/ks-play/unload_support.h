@@ -82,24 +82,4 @@ inline std::vector<Received> read_for(ipc::Connection& connection,
     return received;
 }
 
-/// The engine's late-block count, read from the engine-state segment `fd`;
-/// nothing if it can't be read.
-inline std::optional<std::uint64_t> late_blocks(int fd) {
-    std::expected<ipc::Region, ipc::MapFailure> region = ipc::Region::map(
-        fd, ipc::SegmentKind::EngineState, ipc::kEngineStateLayoutVersion, ipc::Access::ReadOnly);
-    if (!region) {
-        return std::nullopt;
-    }
-    auto* const state = region->at<ipc::EngineState>(ipc::kSegmentHeaderSize);
-    if (state == nullptr) {
-        return std::nullopt;
-    }
-    const std::optional<ipc::EngineStatus> status =
-        ipc::SeqlockReader<ipc::EngineStatus>{state->status}.try_read(1'000);
-    if (!status) {
-        return std::nullopt;
-    }
-    return status->late_blocks;
-}
-
 } // namespace ks::ks_play::test
