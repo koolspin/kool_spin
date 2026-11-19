@@ -96,8 +96,25 @@ using std::chrono::milliseconds;
 /// The program under test.
 constexpr std::string_view kWorkerPath = KS_WORKER_PATH;
 
-/// How long a stopped worker may take to exit (requirement 19).
-constexpr milliseconds kStopTime{100};
+/// True when the test is built with AddressSanitizer or ThreadSanitizer,
+/// which slow a process down: on macOS tsan, a stopping worker takes 130 to
+/// 160 ms to exit.
+constexpr bool kSlowSanitizer =
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    true;
+#elifdef __has_feature
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+    true;
+#else
+    false;
+#endif
+#else
+    false;
+#endif
+
+/// How long a stopped worker may take to exit: 100 ms (requirement 19), or
+/// 300 ms under AddressSanitizer or ThreadSanitizer.
+constexpr milliseconds kStopTime{kSlowSanitizer ? 300 : 100};
 
 /// How many workers a stopping test stops, at most, for one to exit within
 /// kStopTime.
