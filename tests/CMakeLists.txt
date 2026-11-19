@@ -32,6 +32,7 @@ ks_add_test(ks_play_app_tests
         play_app/numbers_test.cpp
         play_app/options_test.cpp
         play_app/run_test.cpp
+        play_app/status_format_test.cpp
     LIBRARIES ks::play_app)
 # ks_play_app's private headers, such as numbers.h.
 target_include_directories(ks_play_app_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/apps/play)

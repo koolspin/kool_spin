@@ -9,6 +9,8 @@
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/track_segment.h>
 
+#include "status_format.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <ostream>
@@ -16,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -31,6 +34,9 @@ using client::Session;
 /// How long each next_decode_ended() call waits before `load --wait` asks
 /// again: `--wait` itself has no limit (requirement 24).
 constexpr Milliseconds kDecodePoll{1'000};
+
+/// How long `status --watch` waits for each interval's `Pong`.
+constexpr Milliseconds kWatchPing{1'000};
 
 std::string_view error_code_name(ipc::ErrorCode code) noexcept {
     switch (code) {
@@ -150,11 +156,36 @@ int do_control(Session& session, const Control& control, std::ostream& out, std:
     return kExitFailed;
 }
 
-int do_status(Session& /*session*/, const Status& /*status*/, std::ostream& /*out*/,
-              std::ostream& err) {
-    // Task 9 of specs/ks-play/plan.md.
-    err << "ks-play: status isn't written yet\n";
-    return kExitFailed;
+/// Prints one snapshot and flushes it.
+int print_snapshot(Session& session, std::ostream& out, std::ostream& err) {
+    const client::Result<client::Snapshot> snapshot = session.snapshot();
+    if (!snapshot) {
+        return report(err, snapshot.error());
+    }
+    format_status(*snapshot, out);
+    return finish(out, err);
+}
+
+/// `status`, and `status --watch` (requirement 25). A watch asks the
+/// supervisor for a `Pong` every interval: the state segment stays mapped
+/// after kool_spin dies, so only the connection tells (plan, "Decisions").
+int do_status(Session& session, const Status& status, std::ostream& out, std::ostream& err) {
+    if (!status.watch) {
+        return print_snapshot(session, out, err);
+    }
+    const Milliseconds interval{status.interval_ms};
+    for (bool first = true;; first = false) {
+        if (!first) {
+            out << "---\n";
+        }
+        if (const int printed = print_snapshot(session, out, err); printed != kExitOk) {
+            return printed;
+        }
+        std::this_thread::sleep_for(interval);
+        if (const client::Result<void> alive = session.ping(kWatchPing); !alive) {
+            return report(err, alive.error());
+        }
+    }
 }
 
 int do_stop(Session& session, std::ostream& out, std::ostream& err) {

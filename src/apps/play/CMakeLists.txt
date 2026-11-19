@@ -4,7 +4,8 @@
 add_library(ks_play_app STATIC
     numbers.cpp
     options.cpp
-    run.cpp)
+    run.cpp
+    status_format.cpp)
 add_library(ks::play_app ALIAS ks_play_app)
 
 target_sources(ks_play_app PUBLIC
