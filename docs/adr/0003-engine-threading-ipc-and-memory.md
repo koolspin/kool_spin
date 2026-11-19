@@ -115,6 +115,7 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   4. The worker decodes into the segment.
   5. Meanwhile, the control thread maps the segment, locks it, and builds a track object. It hands the object to the audio thread through an internal ring (section 10).
   6. Playback can start before decoding finishes (section 9).
+  7. When decoding ends, the supervisor tells the client that asked (`DecodeEnded`), after it has answered the load. A client unloads a deck by asking the supervisor (`UnloadDeck`), which asks the engine's control thread.
 
 ### 7. Shared-memory segments
 

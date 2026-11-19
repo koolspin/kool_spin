@@ -460,7 +460,12 @@ TEST_CASE("Supervisor tracks: the latest load wins", "[supervisor][tracks]") {
     const std::optional<Received> first = ks::processes::test::receive(client.connection);
     CHECK(request_id_of(first) == fast);
     const std::uint64_t id = loaded_id(first);
-    const std::optional<Received> second = ks::processes::test::receive(client.connection);
+    std::optional<Received> second = ks::processes::test::receive(client.connection);
+    // The DecodeEnded for the fast load may come first (specs/ks-play/spec.md
+    // requirement 8).
+    while (second && std::holds_alternative<ks::ipc::msg::DecodeEnded>(second->message.body)) {
+        second = ks::processes::test::receive(client.connection);
+    }
     CHECK(request_id_of(second) == slow);
     CHECK(code_of(second) == ErrorCode::Refused);
 

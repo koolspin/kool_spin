@@ -41,11 +41,15 @@
 /// | LoadTrack  | 21  | Track ID (64); deck (32); rate (32) | 1     | Non-zero            |
 /// | TrackLoaded | 22 | Empty                         | 0           | The LoadTrack's     |
 /// | TrackReleased | 23 | Track ID (64 bits)          | 0           | 0                   |
+/// | UnloadDeck | 24    | Deck (32 bits)                | 0           | Non-zero            |
+/// | DeckUnloaded | 25  | Empty                         | 0           | The UnloadDeck's    |
+/// | DecodeEnded | 26   | Track ID (64); frames (64); status (8) | 0  | 0                   |
 ///
 /// Types 4 to 8 come from specs/processes/spec.md requirement 6, types 9 to
 /// 14 from specs/client-rings/spec.md requirement 3, types 15 to 18 from
 /// specs/decode-worker/spec.md requirement 8, and types 19 to 23 from
-/// specs/track-loading/spec.md requirement 1. A slot is a client slot's index,
+/// specs/track-loading/spec.md requirement 1, and types 24 to 26 from
+/// specs/ks-play/spec.md requirement 1. A slot is a client slot's index,
 /// below kStateClients; a deck is a deck's index, below kStateDecks. Later
 /// steps add types with the same rules, each in its own spec.
 
@@ -87,6 +91,10 @@ enum class MessageType : std::uint8_t {
     LoadTrack = 21,     ///< The supervisor asks the engine to put a track segment on a deck.
     TrackLoaded = 22,   ///< The engine answers a LoadTrack once it has given the deck the track.
     TrackReleased = 23, ///< The engine tells the supervisor that no deck holds a track any more.
+    UnloadDeck =
+        24, ///< A client asks the supervisor, and the supervisor the engine, to unload a deck.
+    DeckUnloaded = 25, ///< Answers an UnloadDeck.
+    DecodeEnded = 26,  ///< The supervisor tells a client how decoding of its load ended.
 };
 
 /// What an Error message reports. The values are part of the protocol. The
@@ -295,6 +303,33 @@ struct TrackReleased {
     friend bool operator==(const TrackReleased&, const TrackReleased&) = default;
 };
 
+/// Asks the receiver to unload a deck: a client asks the supervisor, and the
+/// supervisor asks the engine.
+struct UnloadDeck {
+    /// The deck's index, below kStateDecks.
+    std::uint32_t deck = 0;
+
+    friend bool operator==(const UnloadDeck&, const UnloadDeck&) = default;
+};
+
+/// Answers an UnloadDeck, once the deck is unloading.
+struct DeckUnloaded {
+    friend bool operator==(const DeckUnloaded&, const DeckUnloaded&) = default;
+};
+
+/// The supervisor tells the client that asked for a load how decoding ended.
+/// A notification, with request ID 0, sent after the load's FileLoaded.
+struct DecodeEnded {
+    /// The track's ID, never 0.
+    std::uint64_t track_id = 0;
+    /// The frames decoded, at most kMaxTrackFrames.
+    std::uint64_t frames = 0;
+    /// How decoding ended: any TrackStatus but Decoding.
+    TrackStatus status = TrackStatus::Complete;
+
+    friend bool operator==(const DecodeEnded&, const DecodeEnded&) = default;
+};
+
 } // namespace msg
 
 /// A message: its request ID and its body.
@@ -304,7 +339,7 @@ struct Message {
                  msg::Ready, msg::OpenRing, msg::RingOpened, msg::Attach, msg::Attached,
                  msg::Detach, msg::Detached, msg::Probe, msg::Probed, msg::Decode, msg::Decoded,
                  msg::LoadFile, msg::FileLoaded, msg::LoadTrack, msg::TrackLoaded,
-                 msg::TrackReleased>
+                 msg::TrackReleased, msg::UnloadDeck, msg::DeckUnloaded, msg::DecodeEnded>
         body;
 
     friend bool operator==(const Message&, const Message&) = default;

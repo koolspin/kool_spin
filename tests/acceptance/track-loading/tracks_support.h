@@ -543,6 +543,11 @@ inline std::optional<Received> load(TrackClient& client, std::uint32_t deck,
                                     const std::filesystem::path& path) {
     const std::uint32_t id = send_load(client, deck, path);
     std::optional<Received> answer = processes::test::receive(client.connection);
+    // A DecodeEnded (specs/ks-play/spec.md requirement 8) is a notification
+    // about an earlier load, not the answer.
+    while (answer && std::holds_alternative<ipc::msg::DecodeEnded>(answer->message.body)) {
+        answer = processes::test::receive(client.connection);
+    }
     if (answer && answer->message.request_id != id) {
         return std::nullopt;
     }

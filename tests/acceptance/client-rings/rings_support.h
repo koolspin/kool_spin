@@ -447,7 +447,12 @@ inline std::expected<OpenedRing, OpenFailure> open_ring(ipc::Connection& connect
                                ipc::Message{.request_id = id, .body = ipc::msg::OpenRing{}})) {
         return std::unexpected{OpenFailure{}};
     }
-    const std::optional<Received> answer = processes::test::receive(connection);
+    std::optional<Received> answer = processes::test::receive(connection);
+    // A DecodeEnded (specs/ks-play/spec.md requirement 8) is a notification
+    // about an earlier load, not the answer.
+    while (answer && std::holds_alternative<ipc::msg::DecodeEnded>(answer->message.body)) {
+        answer = processes::test::receive(connection);
+    }
     if (!answer || answer->message.request_id != id) {
         return std::unexpected{OpenFailure{}};
     }

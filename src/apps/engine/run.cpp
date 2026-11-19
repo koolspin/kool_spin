@@ -448,6 +448,13 @@ std::optional<std::uint32_t> EngineProcess::handle(const ipc::Message& message,
         } else {
             load_track(id, *load, std::move(fds.front()));
         }
+    } else if (const auto* const unload = std::get_if<ipc::msg::UnloadDeck>(&message.body)) {
+        if (engine_->unload(unload->deck)) {
+            report(ipc::LogLevel::Info, std::format("unloaded deck {}", unload->deck + 1));
+            send(ipc::Message{.request_id = id, .body = ipc::msg::DeckUnloaded{}});
+        } else {
+            unavailable(id, "an UnloadDeck", "the engine's give ring is full");
+        }
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         report(ipc::LogLevel::Warning, "the supervisor reported an error: " + error->text);
     } else {
