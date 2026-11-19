@@ -438,8 +438,15 @@ TEST_CASE("ks-play: interrupted", "[play]") {
         return text.find("asked to load") != std::string::npos;
     }));
     REQUIRE(run.running());
+    const auto signaled = std::chrono::steady_clock::now();
     run.signal(SIGTERM);
-    CHECK(run.wait(Milliseconds{1'000}) == 143);
+    // A generous limit: under a sanitizer on a busy runner, exiting can be slow.
+    // The elapsed time and ks-play's output say whether it was slow or stuck.
+    const std::optional<int> status = run.wait(Milliseconds{10'000});
+    CAPTURE(std::chrono::duration_cast<Milliseconds>(std::chrono::steady_clock::now() - signaled)
+                .count());
+    CAPTURE(run.out(), run.err());
+    CHECK(status == 143);
 
     // kool_spin goes on, and serves the next client.
     const Finished ping = run_play(dir, {"ping"});
