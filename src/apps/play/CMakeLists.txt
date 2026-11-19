@@ -2,6 +2,7 @@
 
 # The library holds everything except argument passing, so tests can use it.
 add_library(ks_play_app STATIC
+    numbers.cpp
     options.cpp
     run.cpp)
 add_library(ks::play_app ALIAS ks_play_app)

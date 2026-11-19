@@ -27,6 +27,14 @@ ks_add_test(ks_client_tests
 # ks::client's private headers, such as decode_queue.h.
 target_include_directories(ks_client_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/client)
 
+ks_add_test(ks_play_app_tests
+    SOURCES
+        play_app/numbers_test.cpp
+        play_app/options_test.cpp
+    LIBRARIES ks::play_app)
+# ks_play_app's private headers, such as numbers.h.
+target_include_directories(ks_play_app_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/apps/play)
+
 ks_add_test(ks_dsp_tests
     SOURCES dsp/sine_oscillator_test.cpp
             dsp/frequency_meter_test.cpp
