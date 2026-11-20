@@ -102,12 +102,12 @@ Exit criteria:
 Exit criteria:
 
 - [ ] `[auto]` Tests are clean under the `rtsan`, `tsan`, and `asan` presets. Socket message parsing, the track segment header, and the session journal are fuzzed under `fuzz`.
-- [ ] `[auto]` Killing `ks-play` or a decode worker with `kill -9` during playback leaves no gap in the recorded output.
-- [ ] `[auto]` Killing the engine with `kill -9` resumes playback at the right position with a fade-in. Restart time is measured; target under 1 second.
+- [x] `[auto]` Killing `ks-play` or a decode worker with `kill -9` during playback leaves no gap in the recorded output. *"Chaos: killing a client, a worker, or a file leaves no gap" (step 7a): a 440 Hz sine's zero crossings stay within one frame of their spacing across each kill.*
+- [x] `[auto]` Killing the engine with `kill -9` resumes playback at the right position with a fade-in. Restart time is measured; target under 1 second. *"Restart: kill -9 resumes at the right position" (step 7a): the position is within 10 ms and the restart time is printed.*
 - [ ] `[auto]` An engine whose audio thread stops making progress is killed and restarted, and resumes the same way as after a crash.
 - [ ] `[auto]` Killing the supervisor with `kill -9` leaves playback running. Relaunching reports the running engine and can stop it.
-- [ ] `[auto]` Corrupted shared state makes the engine start clean with decks paused; it never crashes.
-- [x] `[auto]` Deleting a playing track's file doesn't interrupt playback. *"Supervisor tracks: deleting the file while it plays" (pull request #39): a 10-minute WAV is deleted as soon as it loads, and it still decodes in full while the deck plays on, on Linux and macOS. Checking the recorded output for a gap waits for step 7's recording segment.*
+- [x] `[auto]` Corrupted shared state makes the engine start clean with decks paused; it never crashes. *"Engine process: corrupted state starts clean" (step 7a), and the crash-loop guard's clean restart.*
+- [x] `[auto]` Deleting a playing track's file doesn't interrupt playback. *"Supervisor tracks: deleting the file while it plays" (pull request #39): a 10-minute WAV is deleted as soon as it loads, and it still decodes in full while the deck plays on, on Linux and macOS. The recorded output has no gap: "Chaos: killing a client, a worker, or a file leaves no gap" (step 7a).*
 - [ ] `[auto]` After all processes are killed, relaunching restores the previous session with decks paused.
 - [ ] `[manual]` Removing the USB drive that holds a playing track doesn't interrupt it.
 - [ ] `[manual]` The one-hour soak test passes again with all processes running, driven through `ks-play`.
