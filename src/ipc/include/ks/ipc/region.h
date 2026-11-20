@@ -22,6 +22,7 @@ enum class SegmentKind : std::uint8_t {
     CommandRing = 2,
     Track = 3,
     Log = 4,
+    Recording = 5,
 };
 
 /// "KOOLSPIN" in memory, on little-endian machines.

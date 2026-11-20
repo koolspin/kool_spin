@@ -333,13 +333,14 @@ inline ipc::Fd create_segment(Supervised& supervised,
     return std::move(*segment);
 }
 
-/// Sends the engine an Attach for `segment`, with request ID `id`, and
-/// returns its answer.
+/// Sends the engine an Attach for `segment`, to client slot `slot`, with
+/// request ID `id`, and returns its answer.
 inline std::optional<Received> attach(Supervised& supervised, const ipc::Fd& segment,
-                                      std::uint32_t id) {
+                                      std::uint32_t id, std::uint32_t slot = 0) {
     const std::array<int, 1> fds{segment.get()};
-    if (!processes::test::send(*supervised.socket,
-                               ipc::Message{.request_id = id, .body = ipc::msg::Attach{}}, fds)) {
+    if (!processes::test::send(
+            *supervised.socket,
+            ipc::Message{.request_id = id, .body = ipc::msg::Attach{.slot = slot}}, fds)) {
         return std::nullopt;
     }
     return processes::test::receive(*supervised.socket);

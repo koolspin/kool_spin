@@ -9,6 +9,7 @@
 #include <ks/core/realtime.h>
 #include <ks/engine/audio_backend.h>
 #include <ks/engine/render_core.h>
+#include <ks/ipc/recording.h>
 
 #include <atomic>
 #include <chrono>
@@ -77,6 +78,11 @@ struct PacedConfig {
     DriverId driver = kDefaultDriver;
     /// How many frames of output to record. 0: none.
     std::size_t record_frames = 0;
+    /// A recording segment to write each period's output to, as well as
+    /// `record_frames`' own copy, if any (specs/engine-restart/spec.md
+    /// requirement 16). It must outlive the backend. Stereo only: the
+    /// backend's channel count must be 2.
+    ipc::RecordingWriter* record_to = nullptr;
     /// Ask for real-time priority: SCHED_FIFO at 70 on Linux, a
     /// time-constraint policy on macOS.
     bool realtime_priority = false;

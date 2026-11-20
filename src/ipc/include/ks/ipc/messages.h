@@ -93,8 +93,10 @@ enum class MessageType : std::uint8_t {
     TrackReleased = 23, ///< The engine tells the supervisor that no deck holds a track any more.
     UnloadDeck =
         24, ///< A client asks the supervisor, and the supervisor the engine, to unload a deck.
-    DeckUnloaded = 25, ///< Answers an UnloadDeck.
-    DecodeEnded = 26,  ///< The supervisor tells a client how decoding of its load ended.
+    DeckUnloaded = 25,    ///< Answers an UnloadDeck.
+    DecodeEnded = 26,     ///< The supervisor tells a client how decoding of its load ended.
+    OpenRecording = 27,   ///< A client asks the supervisor for the recording segment.
+    RecordingOpened = 28, ///< The supervisor answers an OpenRecording with the segment.
 };
 
 /// What an Error message reports. The values are part of the protocol. The
@@ -188,9 +190,12 @@ struct RingOpened {
     friend bool operator==(const RingOpened&, const RingOpened&) = default;
 };
 
-/// The supervisor asks the engine to attach a ring. Its one descriptor is the
+/// The supervisor asks the engine to attach a ring, in a given client slot
+/// (specs/engine-restart/spec.md requirement 6). Its one descriptor is the
 /// command-ring segment.
 struct Attach {
+    std::uint32_t slot = 0; ///< The slot the ring must take, below kStateClients.
+
     friend bool operator==(const Attach&, const Attach&) = default;
 };
 
@@ -330,6 +335,18 @@ struct DecodeEnded {
     friend bool operator==(const DecodeEnded&, const DecodeEnded&) = default;
 };
 
+/// A client asks the supervisor for the recording segment
+/// (specs/engine-restart/spec.md requirement 17).
+struct OpenRecording {
+    friend bool operator==(const OpenRecording&, const OpenRecording&) = default;
+};
+
+/// The supervisor's answer to an OpenRecording. Its one descriptor is the
+/// recording segment, which the client maps read-only.
+struct RecordingOpened {
+    friend bool operator==(const RecordingOpened&, const RecordingOpened&) = default;
+};
+
 } // namespace msg
 
 /// A message: its request ID and its body.
@@ -339,7 +356,8 @@ struct Message {
                  msg::Ready, msg::OpenRing, msg::RingOpened, msg::Attach, msg::Attached,
                  msg::Detach, msg::Detached, msg::Probe, msg::Probed, msg::Decode, msg::Decoded,
                  msg::LoadFile, msg::FileLoaded, msg::LoadTrack, msg::TrackLoaded,
-                 msg::TrackReleased, msg::UnloadDeck, msg::DeckUnloaded, msg::DecodeEnded>
+                 msg::TrackReleased, msg::UnloadDeck, msg::DeckUnloaded, msg::DecodeEnded,
+                 msg::OpenRecording, msg::RecordingOpened>
         body;
 
     friend bool operator==(const Message&, const Message&) = default;

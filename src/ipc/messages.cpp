@@ -44,6 +44,7 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
     case static_cast<std::uint16_t>(MessageType::Stop):
     case static_cast<std::uint16_t>(MessageType::Done):
     case static_cast<std::uint16_t>(MessageType::OpenRing):
+    case static_cast<std::uint16_t>(MessageType::OpenRecording):
     case static_cast<std::uint16_t>(MessageType::Attached):
     case static_cast<std::uint16_t>(MessageType::Detach):
     case static_cast<std::uint16_t>(MessageType::Detached):
@@ -57,6 +58,7 @@ std::optional<TypeRules> rules_for(std::uint16_t type) noexcept {
         return TypeRules{.descriptors = 0, .request = RequestRule::NonZero};
     case static_cast<std::uint16_t>(MessageType::Welcome):
     case static_cast<std::uint16_t>(MessageType::RingOpened):
+    case static_cast<std::uint16_t>(MessageType::RecordingOpened):
     case static_cast<std::uint16_t>(MessageType::Attach):
     case static_cast<std::uint16_t>(MessageType::Probe):
     case static_cast<std::uint16_t>(MessageType::Decode):
@@ -580,8 +582,12 @@ static_assert(std::is_same_v<
               std::variant_alternative_t<static_cast<std::size_t>(MessageType::DecodeEnded) - 1,
                                          decltype(Message::body)>,
               msg::DecodeEnded>);
+static_assert(std::is_same_v<
+              std::variant_alternative_t<static_cast<std::size_t>(MessageType::RecordingOpened) - 1,
+                                         decltype(Message::body)>,
+              msg::RecordingOpened>);
 static_assert(std::variant_size_v<decltype(Message::body)> ==
-              static_cast<std::size_t>(MessageType::DecodeEnded));
+              static_cast<std::size_t>(MessageType::RecordingOpened));
 
 std::optional<MessageType> type_of(const Message& message) noexcept {
     // The variant's alternatives are in the order of the types, which start
@@ -632,6 +638,10 @@ bool append_slot(std::vector<std::byte>& body, std::uint32_t slot) {
 
 bool append_fields(std::vector<std::byte>& body, const msg::RingOpened& opened) {
     return append_slot(body, opened.slot);
+}
+
+bool append_fields(std::vector<std::byte>& body, const msg::Attach& attach) {
+    return append_slot(body, attach.slot);
 }
 
 bool append_fields(std::vector<std::byte>& body, const msg::Attached& attached) {
@@ -771,7 +781,7 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
     case MessageType::RingOpened:
         return slot_body<msg::RingOpened>(frame);
     case MessageType::Attach:
-        return empty_body<msg::Attach>(frame);
+        return slot_body<msg::Attach>(frame);
     case MessageType::Attached:
         return slot_body<msg::Attached>(frame);
     case MessageType::Detach:
@@ -802,6 +812,10 @@ std::expected<Message, MessageError> decode(const Frame& frame) {
         return empty_body<msg::DeckUnloaded>(frame);
     case MessageType::DecodeEnded:
         return decode_ended_body(frame);
+    case MessageType::OpenRecording:
+        return empty_body<msg::OpenRecording>(frame);
+    case MessageType::RecordingOpened:
+        return empty_body<msg::RecordingOpened>(frame);
     }
     return std::unexpected{MessageError::UnknownType};
 }

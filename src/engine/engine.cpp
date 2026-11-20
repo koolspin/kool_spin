@@ -159,18 +159,31 @@ bool Engine::unload(std::size_t deck) noexcept {
 
 std::optional<std::size_t> Engine::attach(ipc::CommandRing& ring) noexcept {
     for (std::size_t i = 0; i < kMaxClients; ++i) {
-        ControlClient& client = control_clients_.at(i);
-        if (client.ring != nullptr) {
+        if (control_clients_.at(i).ring != nullptr) {
             continue;
         }
-        if (!give(Handover{
-                .kind = Handover::Kind::Attach, .index = i, .track = nullptr, .ring = &ring})) {
+        if (!attach_at(i, ring)) {
             return std::nullopt;
         }
-        client = ControlClient{.ring = &ring, .detaching = false};
         return i;
     }
     return std::nullopt;
+}
+
+bool Engine::attach_at(std::size_t slot, ipc::CommandRing& ring) noexcept {
+    if (slot >= kMaxClients) {
+        return false;
+    }
+    ControlClient& client = control_clients_.at(slot);
+    if (client.ring != nullptr) {
+        return false;
+    }
+    if (!give(Handover{
+            .kind = Handover::Kind::Attach, .index = slot, .track = nullptr, .ring = &ring})) {
+        return false;
+    }
+    client = ControlClient{.ring = &ring, .detaching = false};
+    return true;
 }
 
 bool Engine::detach(std::size_t client) noexcept {

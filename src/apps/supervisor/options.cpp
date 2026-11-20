@@ -54,6 +54,27 @@ std::expected<void, std::string> set_track_memory(std::optional<std::uint64_t>& 
     return {};
 }
 
+/// Sets `field` from a whole number of milliseconds, 1 to 3,600,000, for
+/// --crash-window and --ready-timeout (specs/engine-restart/spec.md
+/// requirement "test-only options").
+std::expected<void, std::string> set_milliseconds(std::optional<std::uint64_t>& field,
+                                                  std::string_view option, std::string_view value) {
+    if (field) {
+        return std::unexpected{std::format("kool_spin: {} given twice", option)};
+    }
+    std::uint64_t ms = 0;
+    const char* const first = std::to_address(value.begin());
+    const char* const last = std::to_address(value.end());
+    const auto [end, error] = std::from_chars(first, last, ms);
+    if (value.empty() || error != std::errc{} || end != last || ms < 1 || ms > 3'600'000) {
+        return std::unexpected{std::format(
+            "kool_spin: {} takes a whole number of milliseconds from 1 to 3600000, not '{}'",
+            option, value)};
+    }
+    field = ms;
+    return {};
+}
+
 /// The field a path option sets, or null if `option` isn't one.
 std::optional<std::filesystem::path>* path_field(Options& options, std::string_view option) {
     if (option == "--runtime-dir") {
@@ -69,6 +90,27 @@ std::optional<std::filesystem::path>* path_field(Options& options, std::string_v
         return &options.worker;
     }
     return nullptr;
+}
+
+/// True if `arg` is an option that takes a value.
+bool takes_value(Options& options, std::string_view arg) {
+    return path_field(options, arg) != nullptr || arg == "--track-memory" ||
+           arg == "--crash-window" || arg == "--ready-timeout";
+}
+
+/// Applies `value` to the option `arg`, one of those takes_value() accepts.
+std::expected<void, std::string> apply_value(Options& options, std::string_view arg,
+                                             std::string_view value) {
+    if (std::optional<std::filesystem::path>* const field = path_field(options, arg)) {
+        return set_path(*field, arg, value);
+    }
+    if (arg == "--crash-window") {
+        return set_milliseconds(options.crash_window_ms, arg, value);
+    }
+    if (arg == "--ready-timeout") {
+        return set_milliseconds(options.ready_timeout_ms, arg, value);
+    }
+    return set_track_memory(options.track_memory_mib, value);
 }
 
 } // namespace
@@ -93,13 +135,19 @@ std::string usage() {
            "                        kool_spin)\n"
            "  --track-memory <MiB>  the memory decoded tracks may use, 1 to 1048576\n"
            "                        (default: half of physical memory)\n"
+           "  --recording           keep a recording segment of what a paced engine plays,\n"
+           "                        for tests (clients get it with OpenRecording)\n"
+           "  --crash-window <ms>   for tests: the window in which engine exits count\n"
+           "                        together (default: 30000)\n"
+           "  --ready-timeout <ms>  for tests: how long a new engine has to send Ready\n"
+           "                        (default: 10000)\n"
            "  --help                print this text and exit\n"
            "\n"
            "Everything after -- goes to ks-engine: --backend, --device, --rate,\n"
            "--channels, and --period (see ks-engine --help).\n"
            "\n"
            "Exit codes: 0 stopped cleanly, 1 couldn't start, 2 usage error, 3 the\n"
-           "engine ended unexpectedly or didn't stop.\n";
+           "engine kept failing or didn't stop.\n";
 }
 
 std::expected<Options, std::string> parse_options(std::span<const std::string_view> args) {
@@ -116,17 +164,20 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
             }
             return options;
         }
-        std::optional<std::filesystem::path>* const field = path_field(options, arg);
-        if (field == nullptr && arg != "--track-memory") {
+        if (arg == "--recording") {
+            if (options.recording) {
+                return std::unexpected{std::string{"kool_spin: --recording given twice"}};
+            }
+            options.recording = true;
+            continue;
+        }
+        if (!takes_value(options, arg)) {
             return std::unexpected{std::format("kool_spin: unexpected argument '{}'", arg)};
         }
         if (i + 1 >= args.size()) {
             return std::unexpected{std::format("kool_spin: {} needs a value", arg)};
         }
-        const std::string_view value = args[++i];
-        const std::expected<void, std::string> set =
-            field != nullptr ? set_path(*field, arg, value)
-                             : set_track_memory(options.track_memory_mib, value);
+        const std::expected<void, std::string> set = apply_value(options, arg, args[++i]);
         if (!set) {
             return std::unexpected{set.error()};
         }

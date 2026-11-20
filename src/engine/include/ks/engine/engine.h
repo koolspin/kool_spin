@@ -145,6 +145,11 @@ public:
     /// must stay alive until then.
     [[nodiscard]] std::optional<std::size_t> attach(ipc::CommandRing& ring) noexcept;
 
+    /// As attach(), but in client slot `slot` (specs/engine-restart/spec.md
+    /// requirement 6). Returns false, and gives nothing, if `slot` is
+    /// kMaxClients or more, is in use, or the give ring is full.
+    [[nodiscard]] bool attach_at(std::size_t slot, ipc::CommandRing& ring) noexcept;
+
     /// Asks the engine to stop reading client slot `client`'s ring. Returns
     /// false, and gives nothing, if the slot isn't attached or the give ring
     /// is full.

@@ -180,14 +180,17 @@ TEST_CASE("Logs: the engine's last lines outlive it", "[supervisor]") {
     REQUIRE(::kill(engine, SIGKILL) == 0);
     CHECK(opened.slot == 0);
 
-    CHECK(kool_spin.process().wait() == 3);
+    // The supervisor restarts the engine (specs/engine-restart/spec.md
+    // requirement 1) and carries on, so there's no exit to wait for.
     const std::filesystem::path session = must_find_session(kool_spin, kool_spin.logs());
+    CHECK(eventually([&] {
+        return find_line(read_lines(session / "kool_spin.log"), "error",
+                         "ks-engine was killed by signal 9")
+            .has_value();
+    }));
     const std::vector<std::string> engine_lines = read_lines(session / "ks-engine.log");
     CHECK(well_formed(engine_lines, "ks-engine"));
     CHECK(find_line(engine_lines, "info", "attached a ring in slot 0").has_value());
-    CHECK(find_line(read_lines(session / "kool_spin.log"), "error",
-                    "ks-engine was killed by signal 9")
-              .has_value());
 }
 
 TEST_CASE("Logs: keeps the newest ten sessions", "[supervisor]") {

@@ -14,6 +14,16 @@
 //                            SIGHUP
 //                          ready-stuck: send Ready on --supervisor-fd, then
 //                            as silent, never reading
+//                          crash: send Ready, then abort(); but given
+//                            --clean, as ready-stuck (specs/engine-restart/
+//                            spec.md requirement 11)
+//                          crash-always: send Ready, then abort(), whatever
+//                            else it's given
+//                          crash-then-silent: the first time it runs in a
+//                            runtime directory (it leaves a file there to
+//                            say so), as crash. Every later time, without
+//                            --clean, as silent: it never sends Ready. With
+//                            --clean, as ready-stuck.
 //   --supervisor-fd <n>    the socket ks-engine would get from kool_spin
 //   --runtime-dir <path>   if given, the probe takes the engine lock there,
 //                          as ks-engine would
@@ -32,10 +42,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <charconv>
 #include <csignal>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -194,7 +206,7 @@ int probe(std::span<char*> arguments) {
     for (const char* argument : arguments.subspan(1)) {
         args.emplace_back(argument);
     }
-    const Arguments parsed = parse(args);
+    Arguments parsed = parse(args);
     if (parsed.report) {
         write_report(*parsed.report, fds, args);
     }
@@ -212,7 +224,23 @@ int probe(std::span<char*> arguments) {
     if (parsed.mode == "silent") {
         stay();
     }
-    if (parsed.mode == "ready-stuck") {
+    const bool clean = std::ranges::find(args, "--clean") != args.end();
+    if (parsed.mode == "crash-then-silent") {
+        // The first run of the probe in this runtime directory crashes after
+        // Ready; the later ones that aren't clean never send Ready.
+        bool first = true;
+        if (parsed.runtime_dir) {
+            std::error_code ignored;
+            first = std::filesystem::create_directory(
+                std::filesystem::path{*parsed.runtime_dir} / "probe-started", ignored);
+        }
+        if (!first && !clean) {
+            stay();
+        }
+        parsed.mode = first ? "crash" : "ready-stuck";
+    }
+    const bool crash = parsed.mode == "crash-always" || (parsed.mode == "crash" && !clean);
+    if (parsed.mode == "ready-stuck" || parsed.mode == "crash" || parsed.mode == "crash-always") {
         if (!parsed.supervisor_fd) {
             return 1;
         }
@@ -221,6 +249,9 @@ int probe(std::span<char*> arguments) {
             ks::ipc::encode(ks::ipc::Message{.request_id = 0, .body = ks::ipc::msg::Ready{}});
         if (!ready || !supervisor.send(*ready, {}) || !supervisor.flush()) {
             return 1;
+        }
+        if (crash) {
+            std::abort();
         }
         stay();
     }

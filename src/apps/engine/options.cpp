@@ -72,14 +72,58 @@ std::expected<int, std::string> parse_fd(std::string_view option, std::string_vi
 
 bool takes_value(std::string_view arg) noexcept {
     return arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd" ||
+           arg == "--record-fd" || arg == "--track" || arg == "--start-delay" ||
            arg == "--runtime-dir" || arg == "--backend" || arg == "--device" || arg == "--rate" ||
            arg == "--channels" || arg == "--period";
+}
+
+/// `--track <id>:<fd>`: adds the track, refusing an ID of 0, a repeated ID or
+/// descriptor, and more than kMaxTrackOptions.
+std::expected<void, std::string> add_track(Options& options, std::string_view value) {
+    const std::size_t colon = value.find(':');
+    const std::optional<std::uint64_t> id =
+        colon == std::string_view::npos ? std::nullopt
+                                        : parse_whole<std::uint64_t>(value.substr(0, colon));
+    const std::optional<int> fd =
+        colon == std::string_view::npos ? std::nullopt : parse_whole<int>(value.substr(colon + 1));
+    if (!id || !fd) {
+        return std::unexpected{
+            std::format("ks-engine: --track must be <id>:<descriptor>, not '{}'", value)};
+    }
+    if (*id == 0) {
+        return std::unexpected{std::string{"ks-engine: --track: a track's ID is never 0"}};
+    }
+    if (options.tracks.size() >= kMaxTrackOptions) {
+        return std::unexpected{
+            std::format("ks-engine: --track given more than {} times", kMaxTrackOptions)};
+    }
+    for (const TrackOption& given : options.tracks) {
+        if (given.id == *id) {
+            return std::unexpected{std::format("ks-engine: --track: track {} given twice", *id)};
+        }
+        if (given.fd == *fd) {
+            return std::unexpected{
+                std::format("ks-engine: --track: descriptor {} given twice", *fd)};
+        }
+    }
+    options.tracks.push_back(TrackOption{.id = *id, .fd = *fd});
+    return {};
 }
 
 /// The output options, one of which `arg` is.
 std::expected<void, std::string> apply_output(Options& options, std::string_view arg,
                                               std::string_view value) {
+    if (arg == "--backend" && value == "paced") {
+        if (options.paced || options.backend) {
+            return std::unexpected{std::string{"ks-engine: --backend given twice"}};
+        }
+        options.paced = true;
+        return {};
+    }
     if (arg == "--backend") {
+        if (options.paced) {
+            return std::unexpected{std::string{"ks-engine: --backend given twice"}};
+        }
         const std::optional<engine::MiniaudioBackends> backend = engine::parse_backend(value);
         if (!backend) {
             return std::unexpected{std::format("ks-engine: unknown backend '{}'", value)};
@@ -116,7 +160,20 @@ std::expected<void, std::string> apply_output(Options& options, std::string_view
 /// Applies `value` to the option `arg`, one of those takes_value() accepts.
 std::expected<void, std::string> apply_value(Options& options, std::string_view arg,
                                              std::string_view value) {
-    if (arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd") {
+    if (arg == "--track") {
+        return add_track(options, value);
+    }
+    if (arg == "--start-delay") {
+        // A delay of a minute is already far longer than any test needs.
+        const std::expected<std::uint32_t, std::string> delay =
+            parse_setting(arg, value, 0, kMaxStartDelayMs);
+        if (!delay) {
+            return std::unexpected{delay.error()};
+        }
+        return set_once(options.start_delay_ms, arg, *delay);
+    }
+    if (arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd" ||
+        arg == "--record-fd") {
         const std::expected<int, std::string> fd = parse_fd(arg, value);
         if (!fd) {
             return std::unexpected{fd.error()};
@@ -126,6 +183,9 @@ std::expected<void, std::string> apply_value(Options& options, std::string_view 
         }
         if (arg == "--log-fd") {
             return set_once(options.log_fd, arg, *fd);
+        }
+        if (arg == "--record-fd") {
+            return set_once(options.record_fd, arg, *fd);
         }
         return set_once(options.supervisor_fd, arg, *fd);
     }
@@ -160,8 +220,18 @@ std::string usage() {
         "  --period <frames>  the device period, {} to {} (default: the backend's)\n"
         "  --help             print this text and exit\n"
         "\n"
+        "kool_spin gives a restarted engine these too:\n"
+        "  --track <id>:<fd>  a track the old engine held, in the segment at <fd>;\n"
+        "                     at most {}, never a repeated ID or descriptor\n"
+        "  --clean            start as at launch: ignore the resume state and --track\n"
+        "  --record-fd <n>    the recording segment, for --backend paced\n"
+        "\n"
+        "For tests: --backend paced renders in real time on a thread instead of a\n"
+        "device (with --record-fd, it records), and --start-delay <ms>, which only it\n"
+        "accepts, waits that long before building the engine.\n"
+        "\n"
         "Exit codes: 0 stopped, 1 couldn't start, 2 usage error.\n",
-        kMinRate, kMaxRate, kMinChannels, kMaxChannels, kMinPeriod, kMaxPeriod);
+        kMinRate, kMaxRate, kMinChannels, kMaxChannels, kMinPeriod, kMaxPeriod, kMaxTrackOptions);
 }
 
 std::expected<Options, std::string> parse_options(std::span<const std::string_view> args) {
@@ -171,6 +241,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
         if (arg == "-h" || arg == "--help") {
             options.help = true;
             return options;
+        }
+        if (arg == "--clean") {
+            if (options.clean) {
+                return std::unexpected{std::string{"ks-engine: --clean given twice"}};
+            }
+            options.clean = true;
+            continue;
         }
         if (!takes_value(arg)) {
             return std::unexpected{std::format("ks-engine: unexpected argument '{}'", arg)};
@@ -190,6 +267,15 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     }
     if (!options.runtime_dir) {
         return std::unexpected{std::string{"ks-engine: --runtime-dir is required"}};
+    }
+    if (options.start_delay_ms && !options.paced) {
+        return std::unexpected{std::string{"ks-engine: --start-delay is for --backend paced only"}};
+    }
+    if (options.record_fd && !options.paced) {
+        return std::unexpected{std::string{"ks-engine: --record-fd is for --backend paced only"}};
+    }
+    if (options.paced && options.device) {
+        return std::unexpected{std::string{"ks-engine: --backend paced has no devices"}};
     }
     return options;
 }

@@ -5,6 +5,7 @@
 #include <ks/engine/engine.h>
 #include <ks/engine/miniaudio_backend.h>
 #include <ks/engine/output_controller.h>
+#include <ks/engine/paced_backend.h>
 #include <ks/engine/render_core.h>
 #include <ks/engine_app/options.h>
 #include <ks/engine_app/segment_track.h>
@@ -15,6 +16,7 @@
 #include <ks/ipc/frame.h>
 #include <ks/ipc/log.h>
 #include <ks/ipc/messages.h>
+#include <ks/ipc/recording.h>
 #include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/state.h>
@@ -41,6 +43,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -156,6 +159,22 @@ private:
     /// windows that have ended, or, when `stopping`, for every window that
     /// counted anything (specs/audio-events/spec.md requirement 8).
     void log_events(bool stopping);
+    /// Waits `options_->start_delay_ms`, giving up at a stop signal. Returns
+    /// true if one came.
+    /// Builds the engine, resuming from `state` unless --clean (requirement 5).
+    void build_engine(ipc::EngineState& state);
+    bool wait_start_delay();
+    /// Maps each `--track` that's usable, in the order given, and says why
+    /// the others are skipped (specs/engine-restart/spec.md requirement 5).
+    void map_tracks();
+    /// Maps `--record-fd`'s segment and starts the writer on it (requirement
+    /// 16).
+    std::expected<void, StartFailure> open_recording();
+    /// The device source for the options: a paced one, or miniaudio's.
+    std::expected<engine::DeviceSource*, StartFailure> make_source();
+    /// Sends TrackReleased for each track given and not held by a deck
+    /// (requirement 7).
+    void release_unheld_tracks();
     int loop();
     /// Handles what the supervisor sent. Returns the request ID of a Stop.
     std::optional<std::uint32_t> read_supervisor(short events);
@@ -165,7 +184,7 @@ private:
     /// Unavailable, and logs a warning.
     void unavailable(std::uint32_t id, std::string_view what, std::string text);
     /// Attaches the ring in `segment` (client-rings requirement 6).
-    void attach_ring(std::uint32_t id, ipc::Fd segment);
+    void attach_ring(std::uint32_t id, std::uint32_t slot, ipc::Fd segment);
     /// Starts detaching slot `slot`'s ring (client-rings requirement 7).
     void detach_ring(std::uint32_t id, std::uint32_t slot);
     /// Asks the engine again to detach each ring whose detach it couldn't
@@ -212,6 +231,14 @@ private:
     std::unique_ptr<engine::Engine> engine_;
     std::unique_ptr<engine::RenderCore> core_;
     std::unique_ptr<engine::MiniaudioDeviceSource> source_;
+    /// With --backend paced: the device it plays on, which is never
+    /// unplugged, and its source.
+    engine::SimulatedDevice simulated_device_;
+    std::unique_ptr<engine::PacedDeviceSource> paced_source_;
+    /// The recording segment, with --record-fd, and the writer on it.
+    ipc::Fd record_fd_;
+    std::unique_ptr<ipc::Region> record_region_;
+    std::unique_ptr<ipc::RecordingWriter> recorder_;
     std::unique_ptr<engine::OutputController> controller_;
     std::unique_ptr<ipc::Connection> supervisor_;
     /// Slot i's ring, while one is attached.
@@ -259,6 +286,12 @@ std::expected<void, StartFailure> EngineProcess::start() {
     }
     lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
 
+    // Held in start-up, with the lock taken: what tests use to keep a
+    // restarted engine from being ready.
+    if (options_->start_delay_ms && wait_start_delay()) {
+        return failure("stopped before it started", kExitOk);
+    }
+
     // 3. The state segment.
     std::expected<ipc::Region, ipc::MapFailure> region =
         ipc::Region::map(state_fd_.get(), ipc::SegmentKind::EngineState,
@@ -272,18 +305,24 @@ std::expected<void, StartFailure> EngineProcess::start() {
         return failure("the engine-state segment is too small");
     }
 
-    // 4 to 6. The engine, the device source, and the output.
-    engine_ = std::make_unique<engine::Engine>(*state);
+    // 4. The recording, and the tracks a restarted engine is given.
+    if (options_->record_fd) {
+        if (std::expected<void, StartFailure> opened = open_recording(); !opened) {
+            return opened;
+        }
+    }
+    if (!options_->clean) {
+        map_tracks();
+    }
+
+    // 5 to 7. The engine, which resumes if it can, before the device opens;
+    // the device source; and the output.
+    build_engine(*state);
     core_ = std::make_unique<engine::RenderCore>(*engine_);
-    std::expected<engine::MiniaudioSourceConfig, StartFailure> config = source_config(*options_);
-    if (!config) {
-        return std::unexpected{std::move(config.error())};
-    }
-    auto source = engine::MiniaudioDeviceSource::create(*config);
+    const std::expected<engine::DeviceSource*, StartFailure> source = make_source();
     if (!source) {
-        return failure("no audio backend: " + source.error().message);
+        return std::unexpected{source.error()};
     }
-    source_ = std::move(*source);
     engine::OutputConfig output;
     if (options_->rate) {
         output.default_sample_rate = *options_->rate;
@@ -294,7 +333,7 @@ std::expected<void, StartFailure> EngineProcess::start() {
     if (options_->period) {
         output.freewheel_period_frames = *options_->period;
     }
-    controller_ = std::make_unique<engine::OutputController>(*core_, *source_, output);
+    controller_ = std::make_unique<engine::OutputController>(*core_, **source, output);
     controller_->start();
     log_output();
 
@@ -302,7 +341,129 @@ std::expected<void, StartFailure> EngineProcess::start() {
     supervisor_ = std::make_unique<ipc::Connection>(std::move(supervisor));
     send(ipc::Message{.request_id = 0, .body = ipc::msg::Ready{}});
     report(ipc::LogLevel::Info, "ready");
+    release_unheld_tracks();
     return {};
+}
+
+void EngineProcess::build_engine(ipc::EngineState& state) {
+    if (options_->clean) {
+        engine_ = std::make_unique<engine::Engine>(state);
+        report(ipc::LogLevel::Info, "started clean: asked to ignore the resume state");
+    } else {
+        std::vector<const engine::Track*> given;
+        given.reserve(tracks_.size());
+        for (const std::unique_ptr<SegmentTrack>& track : tracks_) {
+            given.push_back(&track->track());
+        }
+        engine_ =
+            std::make_unique<engine::Engine>(state, std::span<const engine::Track* const>{given});
+        // A fresh start has nothing to say: an engine that resumed does.
+        const std::optional<std::uint64_t> generation = engine_->resume_outcome().generation;
+        if (generation) {
+            report(ipc::LogLevel::Info, std::format("resumed from generation {}", *generation));
+        }
+    }
+}
+
+bool EngineProcess::wait_start_delay() {
+    const Clock::time_point until =
+        Clock::now() + std::chrono::milliseconds{options_->start_delay_ms.value_or(0)};
+    while (Clock::now() < until) {
+        if (ipc::take_stop_signal()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    return false;
+}
+
+void EngineProcess::map_tracks() {
+    const std::array<std::optional<int>, 4> others{options_->supervisor_fd, options_->state_fd,
+                                                   options_->log_fd, options_->record_fd};
+    for (const TrackOption& option : options_->tracks) {
+        const auto clashes = [&option](const std::optional<int>& other) {
+            return other == option.fd;
+        };
+        if (std::ranges::any_of(others, clashes)) {
+            report(ipc::LogLevel::Warning,
+                   std::format("--track {}:{}: the descriptor is one of the engine's own",
+                               option.id, option.fd));
+            continue;
+        }
+        if (!ipc::adopt_descriptor(option.fd)) {
+            report(ipc::LogLevel::Warning,
+                   std::format("--track {}:{}: the descriptor isn't open", option.id, option.fd));
+            continue;
+        }
+        std::expected<std::unique_ptr<SegmentTrack>, std::string> track =
+            SegmentTrack::map(ipc::Fd{option.fd}, option.id, 0);
+        if (!track) {
+            report(ipc::LogLevel::Warning,
+                   std::format("--track {}:{}: skipped: {}", option.id, option.fd, track.error()));
+            continue;
+        }
+        tracks_.push_back(std::move(*track));
+    }
+}
+
+std::expected<void, StartFailure> EngineProcess::open_recording() {
+    const int fd = options_->record_fd.value_or(-1);
+    if (!ipc::adopt_descriptor(fd)) {
+        return failure(std::format("--record-fd {} isn't open", fd));
+    }
+    record_fd_ = ipc::Fd{fd};
+    std::expected<ipc::Region, ipc::MapFailure> region =
+        ipc::Region::map(record_fd_.get(), ipc::SegmentKind::Recording,
+                         ipc::kRecordingLayoutVersion, ipc::Access::ReadWrite);
+    if (!region) {
+        return failure("--record-fd isn't a recording segment");
+    }
+    record_region_ = std::make_unique<ipc::Region>(std::move(*region));
+    // at() checks against the size of the engine's own mapping.
+    auto* const segment = record_region_->at<ipc::RecordingSegment>(ipc::kSegmentHeaderSize);
+    if (segment == nullptr) {
+        return failure("the recording segment is too small");
+    }
+    recorder_ = std::make_unique<ipc::RecordingWriter>(
+        *segment, static_cast<std::uint64_t>(Clock::now().time_since_epoch().count()));
+    return {};
+}
+
+std::expected<engine::DeviceSource*, StartFailure> EngineProcess::make_source() {
+    if (options_->paced) {
+        const engine::PacedConfig config{
+            .sample_rate = options_->rate.value_or(48'000),
+            .channels = options_->channels.value_or(2),
+            .period_frames = options_->period.value_or(256),
+            .record_to = recorder_.get(),
+        };
+        paced_source_ = std::make_unique<engine::PacedDeviceSource>(simulated_device_, config);
+        return paced_source_.get();
+    }
+    std::expected<engine::MiniaudioSourceConfig, StartFailure> config = source_config(*options_);
+    if (!config) {
+        return std::unexpected{std::move(config.error())};
+    }
+    auto source = engine::MiniaudioDeviceSource::create(*config);
+    if (!source) {
+        return failure("no audio backend: " + source.error().message);
+    }
+    source_ = std::move(*source);
+    return source_.get();
+}
+
+void EngineProcess::release_unheld_tracks() {
+    const auto& held = engine_->resume_outcome().tracks;
+    for (std::size_t i = tracks_.size(); i > 0; --i) {
+        const engine::Track* const track = &tracks_.at(i - 1)->track();
+        if (std::ranges::find(held, track) != held.end()) {
+            continue;
+        }
+        const std::uint64_t track_id = tracks_.at(i - 1)->id();
+        tracks_.erase(tracks_.begin() + static_cast<std::ptrdiff_t>(i - 1));
+        report(ipc::LogLevel::Info, std::format("released track {}", track_id));
+        send(ipc::Message{.request_id = 0, .body = ipc::msg::TrackReleased{.track_id = track_id}});
+    }
 }
 
 std::expected<void, StartFailure> EngineProcess::open_log() {
@@ -432,12 +593,12 @@ std::optional<std::uint32_t> EngineProcess::handle(const ipc::Message& message,
     }
     if (std::holds_alternative<ipc::msg::Ping>(message.body)) {
         send(ipc::Message{.request_id = id, .body = ipc::msg::Pong{}});
-    } else if (std::holds_alternative<ipc::msg::Attach>(message.body)) {
+    } else if (const auto* const attach = std::get_if<ipc::msg::Attach>(&message.body)) {
         // decode() checked the count; the connection delivers what it says.
         if (fds.size() != 1) {
             unavailable(id, "an Attach", "an Attach without its segment");
         } else {
-            attach_ring(id, std::move(fds.front()));
+            attach_ring(id, attach->slot, std::move(fds.front()));
         }
     } else if (const auto* const detach = std::get_if<ipc::msg::Detach>(&message.body)) {
         detach_ring(id, detach->slot);
@@ -482,7 +643,11 @@ void EngineProcess::unavailable(std::uint32_t id, std::string_view what, std::st
         .body = ipc::msg::Error{.code = ipc::ErrorCode::Unavailable, .text = std::move(text)}});
 }
 
-void EngineProcess::attach_ring(std::uint32_t id, ipc::Fd segment) {
+void EngineProcess::attach_ring(std::uint32_t id, std::uint32_t slot, ipc::Fd segment) {
+    if (slot >= rings_.size() || rings_.at(slot)) {
+        unavailable(id, "an Attach", std::format("slot {} is in use", slot));
+        return;
+    }
     std::expected<ipc::Region, ipc::MapFailure> region =
         ipc::Region::map(segment.get(), ipc::SegmentKind::CommandRing,
                          ipc::kCommandRingLayoutVersion, ipc::Access::ReadWrite);
@@ -495,20 +660,27 @@ void EngineProcess::attach_ring(std::uint32_t id, ipc::Fd segment) {
         unavailable(id, "an Attach", "the segment is too small for a command ring");
         return;
     }
-    const std::optional<std::size_t> slot = engine_->attach(*ring);
-    if (!slot) {
-        unavailable(id, "an Attach", "no client slot is free");
+    // The tail is another process's: a ring whose counters disagree is reset
+    // to empty (ADR 0003 §8; specs/engine-restart/spec.md requirement 6).
+    const std::uint64_t head = ipc::load_shared(ring->head, std::memory_order_acquire);
+    const std::uint64_t tail = ipc::load_shared(ring->tail, std::memory_order_relaxed);
+    if (head - tail > ipc::CommandRing::kCapacity) {
+        ipc::store_shared(ring->tail, head, std::memory_order_release);
+        report(ipc::LogLevel::Warning,
+               std::format("the ring for slot {} had inconsistent counters; reset it", slot));
+    }
+    if (!engine_->attach_at(slot, *ring)) {
+        unavailable(id, "an Attach", "the engine's give ring is full");
         return;
     }
-    rings_.at(*slot) = std::make_unique<AttachedRing>(AttachedRing{.segment = std::move(segment),
-                                                                   .region = std::move(*region),
-                                                                   .ring = ring,
-                                                                   .detaching = false,
-                                                                   .detach_request = 0,
-                                                                   .detach_given = false});
-    report(ipc::LogLevel::Info, std::format("attached a ring in slot {}", *slot));
-    send(ipc::Message{.request_id = id,
-                      .body = ipc::msg::Attached{.slot = static_cast<std::uint32_t>(*slot)}});
+    rings_.at(slot) = std::make_unique<AttachedRing>(AttachedRing{.segment = std::move(segment),
+                                                                  .region = std::move(*region),
+                                                                  .ring = ring,
+                                                                  .detaching = false,
+                                                                  .detach_request = 0,
+                                                                  .detach_given = false});
+    report(ipc::LogLevel::Info, std::format("attached a ring in slot {}", slot));
+    send(ipc::Message{.request_id = id, .body = ipc::msg::Attached{.slot = slot}});
 }
 
 void EngineProcess::detach_ring(std::uint32_t id, std::uint32_t slot) {

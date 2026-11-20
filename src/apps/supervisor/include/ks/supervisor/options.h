@@ -41,6 +41,13 @@ struct Options {
     /// The track memory budget, in MiB: kMinTrackMemoryMib to
     /// kMaxTrackMemoryMib.
     std::optional<std::uint64_t> track_memory_mib;
+    /// `--recording`: create a recording segment and pass it to every engine
+    /// (specs/engine-restart/spec.md requirement 14).
+    bool recording = false;
+    /// `--crash-window <ms>` and `--ready-timeout <ms>`: replace
+    /// kCrashLoopWindow and kEngineReadyTimeout, for tests. 1 to 3,600,000.
+    std::optional<std::uint64_t> crash_window_ms;
+    std::optional<std::uint64_t> ready_timeout_ms;
     /// Everything after "--", for ks-engine, unchecked.
     std::vector<std::string> engine_args;
     bool help = false;
