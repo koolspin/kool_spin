@@ -15,6 +15,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ks::engine_app {
 
@@ -33,6 +34,19 @@ inline constexpr int kExitOk = 0;
 inline constexpr int kExitStartFailed = 1;
 inline constexpr int kExitUsageError = 2;
 
+/// The most `--track` options one command line takes
+/// (specs/engine-restart/spec.md requirement 4).
+inline constexpr std::size_t kMaxTrackOptions = 16;
+
+/// A `--track <id>:<fd>` (specs/engine-restart/spec.md requirement 5).
+struct TrackOption {
+    /// The track's ID, never 0.
+    std::uint64_t id = 0;
+    int fd = -1;
+
+    friend bool operator==(const TrackOption&, const TrackOption&) = default;
+};
+
 /// ks-engine's command line, parsed. Options not given are empty.
 struct Options {
     /// Its end of the socket pair to the supervisor.
@@ -42,6 +56,22 @@ struct Options {
     /// The log segment, if the supervisor gives one (specs/logs/spec.md
     /// requirement 16).
     std::optional<int> log_fd;
+    /// The recording segment, if the supervisor gives one (`--record-fd`,
+    /// specs/engine-restart/spec.md requirement 14).
+    std::optional<int> record_fd;
+    /// The tracks a restarted engine is given, in the order of the command
+    /// line (`--track`, requirement 5): at most kMaxTrackOptions, with no
+    /// repeated ID or descriptor.
+    std::vector<TrackOption> tracks;
+    /// `--clean`: start as at launch, ignoring the resume state and --track
+    /// (requirement 11).
+    bool clean = false;
+    /// `--backend paced`: render on a paced backend instead of a device
+    /// (requirement 16). `backend` is then empty.
+    bool paced = false;
+    /// `--start-delay <ms>`: wait this long before building the engine.
+    /// Only `--backend paced` accepts it (requirement "test-only options").
+    std::optional<std::uint32_t> start_delay_ms;
     std::optional<std::filesystem::path> runtime_dir;
     std::optional<engine::MiniaudioBackends> backend;
     /// A device number, as `ks-harness --list-devices` numbers them. Checked
