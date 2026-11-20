@@ -9,6 +9,7 @@
 #include <ks/ipc/listener.h>
 #include <ks/ipc/log.h>
 #include <ks/ipc/messages.h>
+#include <ks/ipc/recording.h>
 #include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/segment.h>
@@ -309,6 +310,11 @@ struct PendingAttach {
     std::uint32_t request = 0;        ///< The Attach's request ID.
     std::uint64_t client = 0;         ///< Client::id.
     std::uint32_t client_request = 0; ///< The client's OpenRing's request ID.
+    std::uint32_t slot = 0;           ///< The slot the Attach asked for.
+    /// The ring is attached again to a restarted engine: the client has it
+    /// already, and the segment stays in Client::ring (specs/engine-restart/
+    /// spec.md requirement 2).
+    bool reattach = false;
     ipc::Fd segment;
 };
 
@@ -444,6 +450,44 @@ private:
     /// Requirement 15, steps 1 to 5. Returns kExitOk, or reports and returns
     /// kExitStartFailed.
     int start();
+    /// Starts ks-engine as at launch, or `clean` as requirement 11 of
+    /// specs/engine-restart/spec.md says: sets engine_pid_, engine_, and the
+    /// Ready deadline. Says why not.
+    std::expected<void, std::string> spawn_engine(bool clean);
+    /// The engine process has ended, or been killed, while a session was
+    /// running: answers what waited for it, counts the exit, and starts the
+    /// next engine, or gives up (requirements 2, 8, and 11). Returns the exit
+    /// status if the supervisor must exit.
+    std::optional<int> engine_gone();
+    /// Answers every request still waiting for the engine that has gone
+    /// (requirement 8).
+    void answer_waiting_requests();
+    /// Zero-fills the engine-state segment past its header (requirement 11).
+    void wipe_state();
+    /// Sends an Attach for every client's ring, to the engine that has just
+    /// said Ready (requirement 2).
+    void reattach_rings();
+    /// Ends the restart once no reattach waits for an answer.
+    void settle_restart();
+    /// The lowest client slot nothing holds, if one is free.
+    [[nodiscard]] std::optional<std::uint32_t> free_slot() const;
+    /// Handles a client's OpenRecording (requirement 17).
+    void open_recording(Client& client, std::uint32_t id);
+    [[nodiscard]] std::chrono::milliseconds ready_timeout() const {
+        return options_->ready_timeout_ms ? std::chrono::milliseconds{*options_->ready_timeout_ms}
+                                          : std::chrono::milliseconds{kEngineReadyTimeout};
+    }
+    [[nodiscard]] std::chrono::milliseconds crash_window() const {
+        return options_->crash_window_ms ? std::chrono::milliseconds{*options_->crash_window_ms}
+                                         : std::chrono::milliseconds{kCrashLoopWindow};
+    }
+    /// True once begin_stop() has run.
+    [[nodiscard]] bool stopping() const {
+        return phase_ == Phase::Stopping || phase_ == Phase::Terminating;
+    }
+    /// Answers `id` with Unavailable "ks-engine is restarting" and returns
+    /// true if a restart is under way (requirement 9).
+    bool refuse_while_restarting(Client& client, std::uint32_t id);
 
     /// Reads the session's clock, and creates the log folder, the session
     /// folder, and kool_spin.log (specs/logs/spec.md requirement 12). If one
@@ -600,6 +644,20 @@ private:
 
     pid_t engine_pid_ = 0;
     std::unique_ptr<ipc::Connection> engine_;
+    std::filesystem::path engine_path_;
+    /// The recording segment, with --recording.
+    ipc::Fd recording_;
+    /// The engine has said Ready once: there's a session to carry on.
+    bool had_ready_ = false;
+    /// A replacement engine is starting, or its rings are being attached
+    /// (requirement 9).
+    bool restarting_ = false;
+    /// When the engines that ended in the crash-loop window ended.
+    std::vector<Clock::time_point> exits_;
+    /// How many times an engine has been restarted, and when the last one
+    /// was reaped.
+    std::uint64_t restarts_ = 0;
+    Clock::time_point reaped_;
     std::uint32_t next_request_ = 1;
 
     std::unique_ptr<ipc::Listener> listener_;
@@ -729,28 +787,230 @@ int Supervisor::start() {
     }
     signals_ = std::make_unique<SignalPipe>(std::move(*signals));
 
+    engine_path_ = std::move(engine);
+    if (options_->recording) {
+        std::expected<ipc::Fd, std::error_code> recording = factory_->create(
+            ipc::SegmentKind::Recording, ipc::kRecordingLayoutVersion, ipc::kRecordingSegmentSize);
+        if (!recording) {
+            error(
+                std::format("can't create the recording segment: {}", recording.error().message()));
+            return kExitStartFailed;
+        }
+        recording_ = std::move(*recording);
+    }
+    open_engine_log();
+    if (const std::expected<void, std::string> started = spawn_engine(false); !started) {
+        error(started.error());
+        return kExitStartFailed;
+    }
+    return kExitOk;
+}
+
+std::expected<void, std::string> Supervisor::spawn_engine(bool clean) {
     std::expected<std::pair<ipc::Fd, ipc::Fd>, std::error_code> pair = ipc::socket_pair();
     if (!pair || !set_nonblocking_cloexec(pair->first.get())) {
-        error("can't create the engine's socket");
-        return kExitStartFailed;
+        return std::unexpected{std::string{"can't create the engine's socket"}};
     }
     std::vector<std::string> args{"--supervisor-fd", "3", "--state-fd",    "4",
                                   "--log-fd",        "5", "--runtime-dir", dir_.string()};
+    std::vector<Inherit> fds{Inherit{.parent = pair->second.get(), .child = 3},
+                             Inherit{.parent = state_.get(), .child = 4},
+                             Inherit{.parent = engine_log_segment_.get(), .child = 5}};
+    if (recording_.valid()) {
+        args.insert(args.end(), {"--record-fd", "6"});
+        fds.push_back(Inherit{.parent = recording_.get(), .child = 6});
+    }
+    if (clean) {
+        args.emplace_back("--clean");
+    } else {
+        // The tracks the engine holds, in the order of their IDs, from
+        // descriptor 7 (requirement 4).
+        std::vector<const Load*> held;
+        for (const std::unique_ptr<Load>& load : loads_) {
+            if (load->segment.valid() &&
+                (load->engine == EngineHold::Holds || load->engine == EngineHold::Waiting)) {
+                held.push_back(load.get());
+            }
+        }
+        std::ranges::sort(held, {}, &Load::track_id);
+        if (held.size() > kRestartTracks) {
+            held.resize(kRestartTracks);
+        }
+        int next = 7;
+        for (const Load* const load : held) {
+            args.insert(args.end(), {"--track", std::format("{}:{}", load->track_id, next)});
+            fds.push_back(Inherit{.parent = load->segment.get(), .child = next});
+            ++next;
+        }
+    }
     args.insert(args.end(), options_->engine_args.begin(), options_->engine_args.end());
-    const std::array<Inherit, 3> fds{Inherit{.parent = pair->second.get(), .child = 3},
-                                     Inherit{.parent = state_.get(), .child = 4},
-                                     Inherit{.parent = engine_log_segment_.get(), .child = 5}};
-    open_engine_log();
-    const std::expected<pid_t, std::error_code> pid = spawn(engine, args, fds);
+    const std::expected<pid_t, std::error_code> pid = spawn(engine_path_, args, fds);
     if (!pid) {
-        error(std::format("can't start {}: {}", engine.string(), pid.error().message()));
-        return kExitStartFailed;
+        return std::unexpected{
+            std::format("can't start {}: {}", engine_path_.string(), pid.error().message())};
     }
     engine_pid_ = *pid;
     engine_ = std::make_unique<ipc::Connection>(std::move(pair->first));
     info(std::format("started ks-engine (process {})", engine_pid_));
-    deadline_ = Clock::now() + kEngineReadyTimeout;
-    return kExitOk;
+    deadline_ = Clock::now() + ready_timeout();
+    return {};
+}
+
+std::optional<int> Supervisor::engine_gone() {
+    engine_pid_ = 0;
+    engine_.reset();
+    reaped_ = Clock::now();
+    answer_waiting_requests();
+    const std::chrono::milliseconds window = crash_window();
+    for (;;) {
+        const Clock::time_point now = Clock::now();
+        exits_.push_back(now);
+        std::erase_if(exits_, [&](Clock::time_point at) { return now - at > window; });
+        if (exits_.size() > kCleanRestartExit) {
+            error("ks-engine keeps failing; not restarting it");
+            listener_.reset();
+            clients_.clear();
+            return kExitEngineFailed;
+        }
+        const bool clean = exits_.size() == kCleanRestartExit;
+        ++restarts_;
+        info(std::format("restarting ks-engine (restart {})", restarts_));
+        if (clean) {
+            info("starting it clean: its decks come back empty and paused");
+            wipe_state();
+            // The new engine holds no track.
+            for (const std::unique_ptr<Load>& load : loads_) {
+                if (load->engine == EngineHold::Holds) {
+                    load->engine = EngineHold::Done;
+                    signal_worker(*load, SIGTERM);
+                }
+            }
+        }
+        restarting_ = true;
+        phase_ = Phase::Starting;
+        const std::expected<void, std::string> started = spawn_engine(clean);
+        if (started) {
+            return std::nullopt;
+        }
+        error(started.error());
+    }
+}
+
+void Supervisor::answer_waiting_requests() {
+    const std::string why = "ks-engine restarted; ask again";
+    for (const std::unique_ptr<Load>& load : loads_) {
+        if (load->engine == EngineHold::Waiting) {
+            load->engine = EngineHold::Done;
+            refuse_load(*load, ipc::ErrorCode::Unavailable, why);
+            signal_worker(*load, SIGTERM);
+        }
+    }
+    for (const PendingAttach& pending : std::exchange(attaches_, {})) {
+        if (pending.reattach) {
+            continue;
+        }
+        if (Client* const client = find_client(pending.client)) {
+            client->opening = false;
+            warning(std::format("refused client '{}' a ring: {}", client->name, why));
+            send_to_client(*client,
+                           error_message(pending.client_request, ipc::ErrorCode::Unavailable, why));
+        }
+    }
+    for (const PendingUnload& pending : std::exchange(unloads_, {})) {
+        if (Client* const client = find_client(pending.client)) {
+            send_to_client(*client,
+                           error_message(pending.client_request, ipc::ErrorCode::Unavailable, why));
+        }
+    }
+    // The rings of the Detaches that waited are gone with the engine.
+    detaches_.clear();
+}
+
+void Supervisor::wipe_state() {
+    std::expected<ipc::Region, ipc::MapFailure> region =
+        ipc::Region::map(state_.get(), ipc::SegmentKind::EngineState,
+                         ipc::kEngineStateLayoutVersion, ipc::Access::ReadWrite);
+    if (!region) {
+        warning("can't map the engine-state segment to clear it");
+        return;
+    }
+    const std::span<std::byte> bytes = region->bytes();
+    if (bytes.size() > ipc::kSegmentHeaderSize) {
+        std::ranges::fill(bytes.subspan(ipc::kSegmentHeaderSize), std::byte{0});
+    }
+}
+
+void Supervisor::reattach_rings() {
+    for (Client& client : clients_) {
+        if (client.dropped || !client.ring) {
+            continue;
+        }
+        const std::uint32_t request = next_request();
+        attaches_.push_back(PendingAttach{.request = request,
+                                          .client = client.id,
+                                          .client_request = 0,
+                                          .slot = client.ring->slot,
+                                          .reattach = true,
+                                          .segment = {}});
+        const std::array<int, 1> fds{client.ring->segment.get()};
+        send_to_engine(ipc::Message{.request_id = request,
+                                    .body = ipc::msg::Attach{.slot = client.ring->slot}},
+                       fds);
+    }
+    settle_restart();
+}
+
+void Supervisor::settle_restart() {
+    if (restarting_ && phase_ == Phase::Running &&
+        std::ranges::none_of(attaches_, &PendingAttach::reattach)) {
+        restarting_ = false;
+    }
+}
+
+std::optional<std::uint32_t> Supervisor::free_slot() const {
+    std::array<bool, ipc::kStateClients> used{};
+    const auto take = [&used](std::uint32_t slot) {
+        if (slot < used.size()) {
+            std::span{used}[slot] = true;
+        }
+    };
+    for (const Client& client : clients_) {
+        if (client.ring) {
+            take(client.ring->slot);
+        }
+    }
+    for (const PendingAttach& pending : attaches_) {
+        take(pending.slot);
+    }
+    // A slot whose Detach is still waiting is free to ask for: the engine
+    // refuses the Attach until it has let the old ring go, and the client
+    // asks again.
+    for (std::uint32_t slot = 0; slot < used.size(); ++slot) {
+        if (!std::span{used}[slot]) {
+            return slot;
+        }
+    }
+    return std::nullopt;
+}
+
+void Supervisor::open_recording(Client& client, std::uint32_t id) {
+    if (!recording_.valid()) {
+        send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported,
+                                             "kool_spin wasn't started with --recording"));
+        return;
+    }
+    const std::array<int, 1> fds{recording_.get()};
+    send_to_client(client, ipc::Message{.request_id = id, .body = ipc::msg::RecordingOpened{}},
+                   fds);
+}
+
+bool Supervisor::refuse_while_restarting(Client& client, std::uint32_t id) {
+    if (!restarting_ || stopping()) {
+        return false;
+    }
+    send_to_client(client,
+                   error_message(id, ipc::ErrorCode::Unavailable, "ks-engine is restarting"));
+    return true;
 }
 
 void Supervisor::open_logs() {
@@ -968,9 +1228,15 @@ std::optional<int> Supervisor::engine_exited(int status) {
     }
     switch (phase_) {
     case Phase::Starting:
-        error(std::format("ks-engine {} before it was ready", how));
-        return kExitStartFailed;
+        if (!had_ready_) {
+            error(std::format("ks-engine {} before it was ready", how));
+            return kExitStartFailed;
+        }
+        error(std::format("ks-engine {}", how));
+        return engine_gone();
     case Phase::Running:
+        error(std::format("ks-engine {}", how));
+        return engine_gone();
     case Phase::Terminating:
         error(std::format("ks-engine {}", how));
         return kExitEngineFailed;
@@ -1030,6 +1296,17 @@ void Supervisor::handle_engine(short events) {
 
 void Supervisor::handle_engine_message(const ipc::Message& message) {
     const std::uint32_t id = message.request_id;
+    if (std::holds_alternative<ipc::msg::Ready>(message.body) && phase_ == Phase::Starting &&
+        had_ready_) {
+        info("ks-engine is ready");
+        phase_ = Phase::Running;
+        deadline_.reset();
+        info(std::format(
+            "ks-engine restarted in {} ms",
+            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - reaped_).count()));
+        reattach_rings();
+        return;
+    }
     if (std::holds_alternative<ipc::msg::Ready>(message.body) && phase_ == Phase::Starting) {
         info("ks-engine is ready");
         std::expected<ipc::Listener, std::error_code> listener = ipc::Listener::open(dir_);
@@ -1040,6 +1317,7 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
             return;
         }
         listener_ = std::make_unique<ipc::Listener>(std::move(*listener));
+        had_ready_ = true;
         phase_ = Phase::Running;
         deadline_.reset();
         return;
@@ -1125,6 +1403,9 @@ void Supervisor::open_ring(Client& client, std::uint32_t id) {
                                              "a client has one ring at a time"));
         return;
     }
+    if (refuse_while_restarting(client, id)) {
+        return;
+    }
     if (phase_ != Phase::Running) {
         warning(std::format("refused client '{}' a ring: stopping", client.name));
         send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported, "stopping"));
@@ -1140,14 +1421,24 @@ void Supervisor::open_ring(Client& client, std::uint32_t id) {
         send_to_client(client, error_message(id, ipc::ErrorCode::Unavailable, why));
         return;
     }
+    const std::optional<std::uint32_t> slot = free_slot();
+    if (!slot) {
+        warning(std::format("refused client '{}' a ring: no client slot is free", client.name));
+        send_to_client(client,
+                       error_message(id, ipc::ErrorCode::Unavailable, "no client slot is free"));
+        return;
+    }
     const std::uint32_t request = next_request();
     const std::array<int, 1> fds{segment->get()};
     client.opening = true;
     attaches_.push_back(PendingAttach{.request = request,
                                       .client = client.id,
                                       .client_request = id,
+                                      .slot = *slot,
+                                      .reattach = false,
                                       .segment = std::move(*segment)});
-    send_to_engine(ipc::Message{.request_id = request, .body = ipc::msg::Attach{}}, fds);
+    send_to_engine(ipc::Message{.request_id = request, .body = ipc::msg::Attach{.slot = *slot}},
+                   fds);
 }
 
 bool Supervisor::ring_attached(std::uint32_t id, std::uint32_t slot) {
@@ -1157,6 +1448,11 @@ bool Supervisor::ring_attached(std::uint32_t id, std::uint32_t slot) {
     }
     PendingAttach pending = std::move(*found);
     attaches_.erase(found);
+    if (pending.reattach) {
+        info(std::format("the ring in slot {} was attached again", slot));
+        settle_restart();
+        return true;
+    }
     Client* const client = find_client(pending.client);
     if (client == nullptr) {
         // Its client left while the ring was being opened.
@@ -1194,6 +1490,12 @@ bool Supervisor::attach_refused(std::uint32_t id, const ipc::msg::Error& error) 
     }
     const PendingAttach pending = std::move(*found);
     attaches_.erase(found);
+    if (pending.reattach) {
+        warning(std::format("ks-engine refused the ring in slot {} again: {}", pending.slot,
+                            error.text));
+        settle_restart();
+        return true;
+    }
     Client* const client = find_client(pending.client);
     if (client == nullptr) {
         warning(std::format("ks-engine refused a ring: {}", error.text));
@@ -1228,6 +1530,13 @@ void Supervisor::engine_failed(std::string_view why) {
     engine_.reset();
     if (phase_ == Phase::Stopping || phase_ == Phase::Terminating) {
         // It's on its way out: wait for it.
+        return;
+    }
+    if (had_ready_) {
+        // A session is running: kill it, and carry on with a new engine when
+        // it's been reaped (requirement 1).
+        error(std::format("ks-engine's connection {}; killing it", why));
+        ::kill(engine_pid_, SIGKILL);
         return;
     }
     error(std::format("ks-engine's connection {}; stopping it", why));
@@ -1307,7 +1616,7 @@ void Supervisor::handle_client(Client& client, short events) {
 void Supervisor::handle_client_message(Client& client, const ipc::Message& message) {
     const std::uint32_t id = message.request_id;
     if (const auto* const hello = std::get_if<ipc::msg::Hello>(&message.body)) {
-        if (client.welcomed || phase_ != Phase::Running) {
+        if (client.welcomed || stopping()) {
             send_to_client(client,
                            error_message(id, ipc::ErrorCode::NotSupported,
                                          client.welcomed ? "Hello was already said" : "stopping"));
@@ -1331,6 +1640,8 @@ void Supervisor::handle_client_message(Client& client, const ipc::Message& messa
         begin_stop(std::format("client '{}' asked", client.name));
     } else if (std::holds_alternative<ipc::msg::OpenRing>(message.body)) {
         open_ring(client, id);
+    } else if (std::holds_alternative<ipc::msg::OpenRecording>(message.body)) {
+        open_recording(client, id);
     } else if (const auto* const load = std::get_if<ipc::msg::LoadFile>(&message.body)) {
         load_file(client, id, *load);
     } else if (const auto* const unload = std::get_if<ipc::msg::UnloadDeck>(&message.body)) {
@@ -1378,7 +1689,11 @@ void Supervisor::drop(Client& client, std::string_view why, ipc::LogLevel level)
     // A ring being opened is detached when the engine's answer comes
     // (ring_attached()).
     if (client.ring) {
-        detach_ring(client.ring->slot, std::move(client.ring->segment));
+        // A new engine that hasn't said Ready has no ring to detach; it gets
+        // none of a dropped client's.
+        if (!restarting_ || phase_ != Phase::Starting) {
+            detach_ring(client.ring->slot, std::move(client.ring->segment));
+        }
         client.ring.reset();
     }
 }
@@ -1393,9 +1708,15 @@ void Supervisor::begin_stop(std::string_view why) {
         signal_worker(*load, SIGTERM);
     }
     listener_.reset();
+    // A replacement engine that's still starting hasn't read its socket: its
+    // stop signal ends it (specs/engine-restart/spec.md requirement 9).
+    const bool starting_again = had_ready_ && phase_ == Phase::Starting && engine_pid_ > 0;
     phase_ = Phase::Stopping;
     deadline_ = Clock::now() + kEngineStopTimeout;
     send_to_engine(ipc::Message{.request_id = next_request(), .body = ipc::msg::Stop{}});
+    if (starting_again) {
+        ::kill(engine_pid_, SIGTERM);
+    }
 }
 
 std::optional<int> Supervisor::deadline_passed() {
@@ -1404,10 +1725,13 @@ std::optional<int> Supervisor::deadline_passed() {
     }
     switch (phase_) {
     case Phase::Starting:
-        error(std::format("ks-engine didn't report ready within {} s; killing it",
-                          kEngineReadyTimeout.count()));
+        error(std::format("ks-engine didn't report ready within {} ms; killing it",
+                          ready_timeout().count()));
         kill_engine();
-        return kExitStartFailed;
+        if (!had_ready_) {
+            return kExitStartFailed;
+        }
+        return engine_gone();
     case Phase::Stopping:
     case Phase::Terminating:
         error(std::format("ks-engine didn't stop within {} s; killing it",
@@ -1501,6 +1825,10 @@ void Supervisor::load_file(Client& client, std::uint32_t id, const ipc::msg::Loa
             std::format("refused client '{}' a load of {}: {}", client.name, request.path, why));
         send_to_client(client, error_message(id, code, why));
     };
+    if (restarting_ && !stopping()) {
+        refuse(ipc::ErrorCode::Unavailable, "ks-engine is restarting");
+        return;
+    }
     if (phase_ != Phase::Running) {
         refuse(ipc::ErrorCode::NotSupported, "stopping");
         return;
@@ -1641,7 +1969,7 @@ void Supervisor::handle_worker_message(Load& load, const ipc::Message& message) 
 
 void Supervisor::probed(Load& load, const ipc::msg::Probed& probed) {
     load.probed = probed;
-    if (phase_ != Phase::Running || load.worker_pid == 0) {
+    if (stopping() || load.worker_pid == 0) {
         // Stopping, and its client has had its answer; or the worker has
         // ended, and this was among its last messages (worker_ended()): no
         // one would decode the track.
@@ -1724,6 +2052,9 @@ void Supervisor::notify_decode_ended(Load& load) {
 void Supervisor::unload_deck(Client& client, std::uint32_t id,
                              const ipc::msg::UnloadDeck& request) {
     info(std::format("client '{}' asked to unload deck {}", client.name, request.deck + 1));
+    if (refuse_while_restarting(client, id)) {
+        return;
+    }
     if (phase_ != Phase::Running) {
         send_to_client(client, error_message(id, ipc::ErrorCode::NotSupported, "stopping"));
         return;

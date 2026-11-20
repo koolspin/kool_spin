@@ -273,10 +273,6 @@ std::expected<void, StartFailure> EngineProcess::start() {
         }
     }
 
-    if (options_->start_delay_ms && wait_start_delay()) {
-        return failure("stopped before it started", kExitOk);
-    }
-
     // 2. The engine lock.
     const std::filesystem::path dir = options_->runtime_dir.value_or(std::filesystem::path{});
     std::expected<ipc::LockFile, ipc::LockFile::Failure> lock =
@@ -289,6 +285,12 @@ std::expected<void, StartFailure> EngineProcess::start() {
         return failure("can't take the engine lock: " + lock.error().error.message());
     }
     lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+
+    // Held in start-up, with the lock taken: what tests use to keep a
+    // restarted engine from being ready.
+    if (options_->start_delay_ms && wait_start_delay()) {
+        return failure("stopped before it started", kExitOk);
+    }
 
     // 3. The state segment.
     std::expected<ipc::Region, ipc::MapFailure> region =
@@ -355,11 +357,10 @@ void EngineProcess::build_engine(ipc::EngineState& state) {
         }
         engine_ =
             std::make_unique<engine::Engine>(state, std::span<const engine::Track* const>{given});
+        // A fresh start has nothing to say: an engine that resumed does.
         const std::optional<std::uint64_t> generation = engine_->resume_outcome().generation;
         if (generation) {
             report(ipc::LogLevel::Info, std::format("resumed from generation {}", *generation));
-        } else {
-            report(ipc::LogLevel::Info, "started clean: no valid resume state");
         }
     }
 }

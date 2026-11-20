@@ -197,11 +197,12 @@ public:
         return processes::test::lock_holder(dir_.path(), ipc::kEngineLockName).value_or(0);
     }
 
-    /// The session folder, once kool_spin has made it.
+    /// The session folder, once kool_spin has made it; before that, a path
+    /// that doesn't exist, so a test polling for a log line just doesn't find
+    /// one yet.
     [[nodiscard]] std::filesystem::path folder() const {
         const std::vector<std::filesystem::path> folders = logs::test::session_folders(logs());
-        REQUIRE(folders.size() == 1);
-        return folders.front();
+        return folders.size() == 1 ? folders.front() : logs() / "no-session-yet";
     }
     [[nodiscard]] std::filesystem::path kool_spin_log() const { return folder() / "kool_spin.log"; }
     [[nodiscard]] std::filesystem::path engine_log() const { return folder() / "ks-engine.log"; }

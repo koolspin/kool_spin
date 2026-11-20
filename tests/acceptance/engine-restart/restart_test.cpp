@@ -292,6 +292,15 @@ TEST_CASE("Restart: killed with a load in flight", "[restart]") {
     REQUIRE(client.has_value());
     const auto supervisor_pid = session.process().pid();
     static_cast<void>(constant);
+    // A first load, on deck 2, so that what the supervisor opens once, such
+    // as ks-worker.log, is open before the count.
+    const std::filesystem::path warm = ks::track_loading::test::write_fake(
+        files.path(), "warm.fake", FakeTrack{.estimate = 44'100, .frames = 44'100});
+    REQUIRE(is_loaded(load(*client, 1, warm)));
+    // Its DecodeEnded.
+    const std::optional<Received> decoded = ks::processes::test::receive(client->connection);
+    REQUIRE(decoded.has_value());
+    std::this_thread::sleep_for(Milliseconds{500});
     const std::optional<std::size_t> descriptors_before = open_descriptors(supervisor_pid);
 
     // The engine can't answer the LoadTrack: it's stopped, then killed.

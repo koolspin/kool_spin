@@ -107,17 +107,17 @@ TEST_CASE("Engine rings: eight at most", "[engine]") {
     for (std::uint32_t i = 0; i < 8; ++i) {
         CAPTURE(i);
         segments.push_back(create_segment(*engine));
-        const std::optional<Received> answer = attach(*engine, segments.back(), 100 + i);
+        const std::optional<Received> answer = attach(*engine, segments.back(), 100 + i, i);
         REQUIRE(is<msg::Attached>(answer, 100 + i));
         CHECK(slot_of(answer) == i);
     }
 
     const Fd ninth = create_segment(*engine);
-    CHECK(is_error(attach(*engine, ninth, 108), ErrorCode::Unavailable, 108));
+    CHECK(is_error(attach(*engine, ninth, 108, 0), ErrorCode::Unavailable, 108));
 
     REQUIRE(is<msg::Detached>(detach(*engine, 3, 200), 200));
     const Fd again = create_segment(*engine);
-    const std::optional<Received> answer = attach(*engine, again, 201);
+    const std::optional<Received> answer = attach(*engine, again, 201, 3);
     REQUIRE(is<msg::Attached>(answer, 201));
     CHECK(slot_of(answer) == 3U);
 }
@@ -179,7 +179,7 @@ TEST_CASE("Engine rings: a corrupt ring affects only its client", "[engine]") {
     TestRing second = new_ring(*engine);
     const std::optional<Received> first_answer = attach(*engine, first.segment, 1);
     REQUIRE(is<msg::Attached>(first_answer, 1));
-    const std::optional<Received> second_answer = attach(*engine, second.segment, 2);
+    const std::optional<Received> second_answer = attach(*engine, second.segment, 2, 1);
     REQUIRE(is<msg::Attached>(second_answer, 2));
     const std::uint32_t first_slot = slot_of(first_answer).value_or(99);
     const std::uint32_t second_slot = slot_of(second_answer).value_or(99);
