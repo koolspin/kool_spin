@@ -239,6 +239,10 @@ private:
                 std::span{recording_}.subspan(recorded_frames_ * config_.channels).begin());
             recorded_frames_ += frames;
         }
+        if (config_.record_to != nullptr) {
+            // The segment is stereo: the backend refuses anything else.
+            config_.record_to->write(period.first(config_.period_frames * config_.channels));
+        }
     }
 
     RenderCore* core_;
@@ -285,6 +289,11 @@ std::expected<std::unique_ptr<PacedBackend>, BackendError> open_paced(RenderCore
         config.period_frames > std::numeric_limits<std::uint32_t>::max()) {
         return failure(BackendError::Kind::OpenFailed,
                        std::format("a period of {} frames", config.period_frames));
+    }
+    if (config.record_to != nullptr && config.channels != ipc::kRecordingChannels) {
+        return failure(BackendError::Kind::OpenFailed,
+                       std::format("a recording segment holds {} channels, not {}",
+                                   ipc::kRecordingChannels, config.channels));
     }
     return std::make_unique<PacedBackendImpl>(core, config);
 }

@@ -38,6 +38,9 @@ inline constexpr int kExitUsageError = 2;
 /// (specs/engine-restart/spec.md requirement 4).
 inline constexpr std::size_t kMaxTrackOptions = 16;
 
+/// The longest `--start-delay`, in milliseconds.
+inline constexpr std::uint32_t kMaxStartDelayMs = 60'000;
+
 /// A `--track <id>:<fd>` (specs/engine-restart/spec.md requirement 5).
 struct TrackOption {
     /// The track's ID, never 0.

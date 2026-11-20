@@ -259,7 +259,7 @@ TEST_CASE("Engine process: paced backend records", "[engine-process]") {
     REQUIRE(ring->push(ks::track_loading::test::set_playing(0, true, 1)));
     REQUIRE(eventually([&] {
         const auto deck = harness.view().deck(0);
-        return deck && playing(*deck) && real_of(deck->position) > 1.5 * kRate;
+        return deck && playing(*deck) && real_of(deck->position) > 2.2 * kRate;
     }));
 
     CHECK(reader.starts() == 1);

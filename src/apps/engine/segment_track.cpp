@@ -61,6 +61,18 @@ SegmentTrack::map(ipc::Fd segment, std::uint64_t id, std::uint32_t sample_rate) 
     if (header == nullptr || capacity == 0) {
         return std::unexpected{std::string{"the segment holds no frames"}};
     }
+    if (sample_rate == 0) {
+        // One read; the header is another process's.
+        const std::expected<ipc::TrackProgress, ipc::TrackHeaderError> progress =
+            ipc::read_track(*header, capacity);
+        if (!progress) {
+            return std::unexpected{reason(progress.error())};
+        }
+        if (progress->sample_rate == 0) {
+            return std::unexpected{std::string{"its rate isn't stored yet"}};
+        }
+        sample_rate = progress->sample_rate;
+    }
     const std::span<const std::byte> sample_bytes = bytes.subspan(
         ipc::kTrackSamplesOffset, static_cast<std::size_t>(capacity) * ipc::kTrackFrameSize);
     const std::span<const float> samples{
