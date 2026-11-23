@@ -422,6 +422,7 @@ TEST_CASE("Restart: the crash-loop guard", "[restart]") {
         options.engine_options = {"--mode", "crash"};
         options.wait_for_socket = false;
         Session session{options};
+        const auto describe = [&] { return ks::logs::test::read_lines(session.kool_spin_log()); };
         // The probe crashes after Ready, twice; the third time it's given
         // --clean and stays up.
         CHECK(eventually(
@@ -433,6 +434,7 @@ TEST_CASE("Restart: the crash-loop guard", "[restart]") {
             },
             kGuardWait));
         std::this_thread::sleep_for(Milliseconds{1'000});
+        CAPTURE(session.stderr_text(), describe());
         CHECK(session.process().running());
         CHECK(session.engine() > 0);
         const auto lines = ks::logs::test::read_lines(session.kool_spin_log());

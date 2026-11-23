@@ -14,10 +14,10 @@
 //                            SIGHUP
 //                          ready-stuck: send Ready on --supervisor-fd, then
 //                            as silent, never reading
-//                          crash: send Ready, then abort(); but given
+//                          crash: send Ready, then kill itself; but given
 //                            --clean, as ready-stuck (specs/engine-restart/
 //                            spec.md requirement 11)
-//                          crash-always: send Ready, then abort(), whatever
+//                          crash-always: send Ready, then kill itself, whatever
 //                            else it's given
 //                          crash-then-silent: the first time it runs in a
 //                            runtime directory (it leaves a file there to
@@ -251,7 +251,10 @@ int probe(std::span<char*> arguments) {
             return 1;
         }
         if (crash) {
-            std::abort();
+            // Not abort(): under ThreadSanitizer on macOS that runs a report and a
+            // symbolizer, which takes seconds. SIGKILL ends it at once.
+            ::kill(::getpid(), SIGKILL);
+            std::_Exit(1);
         }
         stay();
     }
