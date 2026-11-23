@@ -94,6 +94,9 @@ Exit criteria:
 - Shared-memory segments (memfd on Linux, unlinked POSIX shared memory on macOS) and the Unix-socket control channel.
 - Track loading: a worker decodes with FFmpeg into shared memory, which the engine maps read-only. Playback can start before decoding finishes. Track memory is locked when the OS permits. Tracks are capped at 2 GiB each, within a total memory budget.
 - Engine restart: the engine publishes its state to shared memory. After a crash or a hang, the supervisor restarts it. It resumes with a fade-in, at the position the decks would have reached if they had kept playing. Crash-loop guard.
+  - **Step 7a, engine restart after an exit: done** (pull request #43; `specs/engine-restart/spec.md`).
+  - **Step 7b, hang detection: next, no spec yet.** It is the second criterion below, and only that: an engine that is still running but not working gets killed and restarted. Nothing in 7a detects a hang; 7a restarts an engine only after its process has ended. ADR 0003 §11 ("Hangs") has the design: the supervisor kills the engine with `SIGKILL` if the engine-status heartbeat (rendered blocks) stops for 500 ms, and reports a control thread that stops answering pings, killing it only once no deck is playing. The kill then goes through 7a's restart path unchanged: the exit count, the crash-loop guard, re-attaching rings, and the resume. 7b gets its own spec, written interactively first.
+  - Not 7b: supervisor crash, the session journal, and the health checks, which are the bullets below.
 - Supervisor crash: the other processes keep running, and relaunching offers to stop the orphaned engine.
 - Session journal, written by the supervisor. The previous session is restored, paused, at launch.
 - Per-process logs through shared memory, with shared timestamps.
