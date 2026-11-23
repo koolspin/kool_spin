@@ -161,8 +161,7 @@ TEST_CASE("Restart: kill -9 resumes at the right position", "[restart]") {
     // The paced engine catches up after a stall by rendering periods back to
     // back, so on a busy machine `written_before` can be several periods
     // behind the clock; allow 16.
-    CHECK(boundaries[1].frame <=
-          written_before + elapsed_frames + (std::uint64_t{16} * kPeriod));
+    CHECK(boundaries[1].frame <= written_before + elapsed_frames + (std::uint64_t{16} * kPeriod));
     CHECK(boundaries[1].host_time > host_ns(killed_at));
 
     // The fade-in: the first frames are silent, the output rises, without
