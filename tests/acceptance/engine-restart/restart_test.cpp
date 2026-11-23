@@ -409,6 +409,12 @@ TEST_CASE("Restart: stop during a restart", "[restart]") {
     CHECK(session.engine() == 0);
 }
 
+namespace {
+/// How long the guard tests wait for the engine to fail three or four times;
+/// each start takes seconds on a loaded macOS runner under ThreadSanitizer.
+constexpr Milliseconds kGuardWait = kSlowSanitizer ? Milliseconds{40'000} : Milliseconds{10'000};
+} // namespace
+
 TEST_CASE("Restart: the crash-loop guard", "[restart]") {
     SECTION("restarts twice, restarts clean the third time") {
         SessionOptions options;
@@ -425,7 +431,7 @@ TEST_CASE("Restart: the crash-loop guard", "[restart]") {
                            "restarting ks-engine (restart 3)")
                     .has_value();
             },
-            Milliseconds{10'000}));
+            kGuardWait));
         std::this_thread::sleep_for(Milliseconds{1'000});
         CHECK(session.process().running());
         CHECK(session.engine() > 0);
@@ -441,7 +447,7 @@ TEST_CASE("Restart: the crash-loop guard", "[restart]") {
         options.engine_options = {"--mode", "crash-always"};
         options.wait_for_socket = false;
         Session session{options};
-        CHECK(session.process().wait(Milliseconds{10'000}) == 3);
+        CHECK(session.process().wait(kGuardWait) == 3);
         CHECK(session.stderr_text().find("ks-engine keeps failing; not restarting it") !=
               std::string::npos);
         CHECK(session.engine() == 0);
