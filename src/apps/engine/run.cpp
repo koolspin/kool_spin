@@ -36,6 +36,7 @@
 #include <expected>
 #include <format>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -401,6 +402,13 @@ void EngineProcess::map_tracks() {
             report(ipc::LogLevel::Warning,
                    std::format("--track {}:{}: skipped: {}", option.id, option.fd, track.error()));
             continue;
+        }
+        // A resumed deck needs what's decoded so far at once, or it waits
+        // for the relay and starts blocks behind where it should be. Nothing
+        // is playing yet, so there's no budget to keep to.
+        if (const TrackPass pass = (*track)->pass(std::numeric_limits<std::size_t>::max());
+            pass.finished) {
+            log_finished(**track, *pass.finished);
         }
         tracks_.push_back(std::move(*track));
     }

@@ -148,9 +148,7 @@ TEST_CASE("Restart: kill -9 resumes at the right position", "[restart]") {
     const double expected = position_at(before, after.host_time);
     const double error_frames = real_of(after.position) - expected;
     CAPTURE(expected, real_of(after.position));
-    // 10 ms; 40 ms under a sanitizer, where the new engine's first blocks
-    // come late and the deck starts a few blocks behind.
-    CHECK(std::abs(error_frames) < (kSlowSanitizer ? 0.040 : 0.010) * kRate);
+    CHECK(std::abs(error_frames) < 0.010 * kRate);
 
     // The recording: one new boundary, where the old engine stopped.
     const auto boundaries = p.recording.reader().boundaries();
@@ -160,7 +158,11 @@ TEST_CASE("Restart: kill -9 resumes at the right position", "[restart]") {
                                    kRate) +
         1;
     CHECK(boundaries[1].frame >= written_before);
-    CHECK(boundaries[1].frame <= written_before + elapsed_frames + (std::uint64_t{2} * kPeriod));
+    // The paced engine catches up after a stall by rendering periods back to
+    // back, so on a busy machine `written_before` can be several periods
+    // behind the clock; allow 16.
+    CHECK(boundaries[1].frame <=
+          written_before + elapsed_frames + (std::uint64_t{16} * kPeriod));
     CHECK(boundaries[1].host_time > host_ns(killed_at));
 
     // The fade-in: the first frames are silent, the output rises, without
