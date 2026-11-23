@@ -217,7 +217,9 @@ TEST_CASE("Supervisor: signals stop everything", "[supervisor]") {
     CHECK(supervisor.locks_free());
 }
 
-TEST_CASE("Supervisor: exits when the engine ends", "[supervisor]") {
+TEST_CASE("Supervisor: restarts the engine when it ends", "[supervisor]") {
+    // specs/engine-restart/spec.md requirement 1: an engine that ends while the
+    // supervisor is running is restarted, and clients stay connected.
     Supervisor supervisor;
     supervisor.start();
     REQUIRE(supervisor.listening());
@@ -227,10 +229,16 @@ TEST_CASE("Supervisor: exits when the engine ends", "[supervisor]") {
     REQUIRE(engine > 0);
 
     REQUIRE(::kill(engine, SIGKILL) == 0);
-    CHECK(supervisor.process().wait() == 3);
-    CHECK(closes(client->connection));
-    CHECK_FALSE(std::filesystem::exists(supervisor.socket()));
-    CHECK_FALSE(lock_holder(supervisor.dir(), kSupervisorLockName).has_value());
+    CHECK(eventually([&] {
+        const pid_t now = supervisor.engine();
+        return now > 0 && now != engine;
+    }));
+    CHECK(supervisor.process().running());
+    CHECK(std::filesystem::exists(supervisor.socket()));
+    // The client's connection is still open, and the same state segment shows
+    // the new engine's heartbeat.
+    CHECK(pings(client->connection, 21));
+    CHECK(heartbeat_keeps_increasing(client->state));
 }
 
 TEST_CASE("Supervisor: the engine outlives it", "[supervisor]") {

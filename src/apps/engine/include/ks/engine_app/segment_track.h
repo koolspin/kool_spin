@@ -46,7 +46,11 @@ public:
     /// Maps `segment` read-only as kind Track at kTrackLayoutVersion, and
     /// builds a Track over its sample area, with the capacity of the mapping
     /// (at most kMaxTrackFrames), `sample_rate`, and `id`. Nothing is ready.
-    /// Says why if the segment is refused, or holds no frames.
+    /// With a `sample_rate` of 0, the rate is the header's, which must be in
+    /// range (a restarted engine's tracks, specs/engine-restart/spec.md
+    /// requirement 5: the supervisor sent the rate with the LoadTrack, after
+    /// the worker stored it). Says why if the segment is refused, or holds no
+    /// frames.
     [[nodiscard]] static std::expected<std::unique_ptr<SegmentTrack>, std::string>
     map(ipc::Fd segment, std::uint64_t id, std::uint32_t sample_rate);
 

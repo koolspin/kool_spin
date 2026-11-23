@@ -125,6 +125,7 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 | Command ring | Client | The client (slots, head) and the engine (tail) | Read-write |
 | Track | Loaded track | One worker | Read-only |
 | Log | Process | That process | Not at all |
+| Recording | Session, with `kool_spin --recording`; tests only | The engine's paced backend | Read-write |
 
 - **No names.** No process opens a segment by name; segments travel only as file descriptors.
   - **Linux:** `memfd_create` with sealing allowed. Before passing a segment on, the supervisor seals it against shrinking and growing (`F_SEAL_SHRINK` and `F_SEAL_GROW`, then `F_SEAL_SEAL`). The engine checks the seals before mapping. If a segment shrank under the engine's mapping, the engine would crash with `SIGBUS`; the seals rule that out.
@@ -181,7 +182,7 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   It alternates between two slots. Each slot is a seqlock with a generation number and a CRC-32.
   - A crash during a write leaves the other slot intact.
   - Memory corruption before a crash fails the CRC or the range checks. The engine then starts clean, with decks paused.
-- **Starting again:** the supervisor starts a new engine and passes it every segment again: the state segment, the clients' rings, and each track with its ID. The engine picks the newest valid slot. A deck whose track ID isn't among the tracks passed comes back empty.
+- **Starting again:** the supervisor starts a new engine and passes it the state segment, the log segment, and each track it holds as an inherited descriptor named `--track <id>:<fd>`, so the engine maps the tracks before it builds the resuming `Engine` and opens the device. The clients' rings are attached again after `Ready`, by the `Attach` message, which names the slot the ring must take, so a client's `ClientAck` slot never moves. The engine picks the newest valid slot. A deck whose track ID isn't among the tracks passed comes back empty, and a track passed that no deck holds is released with `TrackReleased`. Requests that waited for the old engine are answered `Unavailable`, and new ones are too until the rings are attached again.
 - **Rings:** the engine reads each ring's tail back from shared memory and checks that `head − tail` is within the capacity. A ring that fails the check is reset. Commands are absolute, so a command applied twice does no harm.
 - **Position:** decks that were playing resume where they would be if they had kept playing. Each position advances by the time since the snapshot, times the deck's rate, like a turntable that kept spinning, and the same as during device loss (section 15). Beatmatched decks stay aligned. Playback fades in over about 50 ms.
 - **Hangs:**
@@ -189,7 +190,8 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   - The engine's control thread treats a device that stops calling back without notice as device loss.
   - If the heartbeat stops for 500 ms, the supervisor kills the engine with `SIGKILL` and restarts it.
   - If the control thread stops answering the supervisor's pings, the supervisor reports it, but doesn't kill the engine while a deck is playing: that would interrupt working audio. It restarts the engine once no deck is playing.
-- **Crash loops** are handled as ADR 0002 says. By default, after three restarts within 30 seconds, the last restart discards the resume state and starts with decks paused. If that also fails, the supervisor stops restarting the engine and reports it.
+- **Crash loops** are handled as ADR 0002 says. The supervisor counts engine exits in a sliding window of 30 seconds, a failure to start or to send `Ready` in time included. The first and second exits restart as above. The third makes a clean restart: the supervisor zero-fills the engine-state segment past its header, passes no tracks, and starts the engine with `--clean`, so decks come back empty and paused. The fourth gives up: the supervisor reports it, closes the clients, and exits with status 3.
+- **Recording:** for chaos tests, `kool_spin --recording` creates a recording segment, a ring of the newest 2²² stereo frames, with a count of frames written and a boundary for each engine start. It outlives the engine, and the engine's paced backend (`--backend paced --record-fd`) writes the output of each period into it, from the audio thread, with one release store. Clients get it with `OpenRecording`.
 - **Restart time:** the target is under 1 second, mostly the time to open the device.
 
 ### 12. Supervisor crash

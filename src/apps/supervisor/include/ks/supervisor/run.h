@@ -39,6 +39,14 @@ inline constexpr std::size_t kMaxWorkers = 4;
 /// it exits other than by stopping (requirement 18).
 inline constexpr std::chrono::seconds kWorkerStopTimeout{1};
 
+/// The most tracks a restarted engine is given
+/// (specs/engine-restart/spec.md requirement 4).
+inline constexpr std::size_t kRestartTracks = 16;
+/// The window in which engine exits count together, and the exit in it that
+/// makes a clean restart; the next gives up (requirement 11).
+inline constexpr std::chrono::seconds kCrashLoopWindow{30};
+inline constexpr std::size_t kCleanRestartExit = 3;
+
 /// `ks-engine` in the directory that holds this process's executable: the
 /// default for --engine (requirement 13).
 [[nodiscard]] std::expected<std::filesystem::path, std::error_code> default_engine_path();

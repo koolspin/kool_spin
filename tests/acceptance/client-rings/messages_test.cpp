@@ -98,8 +98,9 @@ TEST_CASE("Ring messages: round trip", "[messages]") {
           frame(MessageType::OpenRing, 1, {}));
     CHECK(encode(Message{.request_id = 2, .body = msg::RingOpened{.slot = 7}}) ==
           frame(MessageType::RingOpened, 2, bytes({7, 0, 0, 0}), 1));
-    CHECK(encode(Message{.request_id = 3, .body = msg::Attach{}}) ==
-          frame(MessageType::Attach, 3, {}, 1));
+    // Its slot, from specs/engine-restart/spec.md requirement 6.
+    CHECK(encode(Message{.request_id = 3, .body = msg::Attach{.slot = 2}}) ==
+          frame(MessageType::Attach, 3, bytes({2, 0, 0, 0}), 1));
     CHECK(encode(Message{.request_id = 4, .body = msg::Attached{.slot = 5}}) ==
           frame(MessageType::Attached, 4, bytes({5, 0, 0, 0})));
     CHECK(encode(Message{.request_id = 5, .body = msg::Detach{.slot = 6}}) ==
@@ -179,8 +180,8 @@ TEST_CASE("Ring messages: what's refused", "[messages]") {
         {.name = "an OpenRing with a 1-byte body",
          .frame = frame(MessageType::OpenRing, 1, bytes({0})),
          .error = MessageError::LongBody},
-        {.name = "an Attach with a 1-byte body",
-         .frame = frame(MessageType::Attach, 1, bytes({0}), 1),
+        {.name = "an Attach with a 5-byte body",
+         .frame = frame(MessageType::Attach, 1, bytes({0, 0, 0, 0, 0}), 1),
          .error = MessageError::LongBody},
         {.name = "a Detached with a 1-byte body",
          .frame = frame(MessageType::Detached, 1, bytes({0})),

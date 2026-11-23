@@ -12,6 +12,7 @@ add_library(ks_ipc STATIC
     log.cpp
     log_format.cpp
     messages.cpp
+    recording.cpp
     region.cpp
     runtime_dir.cpp
     segment.cpp
@@ -33,6 +34,7 @@ target_sources(ks_ipc PUBLIC
         include/ks/ipc/listener.h
         include/ks/ipc/log.h
         include/ks/ipc/messages.h
+        include/ks/ipc/recording.h
         include/ks/ipc/region.h
         include/ks/ipc/runtime_dir.h
         include/ks/ipc/segment.h
