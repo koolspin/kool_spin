@@ -447,7 +447,10 @@ TEST_CASE("Restart: the crash-loop guard", "[restart]") {
         options.engine_options = {"--mode", "crash-always"};
         options.wait_for_socket = false;
         Session session{options};
-        CHECK(session.process().wait(kGuardWait) == 3);
+        const std::optional<int> outcome = session.process().wait(kGuardWait);
+        CAPTURE(outcome.value_or(-1000), session.stderr_text(),
+                ks::logs::test::read_lines(session.kool_spin_log()));
+        CHECK(outcome == 3);
         CHECK(session.stderr_text().find("ks-engine keeps failing; not restarting it") !=
               std::string::npos);
         CHECK(session.engine() == 0);
