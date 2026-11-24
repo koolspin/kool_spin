@@ -96,10 +96,10 @@ double mean(const std::vector<float>& samples) {
            static_cast<double>(samples.size());
 }
 
-/// The number of descriptors process `pid` has open, or nothing where /proc
-/// isn't there.
-std::optional<std::size_t> open_descriptors(pid_t pid) {
 #ifdef __linux__
+/// The number of descriptors process `pid` has open, or nothing if /proc/<pid>/fd
+/// can't be read. Only the Linux-only descriptor test uses it.
+std::optional<std::size_t> open_descriptors(pid_t pid) {
     std::error_code error;
     std::size_t count = 0;
     for (const auto& entry :
@@ -111,11 +111,8 @@ std::optional<std::size_t> open_descriptors(pid_t pid) {
         return std::nullopt;
     }
     return count;
-#else
-    static_cast<void>(pid);
-    return std::nullopt;
-#endif
 }
+#endif
 
 /// How many lines of the supervisor's log contain `phrase`, at any level.
 std::size_t log_count(const Session& session, std::string_view phrase) {
