@@ -290,6 +290,9 @@ TEST_CASE("Restart: killed with a load in flight", "[restart]") {
         FakeTrack{.estimate = 44'100ULL * 10, .probe_delay_ms = 600, .frames = 44'100ULL * 10});
     SessionOptions options;
     options.worker = std::string{kFakeWorkerPath};
+    // The test stops the engine for 1.5 s on purpose. Since step 7b, the
+    // supervisor would kill an engine whose heartbeat stood still that long.
+    options.supervisor = {"--hang-timeout", "3600000"};
     Session session{options};
     std::expected<Client, std::string> client = join(session.dir(), "late");
     REQUIRE(client.has_value());

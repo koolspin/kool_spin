@@ -95,7 +95,8 @@ std::optional<std::filesystem::path>* path_field(Options& options, std::string_v
 /// True if `arg` is an option that takes a value.
 bool takes_value(Options& options, std::string_view arg) {
     return path_field(options, arg) != nullptr || arg == "--track-memory" ||
-           arg == "--crash-window" || arg == "--ready-timeout";
+           arg == "--crash-window" || arg == "--ready-timeout" || arg == "--hang-timeout" ||
+           arg == "--ping-interval";
 }
 
 /// Applies `value` to the option `arg`, one of those takes_value() accepts.
@@ -109,6 +110,12 @@ std::expected<void, std::string> apply_value(Options& options, std::string_view 
     }
     if (arg == "--ready-timeout") {
         return set_milliseconds(options.ready_timeout_ms, arg, value);
+    }
+    if (arg == "--hang-timeout") {
+        return set_milliseconds(options.hang_timeout_ms, arg, value);
+    }
+    if (arg == "--ping-interval") {
+        return set_milliseconds(options.ping_interval_ms, arg, value);
     }
     return set_track_memory(options.track_memory_mib, value);
 }
@@ -141,6 +148,10 @@ std::string usage() {
            "                        together (default: 30000)\n"
            "  --ready-timeout <ms>  for tests: how long a new engine has to send Ready\n"
            "                        (default: 10000)\n"
+           "  --hang-timeout <ms>   for tests: how long the engine's heartbeat may stand still\n"
+           "                        before the engine is killed (default: 500)\n"
+           "  --ping-interval <ms>  for tests: how often the engine is pinged; it is not\n"
+           "                        answering after three intervals (default: 1000)\n"
            "  --help                print this text and exit\n"
            "\n"
            "Everything after -- goes to ks-engine: --backend, --device, --rate,\n"

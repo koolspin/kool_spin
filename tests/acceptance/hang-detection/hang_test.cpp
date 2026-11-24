@@ -404,7 +404,9 @@ TEST_CASE("Hang: an unresponsive control thread with a playing deck is left runn
     CHECK(p.recording.reader().starts() == 1);
 
     // The supervisor still answers its clients.
-    CHECK(ks::processes::test::pings(p.client.connection, p.client.next_request++));
+    // (ask() skips notifications, such as the DecodeEnded that is waiting.)
+    const auto pong = ask(p.client, msg::Ping{});
+    CHECK(ks::processes::test::is<msg::Pong>(pong, p.client.next_request - 1));
 }
 
 TEST_CASE("Hang: an unresponsive control thread is killed once no deck plays", "[hang]") {
@@ -556,10 +558,28 @@ TEST_CASE("Hang: options", "[hang]") {
 TEST_CASE("Hang: descriptors and processes don't leak", "[hang]") {
 #ifdef __linux__
     const Files files;
-    auto playing_session = playing_constant(files);
+    // A short track, so that its decoding ends (and the worker's descriptors
+    // close) before the baseline is taken, even under a sanitizer.
+    const std::filesystem::path wav = write_constant(files.path(), "short.wav", 30);
+    auto playing_session = start_playing(wav);
     Playing& p = *playing_session;
+    p.play(0);
+    REQUIRE(playing_deck(p.client, 0, 0.2 * kRate).has_value());
     const pid_t supervisor = p.session.process().pid();
-    const auto before = require(open_descriptors(supervisor));
+    // Its DecodeEnded.
+    const std::optional<Received> decoded = ks::processes::test::receive(p.client.connection);
+    REQUIRE(ks::processes::test::is<msg::DecodeEnded>(decoded, 0));
+    // The decode worker's descriptors close when the track has been decoded:
+    // the baseline is taken once the count stands still.
+    std::optional<std::size_t> before;
+    REQUIRE(eventually(
+        [&] {
+            const auto first = open_descriptors(supervisor);
+            std::this_thread::sleep_for(Milliseconds{500});
+            before = open_descriptors(supervisor);
+            return first && first == before;
+        },
+        Milliseconds{30'000}));
 
     std::vector<pid_t> dead{p.session.engine()};
     for (std::uint64_t hang = 1; hang <= 2; ++hang) {
@@ -567,7 +587,9 @@ TEST_CASE("Hang: descriptors and processes don't leak", "[hang]") {
         REQUIRE(restarted(p, hang + 1, kGuardWait));
         REQUIRE(playing_deck(p.client, 0).has_value());
         // The old engine's socket is closed and the new one's is open.
-        CHECK(eventually([&] { return open_descriptors(supervisor) == before; }));
+        const bool settled = eventually([&] { return open_descriptors(supervisor) == before; });
+        CAPTURE(hang, before.value_or(0), open_descriptors(supervisor).value_or(0));
+        CHECK(settled);
         dead.push_back(p.session.engine());
     }
     dead.pop_back(); // the last one is alive
