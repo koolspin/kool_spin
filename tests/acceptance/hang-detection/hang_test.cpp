@@ -298,6 +298,29 @@ TEST_CASE("Hang: a healthy engine is never killed", "[hang]") {
     }
 }
 
+TEST_CASE("Hang: a heartbeat that never starts gets a grace period", "[hang]") {
+    // The probe sends Ready and never beats, and never reads, so it never
+    // answers a ping either: the huge ping interval keeps the pings out of it.
+    SessionOptions options = with_supervisor({"--ping-interval", "600000"});
+    options.engine = std::string{ks::processes::test::kProbePath};
+    options.engine_options = {"--mode", "ready-stuck"};
+    options.wait_for_socket = false;
+    const Session session{options};
+    REQUIRE(log_says(session, "ks-engine is ready", Milliseconds{10'000}));
+    const Clock::time_point ready_at = Clock::now();
+
+    // Not killed in the first 3.5 s: well over the hang timeout (500 ms).
+    std::this_thread::sleep_for(Milliseconds{3'500});
+    CHECK(log_count(session, "heartbeat never started") == 0);
+    CHECK(log_count(session, "restarting ks-engine") == 0);
+
+    // Then killed, for want of a heartbeat, within the grace and a margin.
+    const Milliseconds limit = kSlowSanitizer ? Milliseconds{13'000} : Milliseconds{8'000};
+    CHECK(log_says(session, "ks-engine heartbeat never started in ", limit));
+    CHECK(Clock::now() - ready_at <= limit + Milliseconds{500});
+    CHECK(log_says(session, "restarting ks-engine (restart 1)"));
+}
+
 TEST_CASE("Hang: a short stall is not a hang", "[hang]") {
     const Files files;
     auto playing_session = playing_constant(files);

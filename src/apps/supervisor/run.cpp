@@ -1199,10 +1199,14 @@ void Supervisor::watch_engine() {
             watch_.heartbeat_changed = now;
         }
     }
-    // Until the heartbeat has started, there's nothing to stand still.
-    if (watch_.beating && now - watch_.heartbeat_changed >= hang_timeout()) {
-        kill_hung_engine(
-            std::format("heartbeat stopped for {} ms", ms(now - watch_.heartbeat_changed)));
+    // A heartbeat that has never been non-zero gets kHeartbeatStartGrace
+    // (requirement 3), or the hang timeout if that is longer.
+    const std::chrono::milliseconds limit =
+        watch_.beating ? hang_timeout() : std::max(hang_timeout(), kHeartbeatStartGrace);
+    if (now - watch_.heartbeat_changed >= limit) {
+        const auto waited = ms(now - watch_.heartbeat_changed);
+        kill_hung_engine(watch_.beating ? std::format("heartbeat stopped for {} ms", waited)
+                                        : std::format("heartbeat never started in {} ms", waited));
         return;
     }
     // An engine whose control thread doesn't answer is killed only once no

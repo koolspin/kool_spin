@@ -46,6 +46,8 @@ inline constexpr std::chrono::seconds kWorkerStopTimeout{1};
 /// a ping has waited kEnginePingLimitIntervals intervals.
 inline constexpr std::chrono::milliseconds kHangTimeout{500};
 inline constexpr std::chrono::milliseconds kHeartbeatPoll{100};
+/// How long an engine that has sent Ready has to make its heartbeat non-zero.
+inline constexpr std::chrono::milliseconds kHeartbeatStartGrace{5'000};
 inline constexpr std::chrono::milliseconds kEnginePingInterval{1'000};
 inline constexpr std::uint32_t kEnginePingLimitIntervals = 3;
 
