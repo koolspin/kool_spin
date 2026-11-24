@@ -39,10 +39,10 @@ The supervisor kills and restarts an engine that is still running but not workin
 
 8. **Sending:** while the engine is `Ready` and not being killed, the supervisor sends the engine a `Ping` every `kEnginePingInterval` (1 s), with a new non-zero request ID, and only if no earlier ping of its own is still unanswered. It records the time of the oldest unanswered ping.
 9. **Answers:** a `Pong` with a matching ID clears the record. A `Pong` that matches nothing is ignored.
-10. **Unresponsive:** when the oldest unanswered ping is `kEnginePingTimeout` (3 s) old, the supervisor reports once `ks-engine control thread not answering`, and the engine is *unresponsive*. A later `Pong` ends it, and the supervisor reports `ks-engine control thread answering again`.
+10. **Unresponsive:** when the oldest unanswered ping is `kEnginePingLimitIntervals` (3) ping intervals old (3 s at the default interval), the supervisor reports once `ks-engine control thread not answering`, and the engine is *unresponsive*. A later `Pong` ends it, and the supervisor reports `ks-engine control thread answering again`.
 11. **Killing an unresponsive engine:** while the engine is unresponsive, at each poll the supervisor reads the deck states from a seqlock copy. If no deck is playing (the playing flag clear on every deck), it kills the engine as requirement 4 says, with `ks-engine control thread not answering for <n> ms and no deck is playing; killing it`. If any deck is playing, it does nothing, and checks again at the next poll. Decks that can't be read count as playing.
 12. **Pings across restarts:** the record of unanswered pings is cleared when an engine ends and at each `Ready`. A ping isn't sent to an engine that is starting or restarting.
-13. **A ping doesn't wait:** the supervisor never blocks on a ping or a `Pong`. Requests from clients are answered as usual while the engine is unresponsive; those that need the engine are answered `Unavailable`, text `ks-engine is not answering`, after the usual request timeout.
+13. **A ping doesn't wait:** the supervisor never blocks on a ping or a `Pong`. Requests from clients are answered as usual while the engine is unresponsive; those that need the engine are answered `Unavailable`, text `ks-engine is not answering`, at once. The supervisor doesn't hold a request for a stuck engine, because a healthy control thread answers in microseconds.
 
 ### Options and constants
 
