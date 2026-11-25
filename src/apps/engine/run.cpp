@@ -528,7 +528,20 @@ void EngineProcess::log_events(bool stopping) {
 }
 
 int EngineProcess::loop() {
+    // For tests of hang detection: the control thread stops answering at
+    // this time, and the render thread carries on.
+    const std::optional<Clock::time_point> hang_at =
+        options_->hang_control_after_ms
+            ? std::optional{Clock::now() +
+                            std::chrono::milliseconds{*options_->hang_control_after_ms}}
+            : std::nullopt;
     for (;;) {
+        if (hang_at && Clock::now() >= *hang_at) {
+            report(ipc::LogLevel::Warning, "the control thread is hanging, as asked");
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+        }
         // The supervisor's socket, if it's still open. Signals don't wake
         // the poll; they wait for the next pass, at most kControlInterval
         // away.

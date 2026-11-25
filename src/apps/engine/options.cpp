@@ -70,11 +70,29 @@ std::expected<int, std::string> parse_fd(std::string_view option, std::string_vi
     return *value;
 }
 
+/// The usage error for an option only `--backend paced` accepts, given
+/// without it.
+std::optional<std::string> paced_only(const Options& options) {
+    if (options.paced) {
+        return std::nullopt;
+    }
+    if (options.start_delay_ms) {
+        return "ks-engine: --start-delay is for --backend paced only";
+    }
+    if (options.hang_control_after_ms) {
+        return "ks-engine: --hang-control-after is for --backend paced only";
+    }
+    if (options.record_fd) {
+        return "ks-engine: --record-fd is for --backend paced only";
+    }
+    return std::nullopt;
+}
+
 bool takes_value(std::string_view arg) noexcept {
     return arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd" ||
            arg == "--record-fd" || arg == "--track" || arg == "--start-delay" ||
-           arg == "--runtime-dir" || arg == "--backend" || arg == "--device" || arg == "--rate" ||
-           arg == "--channels" || arg == "--period";
+           arg == "--hang-control-after" || arg == "--runtime-dir" || arg == "--backend" ||
+           arg == "--device" || arg == "--rate" || arg == "--channels" || arg == "--period";
 }
 
 /// `--track <id>:<fd>`: adds the track, refusing an ID of 0, a repeated ID or
@@ -172,6 +190,14 @@ std::expected<void, std::string> apply_value(Options& options, std::string_view 
         }
         return set_once(options.start_delay_ms, arg, *delay);
     }
+    if (arg == "--hang-control-after") {
+        const std::expected<std::uint32_t, std::string> after =
+            parse_setting(arg, value, 0, kMaxStartDelayMs);
+        if (!after) {
+            return std::unexpected{after.error()};
+        }
+        return set_once(options.hang_control_after_ms, arg, *after);
+    }
     if (arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd" ||
         arg == "--record-fd") {
         const std::expected<int, std::string> fd = parse_fd(arg, value);
@@ -228,7 +254,9 @@ std::string usage() {
         "\n"
         "For tests: --backend paced renders in real time on a thread instead of a\n"
         "device (with --record-fd, it records), and --start-delay <ms>, which only it\n"
-        "accepts, waits that long before building the engine.\n"
+        "accepts, waits that long before building the engine, and\n"
+        "--hang-control-after <ms>, which only it accepts, makes the control thread\n"
+        "stop answering that long after Ready (the render thread carries on).\n"
         "\n"
         "Exit codes: 0 stopped, 1 couldn't start, 2 usage error.\n",
         kMinRate, kMaxRate, kMinChannels, kMaxChannels, kMinPeriod, kMaxPeriod, kMaxTrackOptions);
@@ -268,11 +296,8 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
     if (!options.runtime_dir) {
         return std::unexpected{std::string{"ks-engine: --runtime-dir is required"}};
     }
-    if (options.start_delay_ms && !options.paced) {
-        return std::unexpected{std::string{"ks-engine: --start-delay is for --backend paced only"}};
-    }
-    if (options.record_fd && !options.paced) {
-        return std::unexpected{std::string{"ks-engine: --record-fd is for --backend paced only"}};
+    if (const std::optional<std::string> refused = paced_only(options)) {
+        return std::unexpected{*refused};
     }
     if (options.paced && options.device) {
         return std::unexpected{std::string{"ks-engine: --backend paced has no devices"}};

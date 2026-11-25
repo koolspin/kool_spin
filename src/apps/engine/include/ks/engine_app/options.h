@@ -75,6 +75,10 @@ struct Options {
     /// `--start-delay <ms>`: wait this long before building the engine.
     /// Only `--backend paced` accepts it (requirement "test-only options").
     std::optional<std::uint32_t> start_delay_ms;
+    /// `--hang-control-after <ms>`: this long after Ready, the control thread
+    /// stops answering anything (specs/hang-detection/spec.md requirement
+    /// 15). Only `--backend paced` accepts it.
+    std::optional<std::uint32_t> hang_control_after_ms;
     std::optional<std::filesystem::path> runtime_dir;
     std::optional<engine::MiniaudioBackends> backend;
     /// A device number, as `ks-harness --list-devices` numbers them. Checked

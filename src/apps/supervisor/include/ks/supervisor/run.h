@@ -39,6 +39,18 @@ inline constexpr std::size_t kMaxWorkers = 4;
 /// it exits other than by stopping (requirement 18).
 inline constexpr std::chrono::seconds kWorkerStopTimeout{1};
 
+/// Hang detection (specs/hang-detection/spec.md): the engine is killed when
+/// its heartbeat hasn't changed for kHangTimeout, which the supervisor checks
+/// every kHeartbeatPoll (a fifth of the timeout, at least 10 ms). It pings
+/// the engine every kEnginePingInterval, and the engine is unresponsive when
+/// a ping has waited kEnginePingLimitIntervals intervals.
+inline constexpr std::chrono::milliseconds kHangTimeout{500};
+inline constexpr std::chrono::milliseconds kHeartbeatPoll{100};
+/// How long an engine that has sent Ready has to make its heartbeat non-zero.
+inline constexpr std::chrono::milliseconds kHeartbeatStartGrace{5'000};
+inline constexpr std::chrono::milliseconds kEnginePingInterval{1'000};
+inline constexpr std::uint32_t kEnginePingLimitIntervals = 3;
+
 /// The most tracks a restarted engine is given
 /// (specs/engine-restart/spec.md requirement 4).
 inline constexpr std::size_t kRestartTracks = 16;

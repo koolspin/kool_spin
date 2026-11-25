@@ -481,6 +481,36 @@ private:
         return options_->crash_window_ms ? std::chrono::milliseconds{*options_->crash_window_ms}
                                          : std::chrono::milliseconds{kCrashLoopWindow};
     }
+    [[nodiscard]] std::chrono::milliseconds hang_timeout() const {
+        return options_->hang_timeout_ms ? std::chrono::milliseconds{*options_->hang_timeout_ms}
+                                         : kHangTimeout;
+    }
+    /// A fifth of the hang timeout, at least 10 ms (requirement 14).
+    [[nodiscard]] std::chrono::milliseconds heartbeat_poll() const {
+        return options_->hang_timeout_ms
+                   ? std::max(std::chrono::milliseconds{10}, hang_timeout() / 5)
+                   : kHeartbeatPoll;
+    }
+    [[nodiscard]] std::chrono::milliseconds ping_interval() const {
+        return options_->ping_interval_ms ? std::chrono::milliseconds{*options_->ping_interval_ms}
+                                          : kEnginePingInterval;
+    }
+    /// Watching the engine for hangs (specs/hang-detection/spec.md): starts
+    /// at its Ready, and stops when it ends.
+    void start_watch();
+    void stop_watch() noexcept;
+    /// One pass of the watch: pings, the heartbeat, and a kill if either
+    /// calls for one.
+    void watch_engine();
+    /// The engine's status, and whether any deck plays, from the state
+    /// segment. Nothing / true if they can't be read.
+    [[nodiscard]] std::optional<ipc::EngineStatus> read_status();
+    [[nodiscard]] bool any_deck_playing() const;
+    /// Handles a Pong with request ID `id`.
+    void pong(std::uint32_t id);
+    /// Reports `why` and sends the engine SIGKILL. The kill is reaped, and
+    /// the engine restarted, as for any exit.
+    void kill_hung_engine(std::string_view why);
     /// True once begin_stop() has run.
     [[nodiscard]] bool stopping() const {
         return phase_ == Phase::Stopping || phase_ == Phase::Terminating;
@@ -513,6 +543,8 @@ private:
     /// failed. Returns whether it still works.
     bool engine_file_ok();
 
+    /// How long the poll loop may wait, in milliseconds; -1 for no limit.
+    [[nodiscard]] int poll_wait() const;
     /// One pass of the poll loop. Returns the exit status once the
     /// supervisor is done.
     std::optional<int> step();
@@ -659,6 +691,27 @@ private:
     std::uint64_t restarts_ = 0;
     Clock::time_point reaped_;
     std::uint32_t next_request_ = 1;
+
+    /// Hang detection (specs/hang-detection/spec.md): the supervisor's
+    /// read-only mapping of the state segment, and the watch's state.
+    struct Watch {
+        std::unique_ptr<ipc::Region> state_view;
+        std::uint64_t last_heartbeat = 0;
+        Clock::time_point heartbeat_changed;
+        Clock::time_point next_poll;
+        Clock::time_point next_ping;
+        /// When the ping that hasn't been answered was sent.
+        Clock::time_point ping_sent;
+        /// Its request ID; 0 if none is waiting.
+        std::uint32_t ping_id = 0;
+        bool watching = false;
+        /// The engine's heartbeat has been seen to be non-zero: only then can
+        /// it stand still (requirement 3).
+        bool beating = false;
+        bool hang_killed = false;
+        bool unresponsive = false;
+    };
+    Watch watch_;
 
     std::unique_ptr<ipc::Listener> listener_;
     std::vector<Client> clients_;
@@ -849,6 +902,7 @@ std::expected<void, std::string> Supervisor::spawn_engine(bool clean) {
         return std::unexpected{
             std::format("can't start {}: {}", engine_path_.string(), pid.error().message())};
     }
+    stop_watch();
     engine_pid_ = *pid;
     engine_ = std::make_unique<ipc::Connection>(std::move(pair->first));
     info(std::format("started ks-engine (process {})", engine_pid_));
@@ -1005,12 +1059,163 @@ void Supervisor::open_recording(Client& client, std::uint32_t id) {
 }
 
 bool Supervisor::refuse_while_restarting(Client& client, std::uint32_t id) {
-    if (!restarting_ || stopping()) {
+    if (stopping()) {
         return false;
+    }
+    if (!restarting_) {
+        if (!watch_.unresponsive) {
+            return false;
+        }
+        // The engine is running but its control thread isn't answering
+        // (specs/hang-detection/spec.md requirement 13).
+        send_to_client(
+            client, error_message(id, ipc::ErrorCode::Unavailable, "ks-engine is not answering"));
+        return true;
     }
     send_to_client(client,
                    error_message(id, ipc::ErrorCode::Unavailable, "ks-engine is restarting"));
     return true;
+}
+
+// ---- Hang detection (specs/hang-detection/spec.md) ----------------------------
+
+void Supervisor::start_watch() {
+    const Clock::time_point now = Clock::now();
+    watch_.watching = true;
+    watch_.hang_killed = false;
+    watch_.unresponsive = false;
+    watch_.ping_id = 0;
+    watch_.heartbeat_changed = now;
+    watch_.next_poll = now + heartbeat_poll();
+    // The first ping is one interval after Ready (requirement 12).
+    watch_.next_ping = now + ping_interval();
+    watch_.beating = false;
+    watch_.last_heartbeat = 0;
+}
+
+void Supervisor::stop_watch() noexcept {
+    watch_.watching = false;
+    watch_.beating = false;
+    watch_.hang_killed = false;
+    watch_.unresponsive = false;
+    watch_.ping_id = 0;
+}
+
+std::optional<ipc::EngineStatus> Supervisor::read_status() {
+    // Every call into a seqlock runs inside this (see SignalsBlocked).
+    const SignalsBlocked blocked;
+    if (!watch_.state_view) {
+        std::expected<ipc::Region, ipc::MapFailure> region =
+            ipc::Region::map(state_.get(), ipc::SegmentKind::EngineState,
+                             ipc::kEngineStateLayoutVersion, ipc::Access::ReadOnly);
+        if (!region) {
+            return std::nullopt;
+        }
+        watch_.state_view = std::make_unique<ipc::Region>(std::move(*region));
+    }
+    // at() checks against the size of the supervisor's own mapping.
+    auto* const state = watch_.state_view->at<ipc::EngineState>(ipc::kSegmentHeaderSize);
+    if (state == nullptr) {
+        return std::nullopt;
+    }
+    return ipc::SeqlockReader<ipc::EngineStatus>{state->status}.try_read(1'000);
+}
+
+bool Supervisor::any_deck_playing() const {
+    const SignalsBlocked blocked;
+    auto* const state = watch_.state_view
+                            ? watch_.state_view->at<ipc::EngineState>(ipc::kSegmentHeaderSize)
+                            : nullptr;
+    if (state == nullptr) {
+        return true;
+    }
+    for (auto& slot : state->decks) {
+        const std::optional<ipc::DeckState> deck =
+            ipc::SeqlockReader<ipc::DeckState>{slot}.try_read(1'000);
+        // A deck that can't be read counts as playing (requirement 11). One
+        // that has published nothing isn't.
+        if (!deck || (deck->heartbeat != 0 && (deck->flags & ipc::kDeckPlaying) != 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Supervisor::pong(std::uint32_t id) {
+    if (id == 0 || id != watch_.ping_id) {
+        return;
+    }
+    watch_.ping_id = 0;
+    if (watch_.unresponsive) {
+        watch_.unresponsive = false;
+        info("ks-engine control thread answering again");
+    }
+}
+
+void Supervisor::kill_hung_engine(std::string_view why) {
+    watch_.hang_killed = true;
+    warning(std::format("ks-engine {}; killing it", why));
+    if (engine_pid_ > 0) {
+        ::kill(engine_pid_, SIGKILL);
+    }
+}
+
+void Supervisor::watch_engine() {
+    if (!watch_.watching || watch_.hang_killed || phase_ != Phase::Running || engine_pid_ <= 0 ||
+        !engine_ || stopping()) {
+        return;
+    }
+    const Clock::time_point now = Clock::now();
+    const auto ms = [](Clock::duration d) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+    };
+
+    // Pings: one at a time, one interval apart.
+    if (watch_.ping_id == 0 && now >= watch_.next_ping) {
+        watch_.ping_id = next_request();
+        watch_.ping_sent = now;
+        watch_.next_ping = now + ping_interval();
+        send_to_engine(ipc::Message{.request_id = watch_.ping_id, .body = ipc::msg::Ping{}});
+    }
+    if (watch_.ping_id != 0 && !watch_.unresponsive &&
+        now - watch_.ping_sent >= ping_interval() * kEnginePingLimitIntervals) {
+        watch_.unresponsive = true;
+        warning("ks-engine control thread not answering");
+    }
+
+    if (now < watch_.next_poll) {
+        return;
+    }
+    watch_.next_poll = now + heartbeat_poll();
+
+    // The heartbeat: a read that fails is tried again at the next poll.
+    if (const std::optional<ipc::EngineStatus> status = read_status()) {
+        if (status->heartbeat != 0 && !watch_.beating) {
+            watch_.beating = true;
+            watch_.last_heartbeat = status->heartbeat;
+            watch_.heartbeat_changed = now;
+        } else if (status->heartbeat != watch_.last_heartbeat) {
+            watch_.last_heartbeat = status->heartbeat;
+            watch_.heartbeat_changed = now;
+        }
+    }
+    // A heartbeat that has never been non-zero gets kHeartbeatStartGrace
+    // (requirement 3), or the hang timeout if that is longer.
+    const std::chrono::milliseconds limit =
+        watch_.beating ? hang_timeout() : std::max(hang_timeout(), kHeartbeatStartGrace);
+    if (now - watch_.heartbeat_changed >= limit) {
+        const auto waited = ms(now - watch_.heartbeat_changed);
+        kill_hung_engine(watch_.beating ? std::format("heartbeat stopped for {} ms", waited)
+                                        : std::format("heartbeat never started in {} ms", waited));
+        return;
+    }
+    // An engine whose control thread doesn't answer is killed only once no
+    // deck plays: that would interrupt audio that still works.
+    if (watch_.unresponsive && !any_deck_playing()) {
+        kill_hung_engine(std::format("control thread not answering for {} ms and no deck is "
+                                     "playing",
+                                     ms(now - watch_.ping_sent)));
+    }
 }
 
 void Supervisor::open_logs() {
@@ -1125,6 +1330,22 @@ bool Supervisor::engine_file_ok() {
     return false;
 }
 
+int Supervisor::poll_wait() const {
+    // While the engine runs, its log ring is read at least every
+    // kLogDrainInterval (specs/logs/spec.md requirement 14).
+    int timeout = poll_timeout(deadline_);
+    if (engine_pid_ > 0) {
+        const auto drain = static_cast<int>(kLogDrainInterval.count());
+        timeout = timeout == -1 ? drain : std::min(timeout, drain);
+        // And the watch's poll (specs/hang-detection/spec.md requirement 2).
+        if (watch_.watching) {
+            const auto watch = static_cast<int>(heartbeat_poll().count());
+            timeout = std::min(timeout, watch);
+        }
+    }
+    return timeout;
+}
+
 std::optional<int> Supervisor::step() {
     // The signal pipe, the engine, the listener, then each client.
     std::vector<pollfd> polled;
@@ -1151,13 +1372,7 @@ std::optional<int> Supervisor::step() {
             polled_loads.push_back(load.get());
         }
     }
-    // While the engine runs, its log ring is read at least every
-    // kLogDrainInterval (specs/logs/spec.md requirement 14).
-    int timeout = poll_timeout(deadline_);
-    if (engine_pid_ > 0) {
-        const auto drain = static_cast<int>(kLogDrainInterval.count());
-        timeout = timeout == -1 ? drain : std::min(timeout, drain);
-    }
+    const int timeout = poll_wait();
     const int ready = ::poll(polled.data(), static_cast<nfds_t>(polled.size()), timeout);
     if (ready == -1 && errno != EINTR) {
         error(std::format("poll failed: {}",
@@ -1189,6 +1404,7 @@ std::optional<int> Supervisor::step() {
     std::erase_if(clients_, [](const Client& client) { return client.dropped; });
     // Closes each finished load's segment, and frees what it counted.
     std::erase_if(loads_, [](const std::unique_ptr<Load>& load) { return load->over(); });
+    watch_engine();
     return deadline_passed();
 }
 
@@ -1216,6 +1432,7 @@ std::optional<int> Supervisor::handle_signals() {
 
 std::optional<int> Supervisor::engine_exited(int status) {
     engine_pid_ = 0;
+    stop_watch();
     // Its last lines, before how it ended (requirement 14).
     drain_engine_log();
     const std::string how = how_it_ended(status);
@@ -1301,6 +1518,7 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
         info("ks-engine is ready");
         phase_ = Phase::Running;
         deadline_.reset();
+        start_watch();
         info(std::format(
             "ks-engine restarted in {} ms",
             std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - reaped_).count()));
@@ -1320,9 +1538,12 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
         had_ready_ = true;
         phase_ = Phase::Running;
         deadline_.reset();
+        start_watch();
         return;
     }
-    if (std::holds_alternative<ipc::msg::Ping>(message.body)) {
+    if (std::holds_alternative<ipc::msg::Pong>(message.body)) {
+        pong(id);
+    } else if (std::holds_alternative<ipc::msg::Ping>(message.body)) {
         send_to_engine(ipc::Message{.request_id = id, .body = ipc::msg::Pong{}});
     } else if (const auto* const error = std::get_if<ipc::msg::Error>(&message.body)) {
         if (!attach_refused(id, *error) && !detach_refused(id, *error) &&
@@ -1339,8 +1560,7 @@ void Supervisor::handle_engine_message(const ipc::Message& message) {
         if (!ring_detached(id)) {
             send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "answers no Detach"));
         }
-    } else if (!std::holds_alternative<ipc::msg::Pong>(message.body) &&
-               !std::holds_alternative<ipc::msg::Done>(message.body)) {
+    } else if (!std::holds_alternative<ipc::msg::Done>(message.body)) {
         send_to_engine(error_message(id, ipc::ErrorCode::NotSupported, "not from the engine"));
     }
 }
