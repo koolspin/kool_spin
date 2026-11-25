@@ -98,8 +98,10 @@ Exit criteria:
   - **Step 7b, hang detection: done** (`specs/hang-detection/spec.md`). The supervisor kills an engine whose heartbeat stands still for 500 ms, through 7a's restart path, and reports one whose control thread stops answering pings, killing it only once no deck is playing (ADR 0003 §11, "Hangs").
   - Not 7b: supervisor crash, the session journal, and the health checks, which are the bullets below.
 - Supervisor crash: the other processes keep running, and relaunching offers to stop the orphaned engine.
-  - **Step 8: done** (`specs/supervisor-crash/spec.md`). A relaunch can't find an orphan in another runtime directory, or in one that has been removed; step 9 moves the lock files to the journal's folder to fix that.
+  - **Step 8: done** (`specs/supervisor-crash/spec.md`). A relaunch can't find an orphan in another runtime directory, or in one that has been removed. Step 9a fixes that.
 - Session journal, written by the supervisor. The previous session is restored, paused, at launch.
+  - **Step 9a, the state folder and its locks: done** (`specs/state-folder/spec.md`). The supervisor and the engine also hold a lock in the journal's folder, best effort, so a relaunch finds an orphan in another runtime directory, or in one that has been removed.
+  - Step 9b: the journal itself.
 - Per-process logs through shared memory, with shared timestamps.
 - Health checks reported by `ks-play`: real-time priority, memory locking, CPU power profile, battery. System sleep is blocked while decks are loaded.
 
