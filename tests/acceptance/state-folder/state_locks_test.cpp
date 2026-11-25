@@ -243,6 +243,17 @@ TEST_CASE("State locks: a bad folder never stops the music", "[state-folder][loc
         check_restarts(*session);
     }
 
+    SECTION("one that's refused by the time the engine restarts") {
+        make_private(state);
+        const auto session = playing_with(files, state);
+        REQUIRE(held_by(state, kEngineLockName, session->session.engine()));
+        const Mode mode{state, 0777};
+        check_restarts(*session);
+        CHECK(
+            ks::logs::test::wait_for_line(session->session.engine_log(), "warning", state.string())
+                .has_value());
+    }
+
     SECTION("one that becomes unusable") {
         skip_as_root();
         make_private(state);

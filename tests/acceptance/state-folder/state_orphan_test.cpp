@@ -269,6 +269,15 @@ TEST_CASE("State orphan: ks-play's hint", "[state-folder][orphan]") {
         CHECK(has(said.out, process_text(engine)));
     }
 
+    SECTION("the process ID from the state folder, when the other has none") {
+        write_lock(orphan->session.dir(), "");
+        const Finished said = ask({"--runtime-dir", orphan->session.dir().string(), "--state-dir",
+                                   state.path().string()});
+        CHECK(said.status == 3);
+        CHECK(has(said.out, kHint));
+        CHECK(has(said.out, process_text(engine)));
+    }
+
     SECTION("an orphan only the runtime directory knows") {
         const Files empty;
         const Finished said = ask({"--runtime-dir", orphan->session.dir().string(), "--state-dir",
