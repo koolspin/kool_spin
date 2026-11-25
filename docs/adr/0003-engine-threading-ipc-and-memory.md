@@ -198,6 +198,10 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 
 - **The other processes keep running.** Loaded decks keep playing, and a track still decoding is decoded to its end. Clients that already have rings keep control through them: play, pause, seek, and the mixer; `ks::client::Session` keeps its ring and its mapping of the engine's state when its connection is lost. Loading tracks, restarts, hang detection, and the session journal stop. The engine runs until a signal stops it, and its log lines have no reader.
 - **Detecting survivors:** the engine holds a lock (`flock`) on its own lock file in the runtime directory, and writes its process ID into the file. The kernel releases the lock when the process dies, so a held lock means a live process. The engine takes the lock just before it writes its ID, so the ID is believed only when two probes in a row, 100 ms apart, agree. An `acquire()` retries for a moment, so that a probe can't make it fail.
+- **Two locks each** (`specs/state-folder/spec.md`): the supervisor and the engine also hold a lock of the same name in the journal's folder (section 14), so that a relaunch finds an engine whose runtime directory was a different one, or has been removed.
+  - **The runtime directory's is mandatory:** the socket and the macOS intent file beside it depend on it, and on Linux it's in memory.
+  - **The journal folder's is best effort.** It's on disk, and a full or read-only disk must not keep an engine from restarting. If it's held by another process, the launch ends, as with the runtime directory's; anything else that goes wrong with it is a warning.
+  - **Finding a survivor** looks in both, the journal's folder first.
 - **Relaunching:** a supervisor that finds a live engine doesn't start a second one. It tells the user that an engine from an earlier session is still running, and offers to stop it (`specs/supervisor-crash/spec.md`):
   - **The offer:** it asks, if it's in the foreground of a terminal, and the default is no. `kool_spin --stop-previous` says yes without being asked. Otherwise the answer is no: it exits with status 1, and the engine plays on.
   - **Stopping:** once everything that can be checked beforehand has been, it sends `SIGTERM`, and the engine fades out and exits. If the lock is still held after 2 s, it sends `SIGKILL`. Then it starts a new session. Before each signal it checks that the lock still names the same process, and on Linux it signals through a pidfd, so a reused process ID isn't hit.
@@ -222,7 +226,8 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   - the mixer settings.
 - **Writing:** at least once a second, atomically: write a temporary file, `fsync` it, `rename` it, then `fsync` the directory.
 - **Format:** plain text: a version line, one `key value` line per field with paths escaped, and a final checksum line. It needs no library, is readable when debugging, and is fuzzed.
-- **Location:** `$XDG_STATE_HOME/kool_spin/` on Linux (by default `~/.local/state/kool_spin/`), and `~/Library/Application Support/kool_spin/` on macOS.
+- **Location:** `$XDG_STATE_HOME/kool_spin/` on Linux (by default `~/.local/state/kool_spin/`), and `~/Library/Application Support/kool_spin/` on macOS. Without `HOME`, the home directory is the one the user database gives. `--state-dir` names another folder; `--runtime-dir` without it uses none.
+- **Not shared with another machine:** the folder is never used on a network file system; on FUSE, which may hide one, only if `--state-dir` names it. A lock there may be another machine's, and so may the process ID in its file. Nor is it used if the group or others can write it.
 - **Restoring:** at launch, the session is restored with decks paused. If a track's file is missing, its deck stays empty, with a warning.
 
 ### 15. Audio devices
