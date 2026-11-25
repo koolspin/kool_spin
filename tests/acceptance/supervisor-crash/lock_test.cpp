@@ -41,22 +41,25 @@ TEST_CASE("Locks: acquire retries", "[crash][locks]") {
     REQUIRE_FALSE(dir.path().empty());
 
     SECTION("a lock held for 20 ms") {
-        // A thread that a busy machine wakes late may hold the lock for
-        // longer than acquire() tries: that run says nothing, so try again.
+        // acquire() tries for at least 45 ms (its sleeps may run long, never
+        // short), so it must get a lock freed within 40 ms. The holder spins:
+        // on a busy macOS machine, a 20 ms sleep can take longer than that.
+        // It may still be late: that run says nothing, so try again.
         bool said = false;
         for (int run = 0; run < 20 && !said; ++run) {
             ks::ipc::Fd held = hold(lock_path(dir.path(), kEngineLockName));
             const Clock::time_point began = Clock::now();
             Clock::time_point freed;
             std::thread holder{[&] {
-                std::this_thread::sleep_for(Milliseconds{20});
+                while (Clock::now() - began < Milliseconds{20}) {
+                }
                 held.reset();
                 freed = Clock::now();
             }};
             const std::expected<LockFile, LockFile::Failure> lock =
                 LockFile::acquire(dir.path(), kEngineLockName);
             holder.join();
-            said = freed - began < Milliseconds{30};
+            said = freed - began < Milliseconds{40};
             if (said) {
                 CHECK(lock.has_value());
             }
