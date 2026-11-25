@@ -125,8 +125,11 @@ struct Session::Impl {
     std::optional<ipc::Region> state_region;
     /// Inside state_region's own mapping.
     ipc::EngineState* state = nullptr;
-    /// Once set, every call returns it.
+    /// Once set, the session is over, and every call returns it.
     std::optional<Error> failed;
+    /// Once set, the connection is lost, and every request returns it. The
+    /// ring and the state stay mapped.
+    std::optional<Error> lost;
     std::uint32_t next_request_id = 1;
     /// DecodeEnded notifications not yet taken (at most 64).
     DecodeQueue pending;
@@ -151,9 +154,26 @@ struct Session::Impl {
         return impl->failed;
     }
 
-    /// Ends the session with `error`, dropping the connection and the
-    /// mappings, and returns it.
+    /// The error every request on `impl` returns, if it can make none:
+    /// unusable(), or the connection is lost.
+    static std::optional<Error> unreachable(const Impl* impl) {
+        const std::optional<Error> over = unusable(impl);
+        return over ? over : impl->lost;
+    }
+
+    /// What a request returns when there's no connection.
+    [[nodiscard]] Error no_connection() const {
+        return failed.value_or(lost.value_or(closed_error()));
+    }
+
+    /// Ends what `error` ends, and returns it: the connection alone if it's
+    /// Closed, and otherwise the session, with its mappings.
     Error fail(Error error) {
+        if (error.kind == ErrorKind::Closed) {
+            connection.reset();
+            lost = error;
+            return error;
+        }
         drop();
         failed = error;
         return error;
@@ -253,6 +273,14 @@ struct Session::Impl {
         }
     }
 
+    /// True if the engine has taken the command with `sequence` from this
+    /// session's own ring. Pushes and sequence numbers go up together, so the
+    /// commands not yet taken are the last ones sent.
+    bool left_ring(std::uint64_t sequence) {
+        const std::optional<std::uint64_t> unread = producer ? producer->unread() : std::nullopt;
+        return unread && sequence + *unread < next_sequence;
+    }
+
     /// Waits until the slot has read `sequence` (see Session::wait_applied()).
     Result<Applied> wait_applied(std::uint64_t sequence, Clock::time_point deadline) {
         while (true) {
@@ -263,7 +291,7 @@ struct Session::Impl {
             if ((ack->flags & ipc::kClientCorrupt) != 0) {
                 return Applied{.outcome = Outcome::Corrupt};
             }
-            if (ack->last_sequence >= sequence) {
+            if (ack->last_sequence >= sequence && (connection || left_ring(sequence))) {
                 if (ack->rejected > rejected_seen) {
                     rejected_seen = ack->rejected;
                     return Applied{.outcome = Outcome::Rejected,
@@ -287,7 +315,7 @@ struct Session::Impl {
                 make_error(ErrorKind::InvalidArgument, "can't encode the message")};
         }
         if (!connection) {
-            return std::unexpected{failed.value_or(closed_error())};
+            return std::unexpected{no_connection()};
         }
         // Every path that fail()s, which drops the connection, returns at
         // once.
@@ -318,7 +346,7 @@ struct Session::Impl {
     /// came in time. A frame or message refused ends the session.
     std::expected<std::optional<Incoming>, Error> receive_until(Clock::time_point deadline) {
         if (!connection) {
-            return std::unexpected{failed.value_or(closed_error())};
+            return std::unexpected{no_connection()};
         }
         // Every path that fail()s, which drops the connection, returns at
         // once.
@@ -495,7 +523,7 @@ Session::~Session() = default;
 
 Result<std::uint32_t> Session::open_ring(Milliseconds timeout) {
     const Clock::time_point deadline = Clock::now() + timeout;
-    if (std::optional<Error> error = Impl::unusable(impl_.get())) {
+    if (std::optional<Error> error = Impl::unreachable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
     if (impl_->producer) {
@@ -554,7 +582,7 @@ Result<Snapshot> Session::snapshot() const {
 Result<LoadedFile> Session::load_file(std::uint32_t deck, const std::string& path,
                                       Milliseconds timeout) {
     const Clock::time_point deadline = Clock::now() + timeout;
-    if (std::optional<Error> error = Impl::unusable(impl_.get())) {
+    if (std::optional<Error> error = Impl::unreachable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
     auto loaded = impl_->request<ipc::msg::FileLoaded>(
@@ -569,7 +597,7 @@ Result<LoadedFile> Session::load_file(std::uint32_t deck, const std::string& pat
 
 Result<void> Session::unload_deck(std::uint32_t deck, Milliseconds timeout) {
     const Clock::time_point deadline = Clock::now() + timeout;
-    if (std::optional<Error> error = Impl::unusable(impl_.get())) {
+    if (std::optional<Error> error = Impl::unreachable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
     auto unloaded =
@@ -582,7 +610,7 @@ Result<void> Session::unload_deck(std::uint32_t deck, Milliseconds timeout) {
 
 Result<void> Session::stop(Milliseconds timeout) {
     const Clock::time_point deadline = Clock::now() + timeout;
-    if (std::optional<Error> error = Impl::unusable(impl_.get())) {
+    if (std::optional<Error> error = Impl::unreachable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
     auto done = impl_->request<ipc::msg::Done>(ipc::msg::Stop{}, deadline);
@@ -596,7 +624,7 @@ Result<void> Session::stop(Milliseconds timeout) {
 
 Result<void> Session::ping(Milliseconds timeout) {
     const Clock::time_point deadline = Clock::now() + timeout;
-    if (std::optional<Error> error = Impl::unusable(impl_.get())) {
+    if (std::optional<Error> error = Impl::unreachable(impl_.get())) {
         return std::unexpected{std::move(*error)};
     }
     auto pong = impl_->request<ipc::msg::Pong>(ipc::msg::Ping{}, deadline);
@@ -612,6 +640,10 @@ Result<ipc::msg::DecodeEnded> Session::next_decode_ended(Milliseconds timeout) {
         return std::unexpected{std::move(*error)};
     }
     return impl_->next_decode_ended(deadline);
+}
+
+bool Session::connected() const noexcept {
+    return impl_ && impl_->connection.has_value();
 }
 
 void Session::close() noexcept {

@@ -98,6 +98,7 @@ Exit criteria:
   - **Step 7b, hang detection: done** (`specs/hang-detection/spec.md`). The supervisor kills an engine whose heartbeat stands still for 500 ms, through 7a's restart path, and reports one whose control thread stops answering pings, killing it only once no deck is playing (ADR 0003 §11, "Hangs").
   - Not 7b: supervisor crash, the session journal, and the health checks, which are the bullets below.
 - Supervisor crash: the other processes keep running, and relaunching offers to stop the orphaned engine.
+  - **Step 8: done** (`specs/supervisor-crash/spec.md`). A relaunch can't find an orphan in another runtime directory, or in one that has been removed; step 9 moves the lock files to the journal's folder to fix that.
 - Session journal, written by the supervisor. The previous session is restored, paused, at launch.
 - Per-process logs through shared memory, with shared timestamps.
 - Health checks reported by `ks-play`: real-time priority, memory locking, CPU power profile, battery. System sleep is blocked while decks are loaded.
@@ -108,7 +109,7 @@ Exit criteria:
 - [x] `[auto]` Killing `ks-play` or a decode worker with `kill -9` during playback leaves no gap in the recorded output. *"Chaos: killing a client, a worker, or a file leaves no gap" (step 7a): a 440 Hz sine's zero crossings stay within one frame of their spacing across each kill.*
 - [x] `[auto]` Killing the engine with `kill -9` resumes playback at the right position with a fade-in. Restart time is measured; target under 1 second. *"Restart: kill -9 resumes at the right position" (step 7a): the position is within 10 ms and the restart time is printed.*
 - [x] `[auto]` An engine whose audio thread stops making progress is killed and restarted, and resumes the same way as after a crash. *"Hang: a stalled heartbeat is killed and the deck resumes" (step 7b): `SIGSTOP` freezes the engine, the supervisor kills it within 1.5 s, and the deck resumes at the right position with a fade-in. The manual check on the Inpulse 500 is still to do.*
-- [ ] `[auto]` Killing the supervisor with `kill -9` leaves playback running. Relaunching reports the running engine and can stop it.
+- [x] `[auto]` Killing the supervisor with `kill -9` leaves playback running. Relaunching reports the running engine and can stop it. *"Supervisor crash: playback has no gap", "Relaunch: without a terminal, the engine is left running", and "Relaunch: --stop-previous stops it and starts a session" (step 8). The manual check on the Inpulse 500 is still to do.*
 - [x] `[auto]` Corrupted shared state makes the engine start clean with decks paused; it never crashes. *"Engine process: corrupted state starts clean" (step 7a), and the crash-loop guard's clean restart.*
 - [x] `[auto]` Deleting a playing track's file doesn't interrupt playback. *"Supervisor tracks: deleting the file while it plays" (pull request #39): a 10-minute WAV is deleted as soon as it loads, and it still decodes in full while the deck plays on, on Linux and macOS. The recorded output has no gap: "Chaos: killing a client, a worker, or a file leaves no gap" (step 7a).*
 - [ ] `[auto]` After all processes are killed, relaunching restores the previous session with decks paused.

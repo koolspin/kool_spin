@@ -11,6 +11,8 @@
 
 #include "status_format.h"
 #include <pthread.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -242,6 +244,28 @@ int do_ping(Session& session, std::ostream& out, std::ostream& err) {
     return finish(out, err);
 }
 
+/// What to add to "can't reach kool_spin in `dir`" when an engine runs there
+/// without it (specs/supervisor-crash/spec.md requirement 18); otherwise
+/// nothing. Reads only lock files in a directory of this user's own.
+std::string engine_hint(const std::filesystem::path& dir) {
+    struct stat status{};
+    if (::lstat(dir.c_str(), &status) != 0 || !S_ISDIR(status.st_mode) ||
+        status.st_uid != ::geteuid()) {
+        return {};
+    }
+    const auto supervisor = ipc::probe_lock(dir, ipc::kSupervisorLockName);
+    if (!supervisor || supervisor->held) {
+        return {};
+    }
+    const auto engine = ipc::probe_lock(dir, ipc::kEngineLockName);
+    if (!engine || !engine->held) {
+        return {};
+    }
+    const std::string process =
+        engine->pid ? " (process " + std::to_string(*engine->pid) + ")" : std::string{};
+    return "; an engine is running without kool_spin" + process + ": run kool_spin to stop it";
+}
+
 /// Connects and does the one command: run()'s worker thread. `stop` is set
 /// when `status --watch` gets SIGINT or SIGTERM.
 int work(const Invocation& invocation, const std::atomic<bool>& stop, std::ostream& out,
@@ -250,7 +274,7 @@ int work(const Invocation& invocation, const std::atomic<bool>& stop, std::ostre
     if (!session) {
         if (session.error().kind == ErrorKind::NotReachable) {
             err << "ks-play: can't reach kool_spin in " << invocation.runtime_dir.string() << ": "
-                << session.error().text << '\n';
+                << session.error().text << engine_hint(invocation.runtime_dir) << '\n';
             return kExitUnreachable;
         }
         return report(err, session.error());

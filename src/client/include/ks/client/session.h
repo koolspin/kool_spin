@@ -9,6 +9,14 @@
 /// Everything here runs on the caller's thread, never on the audio thread.
 /// Failures are returned, never thrown. A session is used from one thread at
 /// a time.
+///
+/// When the connection is lost (kool_spin died, or dropped the session), the
+/// session keeps its ring and its mapping of the engine's state
+/// (specs/supervisor-crash/spec.md requirement 15): requests return Closed,
+/// and send(), wait_applied(), and snapshot() work on. The engine plays on
+/// without kool_spin, so the ring still controls it; but nothing says that
+/// the engine itself is still there, except a heartbeat in snapshot() that
+/// keeps growing.
 
 #include <ks/client/command.h>
 #include <ks/client/snapshot.h>
@@ -39,7 +47,8 @@ enum class ErrorKind : std::uint8_t {
     NotReachable,
     /// A wait ran out.
     Timeout,
-    /// The connection is closed. Every later call returns this too.
+    /// The connection is closed: every later request returns this too. Or
+    /// the session is, with close(), and every later call does.
     Closed,
     /// The supervisor answered with an Error: see Error::code and text.
     Refused,
@@ -147,6 +156,10 @@ public:
     /// corrupt; Applied otherwise; TimedOut if the command isn't read in
     /// time. Reads the slot through the seqlock and uses only its copy. An
     /// error only if there's no ring or the state can't be read.
+    ///
+    /// Once the connection is lost, the command also has to have left the
+    /// ring: a session that kool_spin dropped has had its ring detached, and
+    /// its slot may be another client's by then.
     [[nodiscard]] Result<Applied> wait_applied(std::uint64_t sequence,
                                                Milliseconds timeout = Milliseconds{2'000});
 
@@ -182,7 +195,12 @@ public:
     [[nodiscard]] Result<ipc::msg::DecodeEnded>
     next_decode_ended(Milliseconds timeout = Milliseconds{5'000});
 
-    /// Closes the connection. Later calls return Closed.
+    /// False once a call has found the connection lost, or the session is
+    /// over. Doesn't read the socket: it says what the last call found.
+    [[nodiscard]] bool connected() const noexcept;
+
+    /// Closes the connection, and lets go of the ring and the engine's state.
+    /// Later calls return Closed.
     void close() noexcept;
 
 private:
