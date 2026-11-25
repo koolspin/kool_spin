@@ -18,6 +18,7 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -76,7 +77,7 @@ enum class FileSystemVerdict : std::uint8_t {
 [[nodiscard]] FileSystemVerdict judge_file_system(const struct ::statfs& status,
                                                   bool named) noexcept;
 
-/// Why open_state_directory() failed.
+/// Why check_state_directory() or open_state_directory() failed.
 struct StateDirectoryFailure {
     /// std::errc::not_supported for a file system judge_file_system()
     /// refuses; std::errc::not_a_directory, and std::errc::permission_denied
@@ -85,12 +86,23 @@ struct StateDirectoryFailure {
     std::error_code error;
     /// True if it was refused only because `--state-dir` didn't name it.
     bool fuse = false;
+    /// True if it was refused because the group or others can write it.
+    bool writable = false;
 };
 
+/// What went wrong, for a warning about the folder, with what would put it
+/// right if the user can.
+[[nodiscard]] std::string describe(const StateDirectoryFailure& failure);
+
+/// Checks the folder `path` without creating or changing anything. Refuses one
+/// that isn't a directory, or a symbolic link to one; that the effective user
+/// doesn't own; that the group or others can write; or that
+/// judge_file_system() refuses.
+[[nodiscard]] std::expected<void, StateDirectoryFailure>
+check_state_directory(const std::filesystem::path& path, bool named);
+
 /// Creates the folder `path` and any missing parents, each with mode 0700,
-/// then checks it. Without changing it, refuses one that isn't a directory,
-/// or a symbolic link to one; that the effective user doesn't own; that the
-/// group or others can write; or that judge_file_system() refuses.
+/// then does check_state_directory(). A folder that's there isn't changed.
 [[nodiscard]] std::expected<void, StateDirectoryFailure>
 open_state_directory(const std::filesystem::path& path, bool named);
 

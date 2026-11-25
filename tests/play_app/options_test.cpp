@@ -32,6 +32,8 @@ TEST_CASE("ks-play: the global options", "[play_app][options]") {
         const auto parsed = parse({"ping"});
         REQUIRE(parsed.has_value());
         CHECK(parsed->runtime_dir == std::filesystem::path{"/run/user/1000/kool_spin"});
+        CHECK(parsed->default_runtime_dir);
+        CHECK(!parsed->state_dir);
         CHECK(parsed->name == "ks-play");
         CHECK(std::holds_alternative<app::Ping>(parsed->request));
     }
@@ -44,6 +46,16 @@ TEST_CASE("ks-play: the global options", "[play_app][options]") {
             CHECK(parsed->name == "deck-a");
             CHECK(std::holds_alternative<app::Stop>(parsed->request));
         }
+    }
+    SECTION("--state-dir, with and without --runtime-dir") {
+        const auto alone = parse({"--state-dir", "/tmp/state", "ping"});
+        REQUIRE(alone.has_value());
+        CHECK(alone->state_dir == std::filesystem::path{"/tmp/state"});
+        CHECK(alone->default_runtime_dir);
+        const auto both = parse({"--state-dir", "/tmp/state", "--runtime-dir", "/tmp/ks", "ping"});
+        REQUIRE(both.has_value());
+        CHECK(both->state_dir == std::filesystem::path{"/tmp/state"});
+        CHECK(!both->default_runtime_dir);
     }
     SECTION("a name of 64 bytes") {
         const std::string name(64, 'n');

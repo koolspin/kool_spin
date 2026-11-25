@@ -80,6 +80,9 @@ std::optional<std::filesystem::path>* path_field(Options& options, std::string_v
     if (option == "--runtime-dir") {
         return &options.runtime_dir;
     }
+    if (option == "--state-dir") {
+        return &options.state_dir;
+    }
     if (option == "--log-dir") {
         return &options.log_dir;
     }
@@ -132,6 +135,11 @@ std::string usage() {
            "Options:\n"
            "  --runtime-dir <path>  the runtime directory (default: $XDG_RUNTIME_DIR/kool_spin\n"
            "                        on Linux, $TMPDIR/kool_spin on macOS)\n"
+           "  --state-dir <path>    the state folder, whose locks find an engine from an\n"
+           "                        earlier session (default: $XDG_STATE_HOME/kool_spin or\n"
+           "                        ~/.local/state/kool_spin on Linux,\n"
+           "                        ~/Library/Application Support/kool_spin on macOS; none\n"
+           "                        with --runtime-dir)\n"
            "  --log-dir <path>      the folder for each session's log files (default:\n"
            "                        $XDG_STATE_HOME/kool_spin/logs or\n"
            "                        ~/.local/state/kool_spin/logs on Linux,\n"

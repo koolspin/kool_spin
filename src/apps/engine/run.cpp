@@ -20,6 +20,7 @@
 #include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/state.h>
+#include <ks/ipc/state_dir.h>
 #include <ks/ipc/track_segment.h>
 
 #include <fcntl.h>
@@ -72,6 +73,12 @@ struct StartFailure {
 
 std::unexpected<StartFailure> failure(std::string why, int status = kExitStartFailed) {
     return std::unexpected{StartFailure{.status = status, .why = std::move(why)}};
+}
+
+/// Why an engine doesn't start when process `holder` holds an engine lock.
+std::string another_engine(std::optional<pid_t> holder) {
+    return holder ? std::format("another engine is running (process {})", *holder)
+                  : std::string{"another engine is running"};
 }
 
 /// The output's configuration from the options, with --device turned into the
@@ -149,6 +156,10 @@ private:
     }
 
     std::expected<void, StartFailure> start();
+    /// Takes the state folder's engine lock too, if it can: only another
+    /// process holding it is a failure (specs/state-folder/spec.md
+    /// requirements 5 to 8).
+    std::expected<void, StartFailure> lock_state_dir(const std::filesystem::path& runtime_dir);
     /// Maps --log-fd's segment and starts the log on it (specs/logs/spec.md
     /// requirement 17).
     std::expected<void, StartFailure> open_log();
@@ -224,6 +235,8 @@ private:
     engine::EventLines event_lines_;
 
     std::unique_ptr<ipc::LockFile> lock_;
+    /// Null without a state folder, or if it can't be locked.
+    std::unique_ptr<ipc::LockFile> state_lock_;
     ipc::Fd state_fd_;
     std::unique_ptr<ipc::Region> region_;
     /// The tracks the engine holds. Declared before the engine, so they
@@ -245,6 +258,40 @@ private:
     /// Slot i's ring, while one is attached.
     std::array<std::unique_ptr<AttachedRing>, engine::kMaxClients> rings_;
 };
+
+std::expected<void, StartFailure>
+EngineProcess::lock_state_dir(const std::filesystem::path& runtime_dir) {
+    if (!options_->state_dir) {
+        return {};
+    }
+    const std::filesystem::path& dir = *options_->state_dir;
+    const auto warn = [&](std::string_view why) {
+        report(ipc::LogLevel::Warning,
+               std::format("can't lock the state folder {}: {}; only the runtime directory's lock "
+                           "is held",
+                           dir.string(), why));
+    };
+    // The supervisor has judged whether the folder may be on FUSE.
+    if (const auto opened = ipc::open_state_directory(dir, true); !opened) {
+        warn(ipc::describe(opened.error()));
+        return {};
+    }
+    std::error_code ignored;
+    if (std::filesystem::equivalent(dir, runtime_dir, ignored)) {
+        return {}; // One directory, one lock.
+    }
+    std::expected<ipc::LockFile, ipc::LockFile::Failure> lock =
+        ipc::LockFile::acquire(dir, ipc::kEngineLockName);
+    if (lock) {
+        state_lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+        return {};
+    }
+    if (lock.error().error == std::errc::resource_unavailable_try_again) {
+        return failure(another_engine(lock.error().holder));
+    }
+    warn(lock.error().error.message());
+    return {};
+}
 
 std::expected<void, StartFailure> EngineProcess::start() {
     // Before any thread exists, so that every thread inherits the mask.
@@ -280,12 +327,14 @@ std::expected<void, StartFailure> EngineProcess::start() {
         ipc::LockFile::acquire(dir, ipc::kEngineLockName);
     if (!lock) {
         if (lock.error().holder) {
-            return failure(std::format("another engine is running (process {})",
-                                       lock.error().holder.value_or(0)));
+            return failure(another_engine(lock.error().holder));
         }
         return failure("can't take the engine lock: " + lock.error().error.message());
     }
     lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+    if (std::expected<void, StartFailure> locked = lock_state_dir(dir); !locked) {
+        return locked;
+    }
 
     // Held in start-up, with the lock taken: what tests use to keep a
     // restarted engine from being ready.

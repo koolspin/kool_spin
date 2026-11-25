@@ -7,11 +7,13 @@
 #include <ks/client/snapshot.h>
 #include <ks/ipc/messages.h>
 #include <ks/ipc/runtime_dir.h>
+#include <ks/ipc/state_dir.h>
 #include <ks/ipc/track_segment.h>
 
 #include "status_format.h"
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -21,6 +23,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <ostream>
 #include <span>
 #include <string>
@@ -244,25 +247,45 @@ int do_ping(Session& session, std::ostream& out, std::ostream& err) {
     return finish(out, err);
 }
 
-/// What to add to "can't reach kool_spin in `dir`" when an engine runs there
-/// without it (specs/supervisor-crash/spec.md requirement 18); otherwise
-/// nothing. Reads only lock files in a directory of this user's own.
-std::string engine_hint(const std::filesystem::path& dir) {
+/// The folders whose locks say what runs: each this user's own directory. The
+/// state folder is one only if kool_spin would use it.
+std::vector<std::filesystem::path> lock_dirs(const Invocation& invocation) {
+    std::vector<std::filesystem::path> dirs;
+    const ipc::StateDirectoryChoice state =
+        ipc::choose_state_directory(invocation.state_dir, !invocation.default_runtime_dir);
+    if (state.path &&
+        ipc::check_state_directory(*state.path, state.source == ipc::StateDirectorySource::Named)) {
+        dirs.push_back(*state.path);
+    }
     struct stat status{};
-    if (::lstat(dir.c_str(), &status) != 0 || !S_ISDIR(status.st_mode) ||
-        status.st_uid != ::geteuid()) {
+    if (::lstat(invocation.runtime_dir.c_str(), &status) == 0 && S_ISDIR(status.st_mode) &&
+        status.st_uid == ::geteuid()) {
+        dirs.push_back(invocation.runtime_dir);
+    }
+    return dirs;
+}
+
+/// What to add to "can't reach kool_spin" when an engine runs without it
+/// (specs/supervisor-crash/spec.md requirement 18, specs/state-folder/spec.md
+/// requirement 14); otherwise nothing. Only reads lock files.
+std::string engine_hint(const Invocation& invocation) {
+    bool running = false;
+    std::optional<pid_t> pid;
+    for (const std::filesystem::path& dir : lock_dirs(invocation)) {
+        const auto supervisor = ipc::probe_lock(dir, ipc::kSupervisorLockName);
+        if (!supervisor || supervisor->held) {
+            return {};
+        }
+        const auto engine = ipc::probe_lock(dir, ipc::kEngineLockName);
+        if (engine && engine->held) {
+            running = true;
+            pid = pid ? pid : engine->pid;
+        }
+    }
+    if (!running) {
         return {};
     }
-    const auto supervisor = ipc::probe_lock(dir, ipc::kSupervisorLockName);
-    if (!supervisor || supervisor->held) {
-        return {};
-    }
-    const auto engine = ipc::probe_lock(dir, ipc::kEngineLockName);
-    if (!engine || !engine->held) {
-        return {};
-    }
-    const std::string process =
-        engine->pid ? " (process " + std::to_string(*engine->pid) + ")" : std::string{};
+    const std::string process = pid ? " (process " + std::to_string(*pid) + ")" : std::string{};
     return "; an engine is running without kool_spin" + process + ": run kool_spin to stop it";
 }
 
@@ -274,7 +297,7 @@ int work(const Invocation& invocation, const std::atomic<bool>& stop, std::ostre
     if (!session) {
         if (session.error().kind == ErrorKind::NotReachable) {
             err << "ks-play: can't reach kool_spin in " << invocation.runtime_dir.string() << ": "
-                << session.error().text << engine_hint(invocation.runtime_dir) << '\n';
+                << session.error().text << engine_hint(invocation) << '\n';
             return kExitUnreachable;
         }
         return report(err, session.error());

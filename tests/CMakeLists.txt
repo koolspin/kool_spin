@@ -78,6 +78,7 @@ ks_add_test(ks_ipc_tests
         ipc/region_test.cpp
         ipc/seqlock_test.cpp
         ipc/spsc_ring_test.cpp
+        ipc/state_dir_test.cpp
     LIBRARIES ks::ipc)
 
 ks_add_test(ks_engine_app_tests
