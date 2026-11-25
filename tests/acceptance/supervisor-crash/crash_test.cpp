@@ -365,8 +365,9 @@ TEST_CASE("Supervisor crash: a reused slot isn't mistaken for ours", "[crash]") 
     REQUIRE(engine.try_pop().has_value());
     CHECK(outcome(2) == client::Outcome::Applied);
 
-    // A tail that makes no sense isn't progress.
+    // A tail that makes no sense isn't progress, even one just past the head,
+    // where the count of unread commands would wrap round.
     REQUIRE(session->send(client::set_crossfader(0.3)) == 3U);
-    ks::ipc::store_shared(fake.ring->tail, std::uint64_t{1'000'000}, std::memory_order_release);
+    ks::ipc::store_shared(fake.ring->tail, std::uint64_t{4}, std::memory_order_release);
     CHECK(outcome(3) != client::Outcome::Applied);
 }
