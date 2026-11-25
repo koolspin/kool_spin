@@ -196,9 +196,12 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 
 ### 12. Supervisor crash
 
-- **The other processes keep running.** Loaded decks keep playing. Clients that already have rings keep control through them: play, pause, seek, and the mixer. Loading tracks, restarts, and the session journal stop.
-- **Detecting survivors:** each child holds a lock (`flock`) on its own lock file in the runtime directory, and writes its process ID into the file. The kernel releases the lock when the process dies, so a held lock means a live process.
-- **Relaunching:** a supervisor that finds a live engine doesn't start a second one. It tells the user that the previous session is still playing, and offers to stop it. If the user agrees, the engine fades out and exits.
+- **The other processes keep running.** Loaded decks keep playing, and a track still decoding is decoded to its end. Clients that already have rings keep control through them: play, pause, seek, and the mixer; `ks::client::Session` keeps its ring and its mapping of the engine's state when its connection is lost. Loading tracks, restarts, hang detection, and the session journal stop. The engine runs until a signal stops it, and its log lines have no reader.
+- **Detecting survivors:** the engine holds a lock (`flock`) on its own lock file in the runtime directory, and writes its process ID into the file. The kernel releases the lock when the process dies, so a held lock means a live process. The engine takes the lock just before it writes its ID, so the ID is believed only when two probes in a row, 100 ms apart, agree. An `acquire()` retries for a moment, so that a probe can't make it fail.
+- **Relaunching:** a supervisor that finds a live engine doesn't start a second one. It tells the user that an engine from an earlier session is still running, and offers to stop it (`specs/supervisor-crash/spec.md`):
+  - **The offer:** it asks, if it's in the foreground of a terminal, and the default is no. `kool_spin --stop-previous` says yes without being asked. Otherwise the answer is no: it exits with status 1, and the engine plays on.
+  - **Stopping:** once everything that can be checked beforehand has been, it sends `SIGTERM`, and the engine fades out and exits. If the lock is still held after 2 s, it sends `SIGKILL`. Then it starts a new session. Before each signal it checks that the lock still names the same process, and on Linux it signals through a pidfd, so a reused process ID isn't hit.
+- **`ks-play`** says that an engine is running without `kool_spin`, but never stops it.
 - **Adoption is deferred:** a new supervisor taking over the running engine would be better, but isn't needed yet. The design leaves room for it: the engine keeps its segments' descriptors, so it could hand them to a new supervisor.
 
 ### 13. Process lifecycle and logs
