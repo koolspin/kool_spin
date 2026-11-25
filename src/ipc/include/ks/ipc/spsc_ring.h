@@ -96,13 +96,22 @@ public:
     /// ring is empty or corrupt.
     [[nodiscard]] std::optional<T> try_pop() noexcept KS_NONBLOCKING;
 
+    /// try_pop(), except that the producer doesn't see the item go, nor
+    /// reuse its slot, until release(). A consumer in another process that
+    /// dies first leaves the item to the next consumer of the ring.
+    [[nodiscard]] std::optional<T> try_take() noexcept KS_NONBLOCKING;
+
+    /// Hands every item taken so far back to the producer.
+    void release() noexcept KS_NONBLOCKING;
+
     /// True once this consumer has found the ring's counters inconsistent.
     /// From then on it never touches the ring again.
     [[nodiscard]] bool corrupt() const noexcept KS_NONBLOCKING;
 
 private:
     SpscRing<T, Capacity>* ring_;
-    std::uint64_t tail_ = 0; ///< Authoritative; only ever written to the ring.
+    std::uint64_t tail_ = 0;     ///< Authoritative; only ever written to the ring.
+    std::uint64_t released_ = 0; ///< The tail as last written to the ring.
     bool corrupt_ = false;
 };
 
@@ -175,11 +184,18 @@ bool RingProducer<T, Capacity>::corrupt() const noexcept KS_NONBLOCKING {
 
 template <typename T, std::size_t Capacity>
 RingConsumer<T, Capacity>::RingConsumer(SpscRing<T, Capacity>& ring) noexcept
-    : ring_{&ring}, tail_{load_shared(ring.tail, std::memory_order_relaxed)},
+    : ring_{&ring}, tail_{load_shared(ring.tail, std::memory_order_relaxed)}, released_{tail_},
       corrupt_{load_shared(ring.head, std::memory_order_acquire) - tail_ > Capacity} {}
 
 template <typename T, std::size_t Capacity>
 std::optional<T> RingConsumer<T, Capacity>::try_pop() noexcept KS_NONBLOCKING {
+    std::optional<T> value = try_take();
+    release();
+    return value;
+}
+
+template <typename T, std::size_t Capacity>
+std::optional<T> RingConsumer<T, Capacity>::try_take() noexcept KS_NONBLOCKING {
     if (corrupt_) {
         return std::nullopt;
     }
@@ -194,8 +210,18 @@ std::optional<T> RingConsumer<T, Capacity>::try_pop() noexcept KS_NONBLOCKING {
     }
     const T value = detail::slot(*ring_, tail_);
     ++tail_;
-    store_shared(ring_->tail, tail_, std::memory_order_release);
     return value;
+}
+
+template <typename T, std::size_t Capacity>
+void RingConsumer<T, Capacity>::release() noexcept KS_NONBLOCKING {
+    // A corrupt ring is never touched again; one with nothing new taken needs
+    // no write.
+    if (corrupt_ || tail_ == released_) {
+        return;
+    }
+    store_shared(ring_->tail, tail_, std::memory_order_release);
+    released_ = tail_;
 }
 
 template <typename T, std::size_t Capacity>

@@ -248,6 +248,10 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
         fading_ = fade_frames_ > 0;
     }
 
+    // Only a caller that never reports blocks rendered, such as a test driving
+    // the graph, leaves anything to release here.
+    release_commands();
+
     // A stalled handover goes first, and while it waits nothing behind it applies
     // (requirement 13).
     if (!stalled_.has_value() || apply_handover(*stalled_)) {
@@ -411,7 +415,7 @@ void Engine::read_commands(const Block& block) noexcept KS_NONBLOCKING {
                             .count = 0,
                             .host_time = block.host_time};
         for (std::size_t n = 0; n < kCommandsPerBlock; ++n) {
-            const std::optional<ipc::CommandSlot> taken = consumer.try_pop();
+            const std::optional<ipc::CommandSlot> taken = consumer.try_take();
             if (!taken.has_value()) {
                 break;
             }
@@ -560,6 +564,7 @@ void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_
     // With or without a state block, and before anything is published.
     record_rendered(block, stats);
     if (!status_writer_.has_value() || !mixer_writer_.has_value()) {
+        release_commands(); // No snapshot to wait for.
         return;
     }
     const std::uint64_t heartbeat = stats.blocks_rendered;
@@ -645,6 +650,15 @@ void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_
     status_writer_->write(status);
 
     write_snapshot(block);
+    release_commands();
+}
+
+void Engine::release_commands() noexcept KS_NONBLOCKING {
+    for (AudioClient& client : audio_clients_) {
+        if (client.consumer.has_value()) {
+            client.consumer->release();
+        }
+    }
 }
 
 void Engine::write_snapshot(const Block& block) noexcept KS_NONBLOCKING {

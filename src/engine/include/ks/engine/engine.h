@@ -254,6 +254,11 @@ private:
     /// Reads each client's commands, and records the block's rejections and
     /// newly corrupt rings, at `block`'s host time.
     void read_commands(const Block& block) noexcept KS_NONBLOCKING;
+    /// Hands the commands read so far back to their rings' producers. Called
+    /// once the snapshot that includes them is written: an engine that dies
+    /// before then leaves them in the rings, and the next engine applies them
+    /// again (ADR 0003 §4 and §11; commands are absolute).
+    void release_commands() noexcept KS_NONBLOCKING;
     /// Pushes `event` to the event ring, or counts it as dropped if the ring
     /// is full (specs/audio-events/spec.md requirement 3).
     void record(const AudioEvent& event) noexcept KS_NONBLOCKING;
