@@ -1,6 +1,6 @@
 # Feature: Supervisor crash (step 8)
 
-- **Status:** Approved by the maintainer on 2026-11-24. Protected: build loops can't change it.
+- **Status:** Approved by the maintainer on 2026-11-24; requirement 1's retries changed the same day, with the maintainer's approval, from 5 tries 10 ms apart, which failed the probing criterion about once in 100 runs. Protected: build loops can't change it.
 - **Roadmap:** Phase 1b, step 8
 - **Built by:** interactive
 
@@ -33,7 +33,7 @@ When `kool_spin` dies, the music plays on, and clients that already have rings k
 
 ### Lock files
 
-1. **`acquire()` retries:** when another process holds the lock, `LockFile::acquire()` tries up to `kLockAttempts` (5) times, `kLockRetry` (10 ms) apart, before it fails. A probe holds a lock for microseconds, so it can no longer make an `acquire()` fail, and `ks-play` may probe (requirement 18).
+1. **`acquire()` retries:** when another process holds the lock, `LockFile::acquire()` tries up to `kLockAttempts` (10) times, `kLockRetry` (5 ms) apart, before it fails. A probe holds a lock for microseconds, so it can no longer make an `acquire()` fail, and `ks-play` may probe (requirement 18).
 
 ### Finding the orphan
 
