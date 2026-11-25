@@ -31,6 +31,7 @@ namespace ks::supervisor {
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
 using Milliseconds = std::chrono::milliseconds;
 
 std::expected<ipc::LockState, std::error_code> probe(const std::filesystem::path& dir) {
@@ -100,10 +101,12 @@ std::expected<bool, std::string> signal_holder(const std::filesystem::path& dir,
     return true;
 }
 
-/// Waits up to `limit` for the engine lock to come free. True if it did.
+/// Waits up to `limit` for the engine lock to come free. True if it did. A
+/// real deadline: a 10 ms sleep can take 40 ms on a busy macOS machine.
 std::expected<bool, std::string> wait_free(const std::filesystem::path& dir, Milliseconds limit,
                                            const Wait& wait) {
-    for (Milliseconds waited{0};; waited += kOrphanPoll) {
+    const Clock::time_point deadline = Clock::now() + limit;
+    for (;;) {
         const std::expected<ipc::LockState, std::error_code> state = probe(dir);
         if (!state) {
             return std::unexpected{probe_failed(state.error())};
@@ -111,7 +114,7 @@ std::expected<bool, std::string> wait_free(const std::filesystem::path& dir, Mil
         if (!state->held) {
             return true;
         }
-        if (waited >= limit) {
+        if (Clock::now() >= deadline) {
             return false;
         }
         wait(kOrphanPoll);

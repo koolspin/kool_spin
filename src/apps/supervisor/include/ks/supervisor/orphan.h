@@ -32,8 +32,9 @@ inline constexpr std::chrono::milliseconds kOrphanPoll{10};
 /// How long an orphan has to end after SIGKILL.
 inline constexpr std::chrono::milliseconds kOrphanKillTimeout{1'000};
 
-/// Waits for a while: std::this_thread::sleep_for(), except in tests. The
-/// limits above and in stop_orphan() count what they ask it to wait.
+/// Waits for a while: std::this_thread::sleep_for(), except in tests.
+/// find_orphan()'s limit counts what it asks this to wait; stop_orphan()'s
+/// limits are by the clock.
 using Wait = std::function<void(std::chrono::milliseconds)>;
 
 /// The process that holds the engine lock.
