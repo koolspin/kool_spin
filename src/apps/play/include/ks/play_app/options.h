@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -54,6 +55,11 @@ using Request = std::variant<Load, Unload, Control, Status, Stop, Ping, Help>;
 /// A parsed command line.
 struct Invocation {
     std::filesystem::path runtime_dir;
+    /// True without --runtime-dir. The state folder then has a default too
+    /// (specs/state-folder/spec.md requirements 2 and 11).
+    bool default_runtime_dir = false;
+    /// --state-dir's value.
+    std::optional<std::filesystem::path> state_dir = std::nullopt;
     /// The Hello name: 1 to 64 bytes.
     std::string name = "ks-play";
     Request request;

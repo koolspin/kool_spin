@@ -91,8 +91,9 @@ std::optional<std::string> paced_only(const Options& options) {
 bool takes_value(std::string_view arg) noexcept {
     return arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd" ||
            arg == "--record-fd" || arg == "--track" || arg == "--start-delay" ||
-           arg == "--hang-control-after" || arg == "--runtime-dir" || arg == "--backend" ||
-           arg == "--device" || arg == "--rate" || arg == "--channels" || arg == "--period";
+           arg == "--hang-control-after" || arg == "--runtime-dir" || arg == "--state-dir" ||
+           arg == "--backend" || arg == "--device" || arg == "--rate" || arg == "--channels" ||
+           arg == "--period";
 }
 
 /// `--track <id>:<fd>`: adds the track, refusing an ID of 0, a repeated ID or
@@ -215,6 +216,12 @@ std::expected<void, std::string> apply_value(Options& options, std::string_view 
         }
         return set_once(options.supervisor_fd, arg, *fd);
     }
+    if (arg == "--state-dir") {
+        if (value.empty()) {
+            return std::unexpected{std::string{"ks-engine: --state-dir needs a path"}};
+        }
+        return set_once(options.state_dir, arg, std::filesystem::path{value});
+    }
     if (arg == "--runtime-dir") {
         if (value.empty()) {
             return std::unexpected{std::string{"ks-engine: --runtime-dir needs a path"}};
@@ -245,6 +252,9 @@ std::string usage() {
         "  --channels <n>     output channels, {} to {} (default: the device's)\n"
         "  --period <frames>  the device period, {} to {} (default: the backend's)\n"
         "  --help             print this text and exit\n"
+        "\n"
+        "kool_spin gives every engine this, if it has a state folder:\n"
+        "  --state-dir <path> the folder to hold a second engine lock in\n"
         "\n"
         "kool_spin gives a restarted engine these too:\n"
         "  --track <id>:<fd>  a track the old engine held, in the segment at <fd>;\n"

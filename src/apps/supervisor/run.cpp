@@ -14,6 +14,7 @@
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/segment.h>
 #include <ks/ipc/state.h>
+#include <ks/ipc/state_dir.h>
 #include <ks/ipc/track_segment.h>
 #include <ks/supervisor/log_dir.h>
 #include <ks/supervisor/log_file.h>
@@ -471,6 +472,27 @@ private:
     /// previous_engine_ if so. Returns kExitOk, or reports and returns
     /// kExitStartFailed.
     int check_previous_engine();
+    /// Chooses and opens the state folder, and takes its lock if it can: only
+    /// another supervisor holding it fails the launch. Sets state_dir_ and
+    /// lock_dirs_ (specs/state-folder/spec.md requirements 2 to 8). Returns
+    /// kExitOk, or reports and returns kExitStartFailed.
+    int lock_state_dir();
+    /// An engine from an earlier session, and the folder whose lock it holds.
+    struct Previous {
+        Orphan orphan;
+        std::filesystem::path dir;
+    };
+    /// Looks for one in each of lock_dirs_: the first whose process ID is
+    /// known, or else one whose isn't (requirement 12). Reports, and returns
+    /// kExitStartFailed, if the runtime directory's lock can't be checked.
+    std::expected<std::optional<Previous>, int> find_previous();
+    /// Warns on standard error, and in the log, once it's open.
+    void early_warning(std::string line) {
+        warning(line);
+        if (!log_) {
+            early_warnings_.push_back(std::move(line));
+        }
+    }
     /// Stops previous_engine_, if it's set (requirements 11 and 12). Returns
     /// kExitOk, or reports and returns kExitStartFailed.
     int stop_previous_engine();
@@ -679,6 +701,15 @@ private:
 
     std::filesystem::path dir_;
     std::unique_ptr<ipc::LockFile> lock_;
+    /// The state folder; empty if there's none, or it's refused. Engines lock
+    /// it too.
+    std::filesystem::path state_dir_;
+    /// Its lock; null if it couldn't be taken, or the folder is dir_ itself.
+    std::unique_ptr<ipc::LockFile> state_lock_;
+    /// The folders whose engine locks an orphan may hold, in the order to look.
+    std::vector<std::filesystem::path> lock_dirs_;
+    /// For the log, once it's open: they were said before that.
+    std::vector<std::string> early_warnings_;
     std::unique_ptr<ipc::SegmentFactory> factory_;
     ipc::Fd state_;
     std::unique_ptr<SignalPipe> signals_;
@@ -700,6 +731,8 @@ private:
 
     /// The engine from an earlier session that this one is to stop.
     std::optional<pid_t> previous_engine_;
+    /// The folder whose lock it holds.
+    std::filesystem::path previous_dir_;
     pid_t engine_pid_ = 0;
     std::unique_ptr<ipc::Connection> engine_;
     std::filesystem::path engine_path_;
@@ -791,6 +824,9 @@ int Supervisor::start() {
         return kExitStartFailed;
     }
     lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+    if (const int locked = lock_state_dir(); locked != kExitOk) {
+        return locked;
+    }
     // Before the logs: a launch that leaves the engine running makes no
     // session folder, which would push the crashed session's out.
     if (const int checked = check_previous_engine(); checked != kExitOk) {
@@ -879,17 +915,85 @@ int Supervisor::start() {
     return kExitOk;
 }
 
-int Supervisor::check_previous_engine() {
-    const std::expected<std::optional<Orphan>, std::error_code> orphan =
-        find_orphan(dir_, sleep_for);
-    if (!orphan) {
-        error(std::format("can't check the engine lock: {}", orphan.error().message()));
-        return kExitStartFailed;
-    }
-    if (!*orphan) {
+int Supervisor::lock_state_dir() {
+    const ipc::StateDirectoryChoice choice =
+        ipc::choose_state_directory(options_->state_dir, options_->runtime_dir.has_value());
+    lock_dirs_ = {dir_};
+    if (choice.source == ipc::StateDirectorySource::None) {
         return kExitOk;
     }
-    const std::optional<pid_t> pid = (*orphan)->pid;
+    constexpr std::string_view kInstead = "only the runtime directory's locks are used";
+    if (!choice.path) {
+        early_warning(std::format("no state folder: no home directory; {}", kInstead));
+        return kExitOk;
+    }
+    if (const auto opened = ipc::open_state_directory(
+            *choice.path, choice.source == ipc::StateDirectorySource::Named);
+        !opened) {
+        early_warning(std::format("can't use the state folder {}: {}; {}", choice.path->string(),
+                                  ipc::describe(opened.error()), kInstead));
+        return kExitOk;
+    }
+    state_dir_ = *choice.path;
+    std::error_code ignored;
+    if (std::filesystem::equivalent(state_dir_, dir_, ignored)) {
+        return kExitOk; // One directory, one lock.
+    }
+    // Whether or not it can be locked: an orphan may have locked it before the
+    // disk filled up.
+    lock_dirs_ = {state_dir_, dir_};
+    std::expected<ipc::LockFile, ipc::LockFile::Failure> lock =
+        ipc::LockFile::acquire(state_dir_, ipc::kSupervisorLockName);
+    if (lock) {
+        state_lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+        return kExitOk;
+    }
+    if (lock.error().error == std::errc::resource_unavailable_try_again) {
+        error(std::format("another supervisor is running in another runtime directory{}",
+                          lock.error().holder
+                              ? std::format(" (process {})", lock.error().holder.value_or(0))
+                              : std::string{}));
+        return kExitStartFailed;
+    }
+    early_warning(std::format("can't lock the state folder {}: {}; {}", state_dir_.string(),
+                              lock.error().error.message(), kInstead));
+    return kExitOk;
+}
+
+std::expected<std::optional<Supervisor::Previous>, int> Supervisor::find_previous() {
+    std::optional<Previous> unknown;
+    for (const std::filesystem::path& dir : lock_dirs_) {
+        const std::expected<std::optional<Orphan>, std::error_code> orphan =
+            find_orphan(dir, sleep_for);
+        if (!orphan) {
+            if (dir == dir_) {
+                error(std::format("can't check the engine lock: {}", orphan.error().message()));
+                return std::unexpected{kExitStartFailed};
+            }
+            early_warning(std::format("can't check the engine lock in the state folder {}: {}",
+                                      dir.string(), orphan.error().message()));
+            continue;
+        }
+        if (!*orphan) {
+            continue;
+        }
+        if ((*orphan)->pid) {
+            return Previous{.orphan = **orphan, .dir = dir};
+        }
+        unknown = Previous{.orphan = **orphan, .dir = dir};
+    }
+    return unknown;
+}
+
+int Supervisor::check_previous_engine() {
+    const std::expected<std::optional<Previous>, int> previous = find_previous();
+    if (!previous) {
+        return previous.error();
+    }
+    if (!*previous) {
+        return kExitOk;
+    }
+    const std::optional<pid_t> pid = (*previous)->orphan.pid;
     if (!pid) {
         error("an engine from an earlier session is still running, but its lock file doesn't give "
               "its process ID: can't stop it");
@@ -910,6 +1014,7 @@ int Supervisor::check_previous_engine() {
         return kExitStartFailed;
     }
     previous_engine_ = pid;
+    previous_dir_ = (*previous)->dir;
     return kExitOk;
 }
 
@@ -925,7 +1030,7 @@ int Supervisor::stop_previous_engine() {
         return kExitStartFailed;
     }
     const std::expected<Stopped, std::string> stopped =
-        stop_orphan(dir_, *previous_engine_, sleep_for);
+        stop_orphan(previous_dir_, *previous_engine_, sleep_for);
     if (!stopped) {
         error(std::format("can't stop the engine from an earlier session: {}", stopped.error()));
         return kExitStartFailed;
@@ -949,7 +1054,25 @@ int Supervisor::stop_previous_engine() {
                             *previous_engine_, kEngineStopTimeout.count()));
         break;
     }
-    return kExitOk;
+    // It may have held a lock in each folder, and they don't come free at the
+    // same moment: the engine just stopped isn't another one.
+    const Clock::time_point deadline = Clock::now() + kOrphanKillTimeout;
+    std::expected<std::optional<Previous>, int> another = find_previous();
+    while (another && *another && (*another)->orphan.pid == previous_engine_ &&
+           Clock::now() < deadline) {
+        sleep_for(kOrphanPoll);
+        another = find_previous();
+    }
+    if (!another) {
+        return another.error();
+    }
+    if (!*another) {
+        return kExitOk;
+    }
+    const std::optional<pid_t> pid = (*another)->orphan.pid;
+    error(std::format("another engine from an earlier session is still running{}",
+                      pid ? std::format(" (process {})", *pid) : std::string{}));
+    return kExitStartFailed;
 }
 
 std::expected<void, std::string> Supervisor::spawn_engine(bool clean) {
@@ -962,6 +1085,9 @@ std::expected<void, std::string> Supervisor::spawn_engine(bool clean) {
     std::vector<Inherit> fds{Inherit{.parent = pair->second.get(), .child = 3},
                              Inherit{.parent = state_.get(), .child = 4},
                              Inherit{.parent = engine_log_segment_.get(), .child = 5}};
+    if (!state_dir_.empty()) {
+        args.insert(args.end(), {"--state-dir", state_dir_.string()});
+    }
     if (recording_.valid()) {
         args.insert(args.end(), {"--record-fd", "6"});
         fds.push_back(Inherit{.parent = recording_.get(), .child = 6});
@@ -1347,6 +1473,10 @@ void Supervisor::open_logs() {
     }
     session_ = session;
     log_ = std::make_unique<LogFile>(std::move(*log));
+    for (const std::string& line : early_warnings_) {
+        static_cast<void>(log_->write(steady_now_ns(), ipc::LogLevel::Warning, line));
+    }
+    early_warnings_.clear();
 }
 
 void Supervisor::open_engine_log() {

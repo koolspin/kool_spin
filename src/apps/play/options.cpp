@@ -368,6 +368,20 @@ std::expected<Request, std::string> parse_command(std::string_view command, Argu
     return fail(std::format("unknown command '{}'", command));
 }
 
+/// Takes the value of the directory option `option`, given once, into `dir`.
+std::expected<void, std::string> take_directory(Arguments& args, std::string_view option,
+                                                std::optional<std::filesystem::path>& dir) {
+    if (dir) {
+        return fail(std::format("{} given twice", option));
+    }
+    const std::optional<std::string_view> value = args.take();
+    if (!value || value->empty()) {
+        return fail(std::format("{} needs a directory", option));
+    }
+    dir = std::filesystem::path{*value};
+    return {};
+}
+
 } // namespace
 
 std::expected<Invocation, std::string> parse(std::span<const std::string_view> args_in,
@@ -385,14 +399,13 @@ std::expected<Invocation, std::string> parse(std::span<const std::string_view> a
             return invocation;
         }
         if (option == "--runtime-dir") {
-            if (runtime_dir) {
-                return fail("--runtime-dir given twice");
+            if (auto taken = take_directory(args, option, runtime_dir); !taken) {
+                return std::unexpected{std::move(taken.error())};
             }
-            const std::optional<std::string_view> dir = args.take();
-            if (!dir || dir->empty()) {
-                return fail("--runtime-dir needs a directory");
+        } else if (option == "--state-dir") {
+            if (auto taken = take_directory(args, option, invocation.state_dir); !taken) {
+                return std::unexpected{std::move(taken.error())};
             }
-            runtime_dir = std::filesystem::path{*dir};
         } else if (option == "--name") {
             if (seen_name) {
                 return fail("--name given twice");
@@ -418,11 +431,13 @@ std::expected<Invocation, std::string> parse(std::span<const std::string_view> a
     }
     invocation.request = std::move(*request);
     invocation.runtime_dir = runtime_dir.value_or(default_runtime_dir);
+    invocation.default_runtime_dir = !runtime_dir;
     return invocation;
 }
 
 std::string usage() {
-    return "usage: ks-play [--runtime-dir <dir>] [--name <name>] <command> [arguments]\n"
+    return "usage: ks-play [--runtime-dir <dir>] [--state-dir <dir>] [--name <name>]\n"
+           "               <command> [arguments]\n"
            "       ks-play --help\n"
            "\n"
            "Talks to a running kool_spin.\n"
@@ -430,6 +445,9 @@ std::string usage() {
            "Options:\n"
            "  --runtime-dir <dir>   the directory that holds supervisor.sock\n"
            "                        (default: the one kool_spin uses)\n"
+           "  --state-dir <dir>     kool_spin's state folder, to look for an engine left\n"
+           "                        without it (default: the one kool_spin uses; none with\n"
+           "                        --runtime-dir)\n"
            "  --name <name>         the name kool_spin knows this client by, 1 to 64 bytes\n"
            "                        (default: ks-play)\n"
            "  --help                print this and exit\n"

@@ -80,6 +80,8 @@ struct Options {
     /// 15). Only `--backend paced` accepts it.
     std::optional<std::uint32_t> hang_control_after_ms;
     std::optional<std::filesystem::path> runtime_dir;
+    /// `--state-dir` (specs/state-folder/spec.md requirement 10).
+    std::optional<std::filesystem::path> state_dir;
     std::optional<engine::MiniaudioBackends> backend;
     /// A device number, as `ks-harness --list-devices` numbers them. Checked
     /// against the device list by run(), not here.
