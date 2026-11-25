@@ -103,8 +103,9 @@ The orphan (`state_orphan_test.cpp`), after `SIGKILL` to a `kool_spin` that play
 - [ ] `[auto]` **A removed runtime directory:** the same, once the orphan's runtime directory has been deleted. (test: "State orphan: a removed runtime directory")
 - [ ] `[auto]` **A lost state lock:** with the state folder's `engine.lock` deleted, and with the folder never usable, the runtime directory's lock still finds the orphan. With the state folder's file emptied while held, the runtime directory's gives the process ID. (test: "State orphan: found through the runtime directory")
 - [ ] `[auto]` **A state folder that can't be written but can be read:** the orphan is still found through it, from another runtime directory. (test: "State orphan: a read-only state folder")
+- [ ] `[auto]` **A refused folder is never searched:** with the orphan's state folder made writable by others, a launch from another runtime directory doesn't find it, warns about the folder, and starts; one from the orphan's own runtime directory finds it there. (test: "State orphan: never found in a folder that's refused")
 - [ ] `[auto]` **Two orphans:** with the test's helper holding the runtime directory's `engine` lock, and an orphan the state folder's, `--stop-previous` stops the orphan, and exits with status 1 and the helper's process ID. (test: "State orphan: two of them")
-- [ ] `[auto]` **The hint:** `ks-play` gives it for an orphan found only in the state folder, and not while a supervisor holds either lock; it creates no file or folder. (test: "State orphan: ks-play's hint")
+- [ ] `[auto]` **The hint:** `ks-play` gives it for an orphan found only in the state folder, and not while a supervisor holds either lock, nor from a state folder that others can write; it creates no file or folder. (test: "State orphan: ks-play's hint")
 
 Everywhere:
 

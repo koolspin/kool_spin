@@ -16,6 +16,7 @@ add_library(ks_ipc STATIC
     region.cpp
     runtime_dir.cpp
     segment.cpp
+    state_dir.cpp
     track_segment.cpp)
 add_library(ks::ipc ALIAS ks_ipc)
 
@@ -41,6 +42,7 @@ target_sources(ks_ipc PUBLIC
         include/ks/ipc/seqlock.h
         include/ks/ipc/spsc_ring.h
         include/ks/ipc/state.h
+        include/ks/ipc/state_dir.h
         include/ks/ipc/track_segment.h)
 
 target_link_libraries(ks_ipc
