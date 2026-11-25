@@ -53,6 +53,9 @@ struct Options {
     /// (specs/hang-detection/spec.md requirement 14). 1 to 3,600,000.
     std::optional<std::uint64_t> hang_timeout_ms;
     std::optional<std::uint64_t> ping_interval_ms;
+    /// `--stop-previous`: stop an engine from an earlier session without
+    /// asking (specs/supervisor-crash/spec.md requirement 5).
+    bool stop_previous = false;
     /// Everything after "--", for ks-engine, unchecked.
     std::vector<std::string> engine_args;
     bool help = false;

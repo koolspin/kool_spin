@@ -142,6 +142,8 @@ std::string usage() {
            "                        kool_spin)\n"
            "  --track-memory <MiB>  the memory decoded tracks may use, 1 to 1048576\n"
            "                        (default: half of physical memory)\n"
+           "  --stop-previous       stop an engine still running from an earlier session,\n"
+           "                        without asking\n"
            "  --recording           keep a recording segment of what a paced engine plays,\n"
            "                        for tests (clients get it with OpenRecording)\n"
            "  --crash-window <ms>   for tests: the window in which engine exits count\n"
@@ -180,6 +182,13 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
                 return std::unexpected{std::string{"kool_spin: --recording given twice"}};
             }
             options.recording = true;
+            continue;
+        }
+        if (arg == "--stop-previous") {
+            if (options.stop_previous) {
+                return std::unexpected{std::string{"kool_spin: --stop-previous given twice"}};
+            }
+            options.stop_previous = true;
             continue;
         }
         if (!takes_value(options, arg)) {

@@ -10,6 +10,7 @@
 
 #include <sys/types.h>
 
+#include <chrono>
 #include <cstddef>
 #include <expected>
 #include <filesystem>
@@ -50,6 +51,12 @@ inline constexpr std::string_view kSupervisorLockName = "supervisor";
 /// supervisor (specs/processes/spec.md requirement 5).
 inline constexpr std::string_view kEngineLockName = "engine";
 
+/// How many times LockFile::acquire() tries, and how long it waits between
+/// tries (specs/supervisor-crash/spec.md requirement 1): a probe holds a lock
+/// for microseconds, and must not make an acquire() fail.
+inline constexpr int kLockAttempts = 10;
+inline constexpr std::chrono::milliseconds kLockRetry{5};
+
 /// Whether a lock file is held, and by which process.
 struct LockState {
     bool held = false;
@@ -76,9 +83,13 @@ public:
     };
 
     /// Opens or creates `<dir>/<name>.lock` with mode 0600, refusing a
-    /// symbolic link, takes an exclusive flock() without waiting, and
-    /// replaces the file's contents with this process's ID in decimal and a
-    /// newline.
+    /// symbolic link, takes an exclusive flock(), and replaces the file's
+    /// contents with this process's ID in decimal and a newline. While
+    /// another process holds the lock, tries kLockAttempts times, kLockRetry
+    /// apart.
+    ///
+    /// Between taking the lock and writing the ID, the file still holds the
+    /// last holder's ID, or nothing.
     ///
     /// A name is 1 to kMaxLockNameLength characters from a-z, 0-9, '-', and
     /// '_'.
@@ -103,7 +114,6 @@ private:
 /// - held, with the holder's ID if the file holds a valid one: a positive
 ///   decimal number that fits pid_t, followed by a newline or nothing.
 ///
-/// An acquire() at exactly the same moment can fail because of the probe.
 /// Refuses an invalid name with std::errc::invalid_argument.
 [[nodiscard]] std::expected<LockState, std::error_code> probe_lock(const std::filesystem::path& dir,
                                                                    std::string_view name);

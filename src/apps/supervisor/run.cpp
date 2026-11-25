@@ -18,6 +18,7 @@
 #include <ks/supervisor/log_dir.h>
 #include <ks/supervisor/log_file.h>
 #include <ks/supervisor/options.h>
+#include <ks/supervisor/orphan.h>
 #include <ks/supervisor/spawn.h>
 
 #include <fcntl.h>
@@ -51,6 +52,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -237,6 +239,18 @@ constexpr std::uint64_t kMib = std::uint64_t{1'024} * 1'024;
 /// `bytes` in MiB, rounded up.
 std::uint64_t mib_up(std::uint64_t bytes) {
     return (bytes + kMib - 1) / kMib;
+}
+
+/// True if `path` is a regular file that this process may execute.
+bool is_executable_file(const std::filesystem::path& path) {
+    struct stat status{};
+    return ::stat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode) &&
+           ::access(path.c_str(), X_OK) == 0;
+}
+
+/// A Wait that waits.
+void sleep_for(std::chrono::milliseconds time) {
+    std::this_thread::sleep_for(time);
 }
 
 /// Opens `path` for reading as a track's file (specs/track-loading/spec.md
@@ -426,7 +440,9 @@ private:
     ///
     /// A kool_spin.log that fails is reported once, on standard error, and
     /// every later line goes there instead (requirement 13).
-    void report(ipc::LogLevel level, std::string_view line) {
+    ///
+    /// An `echo`ed line goes to standard error whatever its level.
+    void report(ipc::LogLevel level, std::string_view line, bool echo = false) {
         bool in_file = false;
         if (log_ && !log_->error()) {
             static_cast<void>(log_->write(steady_now_ns(), level, line));
@@ -439,7 +455,7 @@ private:
                 in_file = true;
             }
         }
-        if (!in_file || level != ipc::LogLevel::Info) {
+        if (!in_file || level != ipc::LogLevel::Info || echo) {
             *err_ << "kool_spin: " << line << '\n' << std::flush;
         }
     }
@@ -450,6 +466,14 @@ private:
     /// Requirement 15, steps 1 to 5. Returns kExitOk, or reports and returns
     /// kExitStartFailed.
     int start();
+    /// Looks for an engine from an earlier session, and decides whether to
+    /// stop it (specs/supervisor-crash/spec.md requirements 6 to 10): sets
+    /// previous_engine_ if so. Returns kExitOk, or reports and returns
+    /// kExitStartFailed.
+    int check_previous_engine();
+    /// Stops previous_engine_, if it's set (requirements 11 and 12). Returns
+    /// kExitOk, or reports and returns kExitStartFailed.
+    int stop_previous_engine();
     /// Starts ks-engine as at launch, or `clean` as requirement 11 of
     /// specs/engine-restart/spec.md says: sets engine_pid_, engine_, and the
     /// Ready deadline. Says why not.
@@ -674,6 +698,8 @@ private:
     /// ks-engine.log; null if it couldn't be created.
     std::unique_ptr<LogFile> engine_log_;
 
+    /// The engine from an earlier session that this one is to stop.
+    std::optional<pid_t> previous_engine_;
     pid_t engine_pid_ = 0;
     std::unique_ptr<ipc::Connection> engine_;
     std::filesystem::path engine_path_;
@@ -765,21 +791,12 @@ int Supervisor::start() {
         return kExitStartFailed;
     }
     lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+    // Before the logs: a launch that leaves the engine running makes no
+    // session folder, which would push the crashed session's out.
+    if (const int checked = check_previous_engine(); checked != kExitOk) {
+        return checked;
+    }
     open_logs();
-
-    const std::expected<ipc::LockState, std::error_code> engine_lock =
-        ipc::probe_lock(dir_, ipc::kEngineLockName);
-    if (!engine_lock) {
-        error(std::format("can't check the engine lock: {}", engine_lock.error().message()));
-        return kExitStartFailed;
-    }
-    if (engine_lock->held) {
-        error(engine_lock->pid ? std::format("an engine from an earlier session is still running "
-                                             "(process {})",
-                                             *engine_lock->pid)
-                               : std::string{"an engine from an earlier session is still running"});
-        return kExitStartFailed;
-    }
     if (const int prepared = prepare_loading(); prepared != kExitOk) {
         return prepared;
     }
@@ -794,7 +811,6 @@ int Supervisor::start() {
         error(std::format("can't find ks-engine: {}", found.error().message()));
         return kExitStartFailed;
     }
-
     std::expected<ipc::SegmentFactory, std::error_code> factory = ipc::SegmentFactory::open(dir_);
     if (!factory) {
         error(std::format("can't create segments: {}", factory.error().message()));
@@ -851,10 +867,87 @@ int Supervisor::start() {
         }
         recording_ = std::move(*recording);
     }
+    // Last, so that a launch that can't start leaves the music playing.
+    if (const int stopped = stop_previous_engine(); stopped != kExitOk) {
+        return stopped;
+    }
     open_engine_log();
     if (const std::expected<void, std::string> started = spawn_engine(false); !started) {
         error(started.error());
         return kExitStartFailed;
+    }
+    return kExitOk;
+}
+
+int Supervisor::check_previous_engine() {
+    const std::expected<std::optional<Orphan>, std::error_code> orphan =
+        find_orphan(dir_, sleep_for);
+    if (!orphan) {
+        error(std::format("can't check the engine lock: {}", orphan.error().message()));
+        return kExitStartFailed;
+    }
+    if (!*orphan) {
+        return kExitOk;
+    }
+    const std::optional<pid_t> pid = (*orphan)->pid;
+    if (!pid) {
+        error("an engine from an earlier session is still running, but its lock file doesn't give "
+              "its process ID: can't stop it");
+        return kExitStartFailed;
+    }
+    error(std::format("an engine from an earlier session is still running (process {}); kool_spin "
+                      "can't control it, and stopping it fades out the music",
+                      *pid));
+    bool stop = options_->stop_previous;
+    if (!stop && can_ask(STDIN_FILENO, STDERR_FILENO)) {
+        // No signal handlers are installed yet: Ctrl-C ends kool_spin, and
+        // the engine plays on (requirement 10).
+        *err_ << "Stop it and start a new session? [y/N] " << std::flush;
+        stop = read_answer(STDIN_FILENO);
+    }
+    if (!stop) {
+        error("left it running; kool_spin --stop-previous stops it and starts a new session");
+        return kExitStartFailed;
+    }
+    previous_engine_ = pid;
+    return kExitOk;
+}
+
+int Supervisor::stop_previous_engine() {
+    if (!previous_engine_) {
+        return kExitOk;
+    }
+    // spawn_engine() would find this out too late.
+    if (!is_executable_file(engine_path_)) {
+        error(std::format("can't use {} as ks-engine: it isn't an executable file; left the engine "
+                          "from an earlier session running",
+                          engine_path_.string()));
+        return kExitStartFailed;
+    }
+    const std::expected<Stopped, std::string> stopped =
+        stop_orphan(dir_, *previous_engine_, sleep_for);
+    if (!stopped) {
+        error(std::format("can't stop the engine from an earlier session: {}", stopped.error()));
+        return kExitStartFailed;
+    }
+    switch (*stopped) {
+    case Stopped::Gone:
+        report(ipc::LogLevel::Info,
+               std::format("the engine from an earlier session (process {}) has already ended",
+                           *previous_engine_),
+               true);
+        break;
+    case Stopped::Faded:
+        report(ipc::LogLevel::Info,
+               std::format("stopped the engine from an earlier session (process {})",
+                           *previous_engine_),
+               true);
+        break;
+    case Stopped::Killed:
+        warning(std::format("the engine from an earlier session (process {}) didn't stop in {} s, "
+                            "and was killed",
+                            *previous_engine_, kEngineStopTimeout.count()));
+        break;
     }
     return kExitOk;
 }
@@ -2012,9 +2105,7 @@ int Supervisor::prepare_loading() {
         error(std::format("can't find ks-worker: {}", found.error().message()));
         return kExitStartFailed;
     }
-    struct stat status{};
-    if (::stat(worker_path_.c_str(), &status) != 0 || !S_ISREG(status.st_mode) ||
-        ::access(worker_path_.c_str(), X_OK) != 0) {
+    if (!is_executable_file(worker_path_)) {
         error(std::format("can't use {} as ks-worker: it isn't an executable file",
                           worker_path_.string()));
         return kExitStartFailed;

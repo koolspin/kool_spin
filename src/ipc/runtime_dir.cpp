@@ -25,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace ks::ipc {
@@ -147,7 +148,15 @@ std::expected<LockFile, LockFile::Failure> LockFile::acquire(const std::filesyst
     if (!fd.valid()) {
         return std::unexpected{Failure{.error = last_error(), .holder = {}}};
     }
-    if (retry_eintr([&] { return ::flock(fd.get(), LOCK_EX | LOCK_NB); }) == -1) {
+    int locked = -1;
+    for (int attempt = 1;; ++attempt) {
+        locked = retry_eintr([&] { return ::flock(fd.get(), LOCK_EX | LOCK_NB); });
+        if (locked != -1 || errno != EWOULDBLOCK || attempt == kLockAttempts) {
+            break;
+        }
+        std::this_thread::sleep_for(kLockRetry);
+    }
+    if (locked == -1) {
         if (errno == EWOULDBLOCK) {
             return std::unexpected{
                 Failure{.error = std::make_error_code(std::errc::resource_unavailable_try_again),

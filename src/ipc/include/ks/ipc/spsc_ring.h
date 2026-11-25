@@ -62,6 +62,10 @@ public:
     /// changes nothing, if the ring is full or corrupt.
     [[nodiscard]] bool try_push(const T& value) noexcept KS_NONBLOCKING;
 
+    /// How many of the items pushed the consumer hasn't taken yet, from the
+    /// ring's tail now. Nothing if the ring is corrupt.
+    [[nodiscard]] std::optional<std::uint64_t> unread() noexcept KS_NONBLOCKING;
+
     /// True once this producer has found the ring's counters inconsistent.
     /// From then on it never touches the ring again.
     [[nodiscard]] bool corrupt() const noexcept KS_NONBLOCKING;
@@ -149,6 +153,19 @@ bool RingProducer<T, Capacity>::try_push(const T& value) noexcept KS_NONBLOCKING
     ++head_;
     store_shared(ring_->head, head_, std::memory_order_release);
     return true;
+}
+
+template <typename T, std::size_t Capacity>
+std::optional<std::uint64_t> RingProducer<T, Capacity>::unread() noexcept KS_NONBLOCKING {
+    if (corrupt_) {
+        return std::nullopt;
+    }
+    tail_ = load_shared(ring_->tail, std::memory_order_acquire);
+    if (head_ - tail_ > Capacity) {
+        corrupt_ = true;
+        return std::nullopt;
+    }
+    return head_ - tail_;
 }
 
 template <typename T, std::size_t Capacity>
