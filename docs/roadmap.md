@@ -101,7 +101,8 @@ Exit criteria:
   - **Step 8: done** (`specs/supervisor-crash/spec.md`). A relaunch can't find an orphan in another runtime directory, or in one that has been removed. Step 9a fixes that.
 - Session journal, written by the supervisor. The previous session is restored, paused, at launch.
   - **Step 9a, the state folder and its locks: done** (`specs/state-folder/spec.md`). The supervisor and the engine also hold a lock in the journal's folder, best effort, so a relaunch finds an orphan in another runtime directory, or in one that has been removed.
-  - Step 9b: the journal itself.
+  - **Step 9b, writing the journal: done** (`specs/session-journal/spec.md`). The supervisor records the decks and the mixer in `session.journal`, written atomically by its own thread whenever something changed, and the parser is fuzzed.
+  - Step 9c: restoring the session at launch, paused, from the same spec.
 - Per-process logs through shared memory, with shared timestamps.
 - Health checks reported by `ks-play`: real-time priority, memory locking, CPU power profile, battery. System sleep is blocked while decks are loaded.
 

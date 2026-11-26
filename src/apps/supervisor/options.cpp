@@ -75,6 +75,26 @@ std::expected<void, std::string> set_milliseconds(std::optional<std::uint64_t>& 
     return {};
 }
 
+/// Sets --journal-stall-after's write number, 1 to 1,000
+/// (specs/session-journal/spec.md requirement 31).
+std::expected<void, std::string> set_stall(std::optional<std::uint32_t>& field,
+                                           std::string_view value) {
+    if (field) {
+        return std::unexpected{std::string{"kool_spin: --journal-stall-after given twice"}};
+    }
+    std::uint32_t write = 0;
+    const char* const first = std::to_address(value.begin());
+    const char* const last = std::to_address(value.end());
+    const auto [end, error] = std::from_chars(first, last, write);
+    if (value.empty() || error != std::errc{} || end != last || write < 1 || write > 1'000) {
+        return std::unexpected{std::format(
+            "kool_spin: --journal-stall-after takes a whole number from 1 to 1000, not '{}'",
+            value)};
+    }
+    field = write;
+    return {};
+}
+
 /// The field a path option sets, or null if `option` isn't one.
 std::optional<std::filesystem::path>* path_field(Options& options, std::string_view option) {
     if (option == "--runtime-dir") {
@@ -99,7 +119,8 @@ std::optional<std::filesystem::path>* path_field(Options& options, std::string_v
 bool takes_value(Options& options, std::string_view arg) {
     return path_field(options, arg) != nullptr || arg == "--track-memory" ||
            arg == "--crash-window" || arg == "--ready-timeout" || arg == "--hang-timeout" ||
-           arg == "--ping-interval";
+           arg == "--ping-interval" || arg == "--journal-interval" ||
+           arg == "--journal-stall-after";
 }
 
 /// Applies `value` to the option `arg`, one of those takes_value() accepts.
@@ -120,6 +141,12 @@ std::expected<void, std::string> apply_value(Options& options, std::string_view 
     if (arg == "--ping-interval") {
         return set_milliseconds(options.ping_interval_ms, arg, value);
     }
+    if (arg == "--journal-interval") {
+        return set_milliseconds(options.journal_interval_ms, arg, value);
+    }
+    if (arg == "--journal-stall-after") {
+        return set_stall(options.journal_stall_after, value);
+    }
     return set_track_memory(options.track_memory_mib, value);
 }
 
@@ -135,8 +162,9 @@ std::string usage() {
            "Options:\n"
            "  --runtime-dir <path>  the runtime directory (default: $XDG_RUNTIME_DIR/kool_spin\n"
            "                        on Linux, $TMPDIR/kool_spin on macOS)\n"
-           "  --state-dir <path>    the state folder, whose locks find an engine from an\n"
-           "                        earlier session (default: $XDG_STATE_HOME/kool_spin or\n"
+           "  --state-dir <path>    the state folder, which holds the session journal, and\n"
+           "                        whose locks find an engine from an earlier session\n"
+           "                        (default: $XDG_STATE_HOME/kool_spin or\n"
            "                        ~/.local/state/kool_spin on Linux,\n"
            "                        ~/Library/Application Support/kool_spin on macOS; none\n"
            "                        with --runtime-dir)\n"
@@ -162,6 +190,9 @@ std::string usage() {
            "                        before the engine is killed (default: 500)\n"
            "  --ping-interval <ms>  for tests: how often the engine is pinged; it is not\n"
            "                        answering after three intervals (default: 1000)\n"
+           "  --journal-interval <ms>\n"
+           "                        for tests: how often the session journal is brought\n"
+           "                        up to date (default: 1000)\n"
            "  --help                print this text and exit\n"
            "\n"
            "Everything after -- goes to ks-engine: --backend, --device, --rate,\n"

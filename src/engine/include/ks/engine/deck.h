@@ -8,6 +8,7 @@
 #include <ks/core/realtime.h>
 #include <ks/engine/interpolator.h>
 #include <ks/engine/track.h>
+#include <ks/ipc/state.h>
 
 #include <array>
 #include <chrono>
@@ -22,7 +23,7 @@ inline constexpr std::chrono::milliseconds kDeclickTime{5};
 /// The time constant of rate smoothing.
 inline constexpr std::chrono::milliseconds kRateSmoothing{5};
 /// The fastest a deck plays, forward or in reverse.
-inline constexpr double kMaxRate = 4.0;
+inline constexpr double kMaxRate = ipc::kMaxDeckRate;
 
 /// Plays one track at a time.
 ///

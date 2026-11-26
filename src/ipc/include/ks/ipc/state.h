@@ -57,6 +57,20 @@ inline constexpr std::uint64_t kResumePlaying = std::uint64_t{1} << 0U;
 /// The resume slots: the engine writes them in turn.
 inline constexpr std::size_t kResumeSlots = 2;
 
+// The ranges a resume slot's values fall in (specs/resume-state/spec.md
+// requirement 7). The engine's limits are these, and the supervisor checks a
+// session journal against them (specs/session-journal/spec.md requirement 1).
+
+/// The fastest a deck plays, forward or in reverse.
+inline constexpr double kMaxDeckRate = 4.0;
+/// The most a trim boosts, in dB.
+inline constexpr double kMaxTrimDb = 12.0;
+/// The narrowest crossfader transition: the sharpest cut.
+inline constexpr double kMinCrossfaderTransition = 0.01;
+/// The most output channels the engine renders: a bus's first channel is
+/// below it.
+inline constexpr std::size_t kMaxOutputChannels = 8;
+
 /// One deck, after a block (requirement 3).
 struct DeckState {
     /// The status heartbeat of the block that published it.

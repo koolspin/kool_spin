@@ -11,6 +11,7 @@
 #include <ks/engine/deck.h>
 #include <ks/engine/interpolator.h>
 #include <ks/engine/render_core.h>
+#include <ks/ipc/state.h>
 
 #include <array>
 #include <chrono>
@@ -26,10 +27,10 @@ inline constexpr std::size_t kDecks = 4;
 inline constexpr std::chrono::milliseconds kGainSmoothing{1};
 
 /// The most a trim boosts, in dB.
-inline constexpr double kMaxTrimDb = 12.0;
+inline constexpr double kMaxTrimDb = ipc::kMaxTrimDb;
 
 /// The narrowest crossfader transition: the sharpest cut.
-inline constexpr double kMinCrossfaderTransition = 0.01;
+inline constexpr double kMinCrossfaderTransition = ipc::kMinCrossfaderTransition;
 
 /// Which side of the crossfader a channel is on.
 enum class CrossfaderSide : std::uint8_t {

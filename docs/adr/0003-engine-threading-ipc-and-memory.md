@@ -107,7 +107,7 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 - **Wire format:** `SOCK_STREAM`, with length-prefixed binary messages (version, type, length, body) up to a fixed maximum size. The parser is hand-written and fuzzed.
   - `SOCK_SEQPACKET` would keep message boundaries, but macOS doesn't support it on Unix sockets.
   - A serialization library would add a dependency to the supervisor.
-- **The supervisor is single-threaded:** one `poll` loop over its sockets, with a self-pipe for `SIGCHLD`.
+- **The supervisor is single-threaded:** one `poll` loop over its sockets, with a self-pipe for `SIGCHLD`. Its one other thread writes the session journal (section 14), so that a slow or hung disk never holds up the loop. The loop hands it the newest journal, and never waits for it.
 - **Loading a track:**
   1. A client asks the supervisor, giving the file's path.
   2. The supervisor opens the file and starts a worker, giving it the open file. The worker reports the file's sample rate and estimated length, or why it can't decode it.
@@ -221,11 +221,12 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 
 ### 14. Session journal
 
-- **Content:** the supervisor builds the journal from the engine's state blocks and its own record of what's loaded; it knows the file paths because it handled the loads. The journal holds:
-  - for each loaded track: its path, size, and modification time (content fingerprints arrive in Phase 2), position, rate, and cue point;
-  - the mixer settings.
-- **Writing:** at least once a second, atomically: write a temporary file, `fsync` it, `rename` it, then `fsync` the directory.
-- **Format:** plain text: a version line, one `key value` line per field with paths escaped, and a final checksum line. It needs no library, is readable when debugging, and is fuzzed.
+- **Content:** the supervisor builds the journal from the engine's state blocks and its own record of what's loaded; it knows the file paths because it handled the loads. The journal holds (`specs/session-journal/spec.md`):
+  - for each deck with a track: the file's path, size, and modification time when it was opened (content fingerprints arrive in Phase 2), the track's sample rate, and the deck's position, rate, cue point, and whether it plays;
+  - the mixer settings;
+  - the machine's boot ID, the engine's process ID, and the monotonic time of the state it records.
+- **Writing:** `session.journal` in the state folder, by the supervisor's writer thread (section 6), only while the supervisor holds the folder's lock (section 12). Every second (`--journal-interval`), it reads the state blocks, and if anything but the time has changed, it writes the journal atomically: a temporary file, synced (`F_FULLFSYNC` on macOS), renamed over the journal, and the directory synced. So a paused session isn't rewritten, and a playing one is never more than a second behind. Nothing is written before the engine's first block, so a launch that fails leaves the journal as it was. A write that fails is a warning, and never stops the music. When the supervisor stops, it writes once more, and waits up to 2 s.
+- **Format:** plain text: a version line, then `key value` lines in a fixed order, and a final CRC-32 line. Reals are written in their shortest exact form, and paths with `\` doubled and control bytes as `\xHH`, so each journal has exactly one text. It needs no library, is readable when debugging, and is fuzzed: whatever the parser accepts formats back to the same bytes.
 - **Location:** `$XDG_STATE_HOME/kool_spin/` on Linux (by default `~/.local/state/kool_spin/`), and `~/Library/Application Support/kool_spin/` on macOS. Without `HOME`, the home directory is the one the user database gives. `--state-dir` names another folder; `--runtime-dir` without it uses none.
 - **Not shared with another machine:** the folder is never used on a network file system; on FUSE, which may hide one, only if `--state-dir` names it. A lock there may be another machine's, and so may the process ID in its file. Nor is it used if the group or others can write it.
 - **Restoring:** at launch, the session is restored with decks paused. If a track's file is missing, its deck stays empty, with a warning.
