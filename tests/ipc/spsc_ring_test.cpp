@@ -69,3 +69,30 @@ TEST_CASE("SpscRing counters work across 64-bit wraparound", "[ipc][ring]") {
     REQUIRE_FALSE(consumer.corrupt());
     REQUIRE(ring.head == 10); // wrapped past zero
 }
+
+TEST_CASE("SpscRing items taken stay the producer's until released", "[ipc][ring]") {
+    SpscRing<std::uint64_t, 2> ring{};
+    RingProducer producer{ring};
+    REQUIRE(producer.try_push(1));
+    REQUIRE(producer.try_push(2));
+    {
+        RingConsumer consumer{ring};
+        REQUIRE(consumer.try_take() == std::uint64_t{1});
+        REQUIRE(consumer.try_take() == std::uint64_t{2});
+        REQUIRE_FALSE(consumer.try_take().has_value());
+        // Not released: the slots are still full, and the items still there.
+        REQUIRE_FALSE(producer.try_push(3));
+        REQUIRE(producer.unread() == std::uint64_t{2});
+    }
+    {
+        // A consumer that died before releasing leaves them to the next one.
+        RingConsumer consumer{ring};
+        REQUIRE(consumer.try_take() == std::uint64_t{1});
+        consumer.release();
+        REQUIRE(producer.unread() == std::uint64_t{1});
+        REQUIRE(producer.try_push(3));
+        REQUIRE(consumer.try_pop() == std::uint64_t{2});
+        REQUIRE(consumer.try_pop() == std::uint64_t{3});
+        REQUIRE(producer.unread() == std::uint64_t{0});
+    }
+}

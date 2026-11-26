@@ -494,3 +494,53 @@ TEST_CASE("Engine: events taken while the audio thread records them", "[engine][
     CHECK(in_order);
     CHECK(taken + engine->dropped_events() == kCalls);
 }
+
+TEST_CASE("Engine: commands stay in their ring until a snapshot holds them", "[engine][state]") {
+    // An engine that dies between reading a command and publishing the
+    // snapshot that includes it leaves the command to the next engine.
+    const auto state = std::make_unique<ks::ipc::EngineState>();
+    Ring client;
+    const auto tail = [&] {
+        return ks::ipc::load_shared(client.ring->tail, std::memory_order_acquire);
+    };
+    {
+        const auto first = std::make_unique<Engine>(*state);
+        ks::engine::RenderCore core{*first};
+        REQUIRE(first->attach(*client.ring) == std::optional<std::size_t>{0});
+        std::vector<std::vector<float>> out(kChannels, std::vector<float>(64, 0.0F));
+        std::vector<std::span<float>> views(out.begin(), out.end());
+        const Block block{.channels = views,
+                          .frames = 64,
+                          .sample_rate = kRate,
+                          .host_time = {},
+                          .resumed = false};
+        REQUIRE(core.try_render(block) == ks::engine::RenderResult::Rendered);
+        REQUIRE(client.producer.try_push(crossfader(1, 0.25)));
+        REQUIRE(core.try_render(block) == ks::engine::RenderResult::Rendered);
+        // Published, then released.
+        CHECK(read(state->mixer).crossfader == std::bit_cast<std::uint64_t>(0.25));
+        CHECK(tail() == 1);
+
+        // This one dies after it's read, before rendered() publishes it.
+        REQUIRE(client.producer.try_push(crossfader(2, 0.75)));
+        first->process(block);
+        REQUIRE(first->mixer().settings().crossfader == 0.75);
+        CHECK(tail() == 1);
+        CHECK(read(state->mixer).crossfader == std::bit_cast<std::uint64_t>(0.25));
+    }
+
+    // The next engine takes the ring over where the snapshot left it, and
+    // applies the command again.
+    // No tracks: only the mixer resumes.
+    const auto second = std::make_unique<Engine>(*state, std::span<const Track* const>{});
+    REQUIRE(second->mixer().settings().crossfader == 0.25);
+    REQUIRE(second->attach_at(0, *client.ring));
+    render_block(*second);
+    CHECK(second->client_stats(0).last_sequence == 2);
+    CHECK(second->mixer().settings().crossfader == 0.75);
+    // A caller that never reports blocks rendered gets them released by the
+    // next block.
+    CHECK(tail() == 1);
+    render_block(*second);
+    CHECK(tail() == 2);
+}
