@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <format>
 #include <limits>
 #include <memory>
 #include <numbers>
@@ -370,6 +371,53 @@ TEST_CASE("Engine process: --track", "[engine-process]") {
         CHECK(refused({"--track", "7:-1"}));                  // a bad descriptor
         CHECK(refused({"--clean", "--clean"}));               // repeated
     }
+}
+
+TEST_CASE("Engine process: a track released as soon as it's loaded", "[engine-process]") {
+    // Two loads on one deck, sent together, are applied in one block, so the
+    // first track is released before a snapshot holds either load. The
+    // engine answers a load only once a snapshot holds it (ADR 0003 §11),
+    // and the supervisor accepts a release only of a track whose load was
+    // answered: the first load's answer comes before its release.
+    Harness harness{false};
+    const SineTrack first = make_sine_track(harness.factory());
+    const SineTrack second = make_sine_track(harness.factory());
+    harness.start();
+    const auto load = [&](std::uint32_t request, const SineTrack& track, std::uint64_t id) {
+        std::array<int, 1> fds{track.fd.get()};
+        REQUIRE(ks::processes::test::send(
+            harness.socket(),
+            ks::ipc::Message{.request_id = request,
+                             .body =
+                                 msg::LoadTrack{.track_id = id, .deck = 0, .sample_rate = kRate}},
+            fds));
+    };
+    load(1, first, kTrackId);
+    load(2, second, kTrackId + 1);
+
+    // What came, in order: answers by request ID, releases by track ID.
+    std::vector<std::string> order;
+    for (int i = 0; i < 6 && order.size() < 3; ++i) {
+        const auto received = ks::processes::test::receive(harness.socket());
+        if (!received) {
+            break; // The size check below fails.
+        }
+        const ks::ipc::Message& message = received->message;
+        if (std::holds_alternative<msg::TrackLoaded>(message.body)) {
+            order.push_back(std::format("loaded {}", message.request_id));
+        } else if (const auto* const note = std::get_if<msg::TrackReleased>(&message.body)) {
+            order.push_back(std::format("released {}", note->track_id));
+        }
+    }
+    CAPTURE(order);
+    REQUIRE(order.size() == 3);
+    const auto at = [&](const std::string& what) { return std::ranges::find(order, what); };
+    CHECK(at("loaded 1") < at(std::format("released {}", kTrackId)));
+    CHECK(at("loaded 2") != order.end());
+    CHECK(eventually([&] {
+        const auto deck = harness.view().deck(0);
+        return deck && loaded(*deck) && deck->track_id == kTrackId + 1;
+    }));
 }
 
 TEST_CASE("Engine process: corrupted state starts clean", "[engine-process]") {

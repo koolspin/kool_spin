@@ -34,6 +34,7 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <format>
 #include <iterator>
@@ -206,9 +207,20 @@ private:
     /// Detach answered. A released track is unmapped, and the supervisor told
     /// (specs/track-loading/spec.md requirement 6).
     void collect();
-    /// Puts the track in `segment` on a deck, and answers `id`
-    /// (specs/track-loading/spec.md requirement 4).
+    /// Puts the track in `segment` on a deck, and answers `id` once the
+    /// engine holds the load (specs/track-loading/spec.md requirement 4).
     void load_track(std::uint32_t id, const ipc::msg::LoadTrack& load, ipc::Fd segment);
+    /// Sends `message`, and logs `line`, once the engine holds the handover
+    /// it has just given: then a restarted engine resumes with it
+    /// (specs/engine-restart/spec.md requirement 8, ADR 0003 §11).
+    void answer_when_held(ipc::Message message, std::string line);
+    /// Sends, in order, each waiting message whose handover the engine now
+    /// holds.
+    void send_held_messages();
+    /// Tells the supervisor that the engine released `track_id`, after every
+    /// answer still waiting: the supervisor takes the release of a track only
+    /// once its load has been answered.
+    void send_released(std::uint64_t track_id);
     /// Passes each track's progress on to the audio thread, faulting in at
     /// most kFaultInPerPass bytes in all, and logs the tracks that finish
     /// (specs/track-loading/spec.md requirements 5 and 8).
@@ -257,6 +269,16 @@ private:
     std::unique_ptr<ipc::Connection> supervisor_;
     /// Slot i's ring, while one is attached.
     std::array<std::unique_ptr<AttachedRing>, engine::kMaxClients> rings_;
+
+    /// A message, and its log line, waiting until the engine holds handover
+    /// number `handover`.
+    struct HeldMessage {
+        std::uint64_t handover = 0;
+        ipc::Message message;
+        std::string line;
+    };
+    /// In the order they're sent.
+    std::deque<HeldMessage> held_messages_;
 };
 
 std::expected<void, StartFailure>
@@ -604,6 +626,7 @@ int EngineProcess::loop() {
         log_output();
         log_events(false);
         collect();
+        send_held_messages();
         relay_tracks();
         retry_detaches();
         if (ipc::take_stop_signal()) {
@@ -681,8 +704,8 @@ std::optional<std::uint32_t> EngineProcess::handle(const ipc::Message& message,
         }
     } else if (const auto* const unload = std::get_if<ipc::msg::UnloadDeck>(&message.body)) {
         if (engine_->unload(unload->deck)) {
-            report(ipc::LogLevel::Info, std::format("unloaded deck {}", unload->deck + 1));
-            send(ipc::Message{.request_id = id, .body = ipc::msg::DeckUnloaded{}});
+            answer_when_held(ipc::Message{.request_id = id, .body = ipc::msg::DeckUnloaded{}},
+                             std::format("unloaded deck {}", unload->deck + 1));
         } else {
             unavailable(id, "an UnloadDeck", "the engine's give ring is full");
         }
@@ -788,9 +811,7 @@ void EngineProcess::collect() {
                 const std::uint64_t track_id = (*found)->id();
                 // Unmaps the segment and closes its descriptor.
                 tracks_.erase(found);
-                report(ipc::LogLevel::Info, std::format("released track {}", track_id));
-                send(ipc::Message{.request_id = 0,
-                                  .body = ipc::msg::TrackReleased{.track_id = track_id}});
+                send_released(track_id);
             }
             continue;
         }
@@ -829,9 +850,37 @@ void EngineProcess::load_track(std::uint32_t id, const ipc::msg::LoadTrack& load
         return;
     }
     tracks_.push_back(std::move(*track));
-    report(ipc::LogLevel::Info,
-           std::format("loaded track {} on deck {}", load.track_id, load.deck + 1));
-    send(ipc::Message{.request_id = id, .body = ipc::msg::TrackLoaded{}});
+    answer_when_held(ipc::Message{.request_id = id, .body = ipc::msg::TrackLoaded{}},
+                     std::format("loaded track {} on deck {}", load.track_id, load.deck + 1));
+}
+
+void EngineProcess::answer_when_held(ipc::Message message, std::string line) {
+    held_messages_.push_back(HeldMessage{.handover = engine_->handovers_given(),
+                                         .message = std::move(message),
+                                         .line = std::move(line)});
+}
+
+void EngineProcess::send_held_messages() {
+    const std::uint64_t held = engine_->handovers_held();
+    while (!held_messages_.empty() && held_messages_.front().handover <= held) {
+        report(ipc::LogLevel::Info, held_messages_.front().line);
+        send(held_messages_.front().message);
+        held_messages_.pop_front();
+    }
+}
+
+void EngineProcess::send_released(std::uint64_t track_id) {
+    ipc::Message message{.request_id = 0, .body = ipc::msg::TrackReleased{.track_id = track_id}};
+    std::string line = std::format("released track {}", track_id);
+    if (held_messages_.empty()) {
+        report(ipc::LogLevel::Info, line);
+        send(message);
+        return;
+    }
+    // After every message waiting now, whichever handover released it.
+    held_messages_.push_back(HeldMessage{.handover = held_messages_.back().handover,
+                                         .message = std::move(message),
+                                         .line = std::move(line)});
 }
 
 void EngineProcess::relay_tracks() {

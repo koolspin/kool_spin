@@ -142,6 +142,8 @@ struct SessionOptions {
     std::vector<std::string> supervisor;
     /// After the paced backend's options: more for ks-engine.
     std::vector<std::string> engine_options;
+    /// The paced backend's period, in frames.
+    std::uint32_t period = kPeriod;
     /// Start with --recording.
     bool recording = true;
     /// Wait for supervisor.sock. The crash-loop tests turn this off, because
@@ -166,7 +168,7 @@ public:
         args.insert(args.end(), options.supervisor.begin(), options.supervisor.end());
         args.emplace_back("--");
         args.insert(args.end(), {"--backend", "paced", "--rate", std::to_string(kRate),
-                                 "--channels", "2", "--period", std::to_string(kPeriod)});
+                                 "--channels", "2", "--period", std::to_string(options.period)});
         args.insert(args.end(), options.engine_options.begin(), options.engine_options.end());
         process_ = processes::test::start(
             "/bin/sh", logs::test::with_stderr(err(), processes::test::kKoolSpinPath, args));

@@ -344,6 +344,42 @@ TEST_CASE("Restart: killed with a load in flight", "[restart]") {
     }
 }
 
+TEST_CASE("Restart: killed just after a load or an unload is answered", "[restart]") {
+    // Requirement 8: a track whose LoadTrack was answered stays with its
+    // deck. The engine answers a load or an unload only once a resume slot
+    // holds it (ADR 0003 §11). With the longest period, about 93 ms passes
+    // between one period's snapshots and the next, so an engine that
+    // answered sooner would be killed before a snapshot held the change.
+    const Files files;
+    const std::filesystem::path constant = write_constant(files.path(), "constant.wav", 60);
+    const std::filesystem::path other = write_constant(files.path(), "other.wav", 10);
+    SessionOptions options;
+    options.period = 4'096;
+    auto playing_session = start_playing(constant, options);
+    Playing& p = *playing_session;
+
+    SECTION("a load") {
+        REQUIRE(is_loaded(load(p.client, 1, other)));
+        kill_engine(p.session);
+        REQUIRE(restarted(p, 2));
+        const auto deck = require(p.client.state.deck(1));
+        CHECK(loaded(deck));
+    }
+    SECTION("an unload") {
+        REQUIRE(is_loaded(load(p.client, 1, other)));
+        // Well after the snapshot that holds the load.
+        std::this_thread::sleep_for(Milliseconds{500});
+        const std::optional<Received> answer = ask(p.client, msg::UnloadDeck{.deck = 1});
+        const bool unloaded =
+            answer && std::holds_alternative<msg::DeckUnloaded>(answer->message.body);
+        REQUIRE(unloaded);
+        kill_engine(p.session);
+        REQUIRE(restarted(p, 2));
+        const auto deck = require(p.client.state.deck(1));
+        CHECK_FALSE(loaded(deck));
+    }
+}
+
 TEST_CASE("Restart: requests during a restart", "[restart]") {
     const Files files;
     const std::filesystem::path constant = write_constant(files.path(), "constant.wav", 60);

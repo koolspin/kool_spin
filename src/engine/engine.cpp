@@ -225,8 +225,20 @@ std::uint64_t Engine::dropped_events() const noexcept KS_NONBLOCKING {
     return dropped_events_.load(std::memory_order_relaxed);
 }
 
+std::uint64_t Engine::handovers_given() const noexcept {
+    return handovers_given_;
+}
+
+std::uint64_t Engine::handovers_held() const noexcept KS_NONBLOCKING {
+    return handovers_held_.load(std::memory_order_acquire);
+}
+
 bool Engine::give(const Handover& handover) noexcept {
-    return give_producer_.try_push(handover);
+    if (!give_producer_.try_push(handover)) {
+        return false;
+    }
+    ++handovers_given_;
+    return true;
 }
 
 // ---- The audio thread ----------------------------------------------------------
@@ -250,17 +262,21 @@ void Engine::process(const Block& block) noexcept KS_NONBLOCKING {
 
     // Only a caller that never reports blocks rendered, such as a test driving
     // the graph, leaves anything to release here.
-    release_commands();
+    release_held();
 
     // A stalled handover goes first, and while it waits nothing behind it applies
     // (requirement 13).
-    if (!stalled_.has_value() || apply_handover(*stalled_)) {
+    if (stalled_.has_value() && apply_handover(*stalled_)) {
         stalled_.reset();
+        ++handovers_applied_;
+    }
+    if (!stalled_.has_value()) {
         while (const std::optional<Handover> handover = give_consumer_.try_pop()) {
             if (!apply_handover(*handover)) {
                 stalled_ = *handover;
                 break;
             }
+            ++handovers_applied_;
         }
     }
     read_commands(block);
@@ -564,7 +580,7 @@ void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_
     // With or without a state block, and before anything is published.
     record_rendered(block, stats);
     if (!status_writer_.has_value() || !mixer_writer_.has_value()) {
-        release_commands(); // No snapshot to wait for.
+        release_held(); // No snapshot to wait for.
         return;
     }
     const std::uint64_t heartbeat = stats.blocks_rendered;
@@ -650,15 +666,16 @@ void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_
     status_writer_->write(status);
 
     write_snapshot(block);
-    release_commands();
+    release_held();
 }
 
-void Engine::release_commands() noexcept KS_NONBLOCKING {
+void Engine::release_held() noexcept KS_NONBLOCKING {
     for (AudioClient& client : audio_clients_) {
         if (client.consumer.has_value()) {
             client.consumer->release();
         }
     }
+    handovers_held_.store(handovers_applied_, std::memory_order_release);
 }
 
 void Engine::write_snapshot(const Block& block) noexcept KS_NONBLOCKING {

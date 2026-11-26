@@ -3,6 +3,7 @@
 
 #include <ks/engine/block.h>
 #include <ks/engine/render_core.h>
+#include <ks/engine/resume.h>
 #include <ks/ipc/command.h>
 #include <ks/ipc/layout.h>
 #include <ks/ipc/seqlock.h>
@@ -543,4 +544,82 @@ TEST_CASE("Engine: commands stay in their ring until a snapshot holds them", "[e
     CHECK(tail() == 1);
     render_block(*second);
     CHECK(tail() == 2);
+}
+
+TEST_CASE("Engine: a handover is held once a snapshot holds it", "[engine][state]") {
+    // The control thread answers a load or an unload only once it's held, so
+    // that an engine that dies first leaves it unanswered rather than lost.
+    const auto state = std::make_unique<ks::ipc::EngineState>();
+    const auto engine = std::make_unique<Engine>(*state);
+    std::vector<float> samples(std::size_t{2} * 4'800, 0.0F);
+    const Track track{samples, kRate, 7};
+    std::vector<std::vector<float>> out(kChannels, std::vector<float>(64, 0.0F));
+    std::vector<std::span<float>> views(out.begin(), out.end());
+    const Block block{
+        .channels = views, .frames = 64, .sample_rate = kRate, .host_time = {}, .resumed = false};
+    const auto snapshot_track = [&] {
+        const std::optional<ks::engine::Snapshot> snapshot = ks::engine::read_snapshot(*state);
+        return snapshot ? snapshot->decks.front().track_id : 0;
+    };
+    CHECK(engine->handovers_given() == 0);
+    CHECK(engine->handovers_held() == 0);
+
+    REQUIRE(engine->load(0, track));
+    CHECK(engine->handovers_given() == 1);
+    // Applied, but no snapshot holds it yet.
+    engine->process(block);
+    REQUIRE(engine->mixer().deck(0).track() == &track);
+    CHECK(engine->handovers_held() == 0);
+    CHECK(snapshot_track() == 0);
+    // rendered() writes the snapshot, and then it's held.
+    engine->rendered(block, ks::engine::RenderStats{.blocks_rendered = 1});
+    CHECK(snapshot_track() == 7);
+    CHECK(engine->handovers_held() == 1);
+
+    REQUIRE(engine->unload(0));
+    CHECK(engine->handovers_given() == 2);
+    engine->process(block);
+    REQUIRE(engine->mixer().deck(0).track() == nullptr);
+    CHECK(engine->handovers_held() == 1);
+    engine->rendered(block, ks::engine::RenderStats{.blocks_rendered = 2});
+    CHECK(snapshot_track() == 0);
+    CHECK(engine->handovers_held() == 2);
+}
+
+TEST_CASE("Engine: a handover that waits is held only once applied", "[engine]") {
+    // Without a state block there's no snapshot to wait for: a handover is
+    // held from the next block on.
+    auto engine = std::make_unique<Engine>();
+    const TestTrack first;
+    const TestTrack second;
+    const std::array<const Track*, 2> alternate{&first.track, &second.track};
+    std::uint64_t given = 0;
+    bool refused = false;
+    for (std::size_t blocks = 0; blocks < 20 && !refused; ++blocks) {
+        for (std::size_t i = 0; i < ks::engine::kHandoverCapacity; ++i) {
+            if (!engine->load(0, *alternate.at(given % 2))) {
+                refused = true;
+                break;
+            }
+            ++given;
+        }
+        render_block(*engine);
+    }
+    REQUIRE(refused);
+    CHECK(engine->handovers_given() == given);
+    // Nothing collected: the waiting load holds up everything behind it.
+    render_block(*engine);
+    const std::uint64_t waiting = engine->handovers_held();
+    CHECK(waiting < given);
+    render_block(*engine);
+    CHECK(engine->handovers_held() == waiting);
+
+    // Collecting lets every load apply, each counted once.
+    for (std::size_t round = 0; round < 100 && engine->handovers_held() < given; ++round) {
+        while (engine->collect().has_value()) {
+        }
+        render_block(*engine);
+    }
+    render_block(*engine);
+    CHECK(engine->handovers_held() == given);
 }
