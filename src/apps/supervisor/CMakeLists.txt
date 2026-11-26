@@ -4,6 +4,7 @@
 # The library holds everything except argument handling, so tests can use it.
 add_library(ks_supervisor STATIC
     journal.cpp
+    journal_writer.cpp
     log_dir.cpp
     log_file.cpp
     options.cpp

@@ -16,12 +16,14 @@
 #include <ks/ipc/state.h>
 #include <ks/ipc/state_dir.h>
 #include <ks/ipc/track_segment.h>
+#include <ks/supervisor/journal.h>
 #include <ks/supervisor/log_dir.h>
 #include <ks/supervisor/log_file.h>
 #include <ks/supervisor/options.h>
 #include <ks/supervisor/orphan.h>
 #include <ks/supervisor/spawn.h>
 
+#include "journal_writer.h"
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
@@ -38,8 +40,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -375,6 +379,11 @@ struct Load {
     std::uint64_t client = 0;
     std::string client_name;
     std::uint32_t client_request = 0;
+    /// The file's size, and its modification time in nanoseconds since the
+    /// Unix epoch, when the supervisor opened it (specs/session-journal/
+    /// spec.md requirement 9).
+    std::uint64_t file_size = 0;
+    std::int64_t file_modified = 0;
     /// The client has had its answer, or been refused.
     bool answered = false;
     /// The client has had its FileLoaded.
@@ -431,6 +440,7 @@ public:
         // No worker outlives the supervisor (specs/track-loading/spec.md
         // requirement 18). After a clean stop, none is left by now.
         stop_workers(Clock::now() + kWorkerStopTimeout);
+        finish_journal();
         return status;
     }
 
@@ -564,6 +574,31 @@ private:
     /// Answers `id` with Unavailable "ks-engine is restarting" and returns
     /// true if a restart is under way (requirement 9).
     bool refuse_while_restarting(Client& client, std::uint32_t id);
+
+    // ---- The session journal (specs/session-journal/spec.md) ----
+
+    /// Starts the journal's writer, if the state folder is locked
+    /// (requirement 8).
+    void start_journal();
+    [[nodiscard]] std::chrono::milliseconds journal_interval() const {
+        return options_->journal_interval_ms
+                   ? std::chrono::milliseconds{*options_->journal_interval_ms}
+                   : kJournalInterval;
+    }
+    [[nodiscard]] std::filesystem::path journal_file() const { return state_dir_ / kJournalName; }
+    /// Records the session, if it's time to (requirement 9), and hands the
+    /// writer what changed (requirement 10). `last` is the last write, after
+    /// the engine has exited (requirement 14).
+    void record_journal(bool last = false);
+    /// Deck `block`'s entry: its track's file, if the supervisor loaded it,
+    /// and the deck's values, as a journal may hold them (requirement 9).
+    [[nodiscard]] std::optional<JournalEntry> journal_entry(const ipc::DeckState& block) const;
+    /// The engine's state, mapped read-only once; null if it can't be.
+    [[nodiscard]] ipc::EngineState* engine_state();
+    /// Reports what the writer's last write did (requirement 13).
+    void check_journal();
+    /// The last write, and the wait for it (requirement 14).
+    void finish_journal();
 
     /// Reads the session's clock, and creates the log folder, the session
     /// folder, and kool_spin.log (specs/logs/spec.md requirement 12). If one
@@ -708,6 +743,22 @@ private:
     std::unique_ptr<ipc::LockFile> state_lock_;
     /// The folders whose engine locks an orphan may hold, in the order to look.
     std::vector<std::filesystem::path> lock_dirs_;
+    /// The state folder's lock is held, or is the runtime directory's: the
+    /// journal may be written (specs/session-journal/spec.md requirement 8).
+    bool state_locked_ = false;
+    /// The journal: its writer, this machine's boot ID, when to record next,
+    /// what was last handed over, and the last valid mixer settings.
+    struct JournalState {
+        std::unique_ptr<JournalWriter> writer;
+        std::optional<std::string> boot;
+        Clock::time_point next;
+        std::optional<Journal> handed;
+        /// The last write failed: it's tried again every interval.
+        bool failing = false;
+        /// The engine whose state is recorded.
+        pid_t engine = 0;
+    };
+    JournalState journal_;
     /// For the log, once it's open: they were said before that.
     std::vector<std::string> early_warnings_;
     std::unique_ptr<ipc::SegmentFactory> factory_;
@@ -833,6 +884,7 @@ int Supervisor::start() {
         return checked;
     }
     open_logs();
+    start_journal();
     if (const int prepared = prepare_loading(); prepared != kExitOk) {
         return prepared;
     }
@@ -937,6 +989,7 @@ int Supervisor::lock_state_dir() {
     state_dir_ = *choice.path;
     std::error_code ignored;
     if (std::filesystem::equivalent(state_dir_, dir_, ignored)) {
+        state_locked_ = true;
         return kExitOk; // One directory, one lock.
     }
     // Whether or not it can be locked: an orphan may have locked it before the
@@ -946,6 +999,7 @@ int Supervisor::lock_state_dir() {
         ipc::LockFile::acquire(state_dir_, ipc::kSupervisorLockName);
     if (lock) {
         state_lock_ = std::make_unique<ipc::LockFile>(std::move(*lock));
+        state_locked_ = true;
         return kExitOk;
     }
     if (lock.error().error == std::errc::resource_unavailable_try_again) {
@@ -957,6 +1011,8 @@ int Supervisor::lock_state_dir() {
     }
     early_warning(std::format("can't lock the state folder {}: {}; {}", state_dir_.string(),
                               lock.error().error.message(), kInstead));
+    early_warning(std::format("without the state folder's lock, the session won't be saved in {}",
+                              (state_dir_ / kJournalName).string()));
     return kExitOk;
 }
 
@@ -1123,6 +1179,7 @@ std::expected<void, std::string> Supervisor::spawn_engine(bool clean) {
     }
     stop_watch();
     engine_pid_ = *pid;
+    journal_.engine = *pid;
     engine_ = std::make_unique<ipc::Connection>(std::move(pair->first));
     info(std::format("started ks-engine (process {})", engine_pid_));
     deadline_ = Clock::now() + ready_timeout();
@@ -1565,6 +1622,11 @@ int Supervisor::poll_wait() const {
             const auto watch = static_cast<int>(heartbeat_poll().count());
             timeout = std::min(timeout, watch);
         }
+        // And the journal's (specs/session-journal/spec.md requirement 9).
+        if (journal_.writer && phase_ == Phase::Running) {
+            const int journal = poll_timeout(journal_.next);
+            timeout = timeout == -1 ? journal : std::min(timeout, journal);
+        }
     }
     return timeout;
 }
@@ -1628,6 +1690,8 @@ std::optional<int> Supervisor::step() {
     // Closes each finished load's segment, and frees what it counted.
     std::erase_if(loads_, [](const std::unique_ptr<Load>& load) { return load->over(); });
     watch_engine();
+    record_journal();
+    check_journal();
     return deadline_passed();
 }
 
@@ -2223,6 +2287,221 @@ void Supervisor::flush_clients() {
     }
 }
 
+// ---- The session journal (specs/session-journal/spec.md) ---------------------------
+
+namespace {
+
+/// A position or cue point as a journal may hold it: finite, from 0 to
+/// kMaxTrackFrames; 0 if it isn't finite (requirement 9).
+double journal_frames(double frames) {
+    return std::isfinite(frames)
+               ? std::clamp(frames, 0.0, static_cast<double>(ipc::kMaxTrackFrames))
+               : 0.0;
+}
+
+double journal_rate(double rate) {
+    return std::isfinite(rate) ? std::clamp(rate, -ipc::kMaxDeckRate, ipc::kMaxDeckRate) : 1.0;
+}
+
+double real_of(std::uint64_t code) {
+    return std::bit_cast<double>(code);
+}
+
+/// A MixerState's settings, as a journal holds them; nothing if a side isn't
+/// a side's code.
+std::optional<JournalMixer> journal_mixer(const ipc::MixerState& block) {
+    JournalMixer mixer;
+    for (std::size_t i = 0; i < kJournalDecks; ++i) {
+        const ipc::ChannelState& from = std::span{block.channels}[i];
+        JournalChannel& to = std::span{mixer.channels}[i];
+        to.trim_db = real_of(from.trim_db);
+        to.fader = real_of(from.fader);
+        switch (from.side) {
+        case 0:
+            to.side = JournalSide::A;
+            break;
+        case 1:
+            to.side = JournalSide::B;
+            break;
+        case 2:
+            to.side = JournalSide::Thru;
+            break;
+        default:
+            return std::nullopt;
+        }
+        to.cue = from.cue != 0;
+    }
+    mixer.crossfader = real_of(block.crossfader);
+    mixer.crossfader_transition = real_of(block.crossfader_transition);
+    mixer.main_level_db = real_of(block.main_level_db);
+    mixer.headphone_level_db = real_of(block.headphone_level_db);
+    mixer.cue_mix = real_of(block.cue_mix);
+    mixer.bus_main = static_cast<std::uint32_t>(std::min<std::uint64_t>(block.bus_main, 1'000));
+    mixer.bus_cue = static_cast<std::uint32_t>(std::min<std::uint64_t>(block.bus_cue, 1'000));
+    return mixer;
+}
+
+/// `journal` with its time left out, to tell whether anything else changed
+/// (requirement 10).
+Journal timeless(Journal journal) {
+    journal.time = 0;
+    return journal;
+}
+
+} // namespace
+
+void Supervisor::start_journal() {
+    if (state_dir_.empty() || !state_locked_) {
+        return;
+    }
+    journal_.writer = JournalWriter::start(state_dir_, options_->journal_stall_after);
+    if (!journal_.writer) {
+        warning(std::format("can't start the session journal's writer; the session won't be saved "
+                            "in {}",
+                            journal_file().string()));
+        return;
+    }
+    journal_.boot = boot_id();
+    journal_.next = Clock::now();
+}
+
+std::optional<JournalEntry> Supervisor::journal_entry(const ipc::DeckState& block) const {
+    if (block.heartbeat == 0 || (block.flags & ipc::kDeckLoaded) == 0 || block.track_id == 0) {
+        return std::nullopt;
+    }
+    const auto load = std::ranges::find(loads_, block.track_id,
+                                        [](const std::unique_ptr<Load>& l) { return l->track_id; });
+    if (load == loads_.end()) {
+        return std::nullopt;
+    }
+    const auto valid_rate = [](std::uint64_t rate) {
+        return rate >= ipc::kMinTrackRate && rate <= ipc::kMaxTrackRate;
+    };
+    std::uint64_t rate = block.track_sample_rate;
+    if (!valid_rate(rate) && (*load)->probed) {
+        rate = (*load)->probed->sample_rate;
+    }
+    if (!valid_rate(rate)) {
+        return std::nullopt;
+    }
+    return JournalEntry{.path = (*load)->path,
+                        .size = (*load)->file_size,
+                        .modified = (*load)->file_modified,
+                        .sample_rate = static_cast<std::uint32_t>(rate),
+                        .position = journal_frames(real_of(block.position)),
+                        .rate = journal_rate(real_of(block.rate)),
+                        .cue = journal_frames(real_of(block.cue)),
+                        .playing = (block.flags & ipc::kDeckPlaying) != 0};
+}
+
+ipc::EngineState* Supervisor::engine_state() {
+    if (!watch_.state_view) {
+        std::expected<ipc::Region, ipc::MapFailure> region =
+            ipc::Region::map(state_.get(), ipc::SegmentKind::EngineState,
+                             ipc::kEngineStateLayoutVersion, ipc::Access::ReadOnly);
+        if (!region) {
+            return nullptr;
+        }
+        watch_.state_view = std::make_unique<ipc::Region>(std::move(*region));
+    }
+    // at() checks against the size of the supervisor's own mapping.
+    return watch_.state_view->at<ipc::EngineState>(ipc::kSegmentHeaderSize);
+}
+
+void Supervisor::record_journal(bool last) {
+    if (!journal_.writer) {
+        return;
+    }
+    const Clock::time_point now = Clock::now();
+    if (!last) {
+        if (phase_ != Phase::Running || restarting_ || engine_pid_ <= 0 || now < journal_.next) {
+            return;
+        }
+        journal_.next = now + journal_interval();
+    }
+    ipc::EngineState* const state = engine_state();
+    if (state == nullptr) {
+        return;
+    }
+
+    Journal journal = journal_.handed.value_or(Journal{});
+    journal.boot = journal_.boot;
+    journal.engine = static_cast<std::int32_t>(journal_.engine);
+    {
+        // Every call into a seqlock runs inside this (see SignalsBlocked).
+        const SignalsBlocked blocked;
+        // The segment is new at launch: a heartbeat means that this launch's
+        // engine has rendered (requirement 16).
+        const std::optional<ipc::EngineStatus> status =
+            ipc::SeqlockReader<ipc::EngineStatus>{state->status}.try_read(1'000);
+        if (!status || status->heartbeat == 0) {
+            return;
+        }
+        journal.time = std::max<std::int64_t>(std::bit_cast<std::int64_t>(status->host_time), 0);
+        for (std::size_t i = 0; i < kJournalDecks; ++i) {
+            // A deck that can't be read is left as it was last time.
+            if (const std::optional<ipc::DeckState> block =
+                    ipc::SeqlockReader<ipc::DeckState>{std::span{state->decks}[i]}.try_read(
+                        1'000)) {
+                std::span{journal.decks}[i] = journal_entry(*block);
+            }
+        }
+        if (const std::optional<ipc::MixerState> mixer =
+                ipc::SeqlockReader<ipc::MixerState>{state->mixer}.try_read(1'000);
+            mixer && mixer->heartbeat != 0) {
+            // Settings that aren't valid leave the last valid ones.
+            if (const std::optional<JournalMixer> settings = journal_mixer(*mixer)) {
+                Journal candidate;
+                candidate.mixer = *settings;
+                if (allowed(candidate)) {
+                    journal.mixer = *settings;
+                }
+            }
+        }
+    }
+    if (!allowed(journal)) {
+        return;
+    }
+    const bool changed = !journal_.handed || timeless(*journal_.handed) != timeless(journal);
+    if (changed || journal_.failing || last) {
+        journal_.writer->submit(format(journal));
+    }
+    journal_.handed = std::move(journal);
+}
+
+void Supervisor::check_journal() {
+    if (!journal_.writer) {
+        return;
+    }
+    const std::optional<JournalWriter::Result> result = journal_.writer->take_result();
+    if (!result) {
+        return;
+    }
+    if (result->error && !journal_.failing) {
+        journal_.failing = true;
+        warning(std::format("can't write the session journal {}: {}; the session isn't being saved",
+                            journal_file().string(), result->error->message()));
+    } else if (!result->error && journal_.failing) {
+        journal_.failing = false;
+        info(std::format("the session journal {} is being written again", journal_file().string()));
+    }
+}
+
+void Supervisor::finish_journal() {
+    if (!journal_.writer) {
+        return;
+    }
+    record_journal(true);
+    if (!journal_.writer->wait_idle(Clock::now() + kJournalExitTimeout)) {
+        warning(std::format("the session journal {} wasn't written: its last write didn't finish "
+                            "in {} s",
+                            journal_file().string(), kJournalExitTimeout.count()));
+    } else {
+        check_journal();
+    }
+    journal_.writer.reset();
+}
+
 // ---- Loading tracks (specs/track-loading/spec.md) -----------------------------------
 
 int Supervisor::prepare_loading() {
@@ -2286,6 +2565,16 @@ void Supervisor::load_file(Client& client, std::uint32_t id, const ipc::msg::Loa
     }
 
     auto load = std::make_unique<Load>();
+    struct stat status{};
+    if (::fstat(file->get(), &status) == 0) {
+        load->file_size = static_cast<std::uint64_t>(status.st_size);
+#ifdef __APPLE__
+        const timespec modified = status.st_mtimespec;
+#else
+        const timespec modified = status.st_mtim;
+#endif
+        load->file_modified = (std::int64_t{modified.tv_sec} * 1'000'000'000) + modified.tv_nsec;
+    }
     load->deck = request.deck;
     load->path = request.path;
     load->client = client.id;

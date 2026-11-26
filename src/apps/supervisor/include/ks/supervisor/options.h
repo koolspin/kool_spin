@@ -58,6 +58,12 @@ struct Options {
     /// `--stop-previous`: stop an engine from an earlier session without
     /// asking (specs/supervisor-crash/spec.md requirement 5).
     bool stop_previous = false;
+    /// `--journal-interval <ms>`: how often the session is recorded, 1 to
+    /// 3,600,000 (specs/session-journal/spec.md requirements 9 and 30).
+    std::optional<std::uint64_t> journal_interval_ms;
+    /// `--journal-stall-after <n>`, for tests only: the journal's writer
+    /// stalls on its nth write, 1 to 1,000 (requirement 31).
+    std::optional<std::uint32_t> journal_stall_after;
     /// Everything after "--", for ks-engine, unchecked.
     std::vector<std::string> engine_args;
     bool help = false;
