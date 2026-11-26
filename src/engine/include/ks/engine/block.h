@@ -5,6 +5,7 @@
 /// Blocks: the frames one call to the render core produces (ADR 0003 §1, §3).
 
 #include <ks/core/realtime.h>
+#include <ks/ipc/state.h>
 
 #include <chrono>
 #include <cstddef>
@@ -18,7 +19,7 @@ namespace ks::engine {
 inline constexpr std::size_t kMaxBlockFrames = 512;
 
 /// The most output channels the engine renders.
-inline constexpr std::size_t kMaxOutputChannels = 8;
+inline constexpr std::size_t kMaxOutputChannels = ipc::kMaxOutputChannels;
 
 /// What one call to the render core renders.
 ///
