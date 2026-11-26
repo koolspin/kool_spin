@@ -403,10 +403,13 @@ TEST_CASE("Journal write: a writer that hangs", "[journal][write]") {
 
     const auto stopping = restart::Clock::now();
     p.session.process().signal(SIGTERM);
-    const Ms limit = kSlowSanitizer ? Ms{3'500} : Ms{2'500};
-    CHECK(p.session.process().wait(limit) == 0);
-    CAPTURE(std::chrono::duration_cast<Ms>(restart::Clock::now() - stopping).count());
+    // Under ThreadSanitizer, a process whose other threads still run sleeps
+    // 1 s at exit (its atexit_sleep_ms), and the stalled writer always does.
+    const Ms limit = kSlowSanitizer ? Ms{5'000} : Ms{2'500};
+    const std::optional<int> outcome = p.session.process().wait(limit);
+    CAPTURE(outcome, std::chrono::duration_cast<Ms>(restart::Clock::now() - stopping).count());
     CAPTURE(p.session.stderr_text());
+    CHECK(outcome == 0);
     CHECK(has(p.session.stderr_text(), journal_path(state.path()).string()));
 }
 
