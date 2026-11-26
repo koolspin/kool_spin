@@ -85,7 +85,7 @@ A bug must never become a full-scale blast through a PA.
 - Users' music files are never modified unless they opt in.
 - One process owns the library database. SQLite runs in WAL mode with `synchronous=FULL`, and bulk writes are batched.
 - Rotating database backups are made at startup.
-- The session journal (loaded tracks, positions, cue points, mixer state) is written atomically at least once a second. After an engine crash, the engine resumes playing. After an app or system restart, the session is restored with decks paused.
+- The session journal (loaded tracks, positions, cue points, mixer state) is written atomically, within a second of any change. After an engine crash, the engine resumes playing. After an app or system restart, the session is restored with decks paused.
 
 ### 7. Environment checks and power management
 
