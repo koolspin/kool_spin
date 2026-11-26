@@ -163,7 +163,19 @@ public:
     /// there's none (specs/audio-events/spec.md requirement 4).
     [[nodiscard]] std::optional<AudioEvent> take_event() noexcept;
 
+    /// How many handovers load(), unload(), attach(), attach_at(), and
+    /// detach() have given so far. The one a call just gave is number
+    /// handovers_given().
+    [[nodiscard]] std::uint64_t handovers_given() const noexcept;
+
     // Any thread.
+
+    /// How many of the handovers given are held: applied, and, if the engine
+    /// was built with a state block, in a resume slot written since. An
+    /// engine that dies first resumes without the rest, so the control thread
+    /// answers a load or an unload only once it's held (ADR 0003 §11). It
+    /// only goes up.
+    [[nodiscard]] std::uint64_t handovers_held() const noexcept KS_NONBLOCKING;
 
     /// The events dropped so far because the event ring was full
     /// (specs/audio-events/spec.md requirements 3 and 4). It only goes up.
@@ -254,11 +266,13 @@ private:
     /// Reads each client's commands, and records the block's rejections and
     /// newly corrupt rings, at `block`'s host time.
     void read_commands(const Block& block) noexcept KS_NONBLOCKING;
-    /// Hands the commands read so far back to their rings' producers. Called
-    /// once the snapshot that includes them is written: an engine that dies
-    /// before then leaves them in the rings, and the next engine applies them
-    /// again (ADR 0003 §4 and §11; commands are absolute).
-    void release_commands() noexcept KS_NONBLOCKING;
+    /// Hands the commands read so far back to their rings' producers, and
+    /// publishes the handovers applied so far as held. Called once the
+    /// snapshot that includes them is written: an engine that dies before
+    /// then leaves the commands in the rings, and the next engine applies
+    /// them again (ADR 0003 §4 and §11; commands are absolute), and the
+    /// handovers unanswered.
+    void release_held() noexcept KS_NONBLOCKING;
     /// Pushes `event` to the event ring, or counts it as dropped if the ring
     /// is full (specs/audio-events/spec.md requirement 3).
     void record(const AudioEvent& event) noexcept KS_NONBLOCKING;
@@ -301,12 +315,16 @@ private:
     ipc::SpscRing<AudioEvent, kAudioEventCapacity> event_ring_{};
     /// Written only by the audio thread, from dropped_.
     std::atomic<std::uint64_t> dropped_events_{0};
+    /// Written only by the audio thread, from handovers_applied_.
+    std::atomic<std::uint64_t> handovers_held_{0};
 
     // Control thread.
     ipc::RingProducer<Handover, kHandoverCapacity> give_producer_{give_ring_};
     ipc::RingConsumer<Released, kHandoverCapacity> retire_consumer_{retire_ring_};
     ipc::RingConsumer<AudioEvent, kAudioEventCapacity> event_consumer_{event_ring_};
     std::array<ControlClient, kMaxClients> control_clients_{};
+    /// Handovers pushed to the give ring.
+    std::uint64_t handovers_given_ = 0;
 
     // Audio thread.
     ipc::RingConsumer<Handover, kHandoverCapacity> give_consumer_{give_ring_};
@@ -314,6 +332,8 @@ private:
     ipc::RingProducer<AudioEvent, kAudioEventCapacity> event_producer_{event_ring_};
     /// Events dropped because the event ring was full.
     std::uint64_t dropped_ = 0;
+    /// Handovers applied, in the order given; the stalled one isn't yet.
+    std::uint64_t handovers_applied_ = 0;
     /// The render core's counts in the last call to rendered()
     /// (specs/audio-events/spec.md requirement 2).
     std::uint64_t last_late_blocks_ = 0;
