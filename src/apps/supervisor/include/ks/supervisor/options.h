@@ -58,6 +58,9 @@ struct Options {
     /// `--stop-previous`: stop an engine from an earlier session without
     /// asking (specs/supervisor-crash/spec.md requirement 5).
     bool stop_previous = false;
+    /// `--new-session`: don't restore the session from the journal
+    /// (specs/session-journal/spec.md requirement 30).
+    bool new_session = false;
     /// `--journal-interval <ms>`: how often the session is recorded, 1 to
     /// 3,600,000 (specs/session-journal/spec.md requirements 9 and 30).
     std::optional<std::uint64_t> journal_interval_ms;
