@@ -102,7 +102,7 @@ Exit criteria:
 - Session journal, written by the supervisor. The previous session is restored, paused, at launch.
   - **Step 9a, the state folder and its locks: done** (`specs/state-folder/spec.md`). The supervisor and the engine also hold a lock in the journal's folder, best effort, so a relaunch finds an orphan in another runtime directory, or in one that has been removed.
   - **Step 9b, writing the journal: done** (`specs/session-journal/spec.md`). The supervisor records the decks and the mixer in `session.journal`, written atomically by its own thread whenever something changed, and the parser is fuzzed.
-  - Step 9c: restoring the session at launch, paused, from the same spec.
+  - **Step 9c, restoring the session: done** (`specs/session-journal/spec.md`). At launch, before the engine starts, the supervisor restores the decks and the mixer from the journal, paused, through a resume slot and `--track`. Entries it can't restore are kept in the journal for the next launch; a changed file starts at 0; after an orphan, playing decks move on by the time it played on.
 - Per-process logs through shared memory, with shared timestamps.
 - Health checks reported by `ks-play`: real-time priority, memory locking, CPU power profile, battery. System sleep is blocked while decks are loaded.
 
@@ -115,7 +115,7 @@ Exit criteria:
 - [x] `[auto]` Killing the supervisor with `kill -9` leaves playback running. Relaunching reports the running engine and can stop it. *"Supervisor crash: playback has no gap", "Relaunch: without a terminal, the engine is left running", and "Relaunch: --stop-previous stops it and starts a session" (step 8). The manual check on the Inpulse 500 is still to do.*
 - [x] `[auto]` Corrupted shared state makes the engine start clean with decks paused; it never crashes. *"Engine process: corrupted state starts clean" (step 7a), and the crash-loop guard's clean restart.*
 - [x] `[auto]` Deleting a playing track's file doesn't interrupt playback. *"Supervisor tracks: deleting the file while it plays" (pull request #39): a 10-minute WAV is deleted as soon as it loads, and it still decodes in full while the deck plays on, on Linux and macOS. The recorded output has no gap: "Chaos: killing a client, a worker, or a file leaves no gap" (step 7a).*
-- [ ] `[auto]` After all processes are killed, relaunching restores the previous session with decks paused.
+- [x] `[auto]` After all processes are killed, relaunching restores the previous session with decks paused. *"Journal restore: after everything is killed" (step 9c): two decks, their rates, cue points, and the mixer come back, each deck within a block of the journal's position.*
 - [ ] `[manual]` Removing the USB drive that holds a playing track doesn't interrupt it.
 - [ ] `[manual]` The one-hour soak test passes again with all processes running, driven through `ks-play`.
 - [ ] `[manual]` After a reboot, launching restores the previous session with decks paused.

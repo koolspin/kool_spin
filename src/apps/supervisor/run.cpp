@@ -13,6 +13,7 @@
 #include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
 #include <ks/ipc/segment.h>
+#include <ks/ipc/seqlock.h>
 #include <ks/ipc/state.h>
 #include <ks/ipc/state_dir.h>
 #include <ks/ipc/track_segment.h>
@@ -58,6 +59,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -288,10 +290,28 @@ std::expected<ipc::Fd, std::string> open_track_file(const std::string& path) {
     return file;
 }
 
+/// The size and modification time, in nanoseconds since the Unix epoch, of
+/// the open file `fd`, as a journal entry holds them; zeros if they can't be
+/// read (specs/session-journal/spec.md requirement 9).
+std::pair<std::uint64_t, std::int64_t> file_facts(int fd) {
+    struct stat status{};
+    if (::fstat(fd, &status) != 0) {
+        return {0, 0};
+    }
+#ifdef __APPLE__
+    const timespec modified = status.st_mtimespec;
+#else
+    const timespec modified = status.st_mtim;
+#endif
+    return {static_cast<std::uint64_t>(status.st_size),
+            (std::int64_t{modified.tv_sec} * 1'000'000'000) + modified.tv_nsec};
+}
+
 // ---- The supervisor -----------------------------------------------------------
 
 /// What the supervisor is doing.
 enum class Phase : std::uint8_t {
+    Restoring,   ///< Restoring the session from the journal; no engine yet.
     Starting,    ///< Waiting for Ready.
     Running,     ///< Listening for clients.
     Stopping,    ///< Asked the engine to stop; waiting for it to exit.
@@ -384,6 +404,10 @@ struct Load {
     /// spec.md requirement 9).
     std::uint64_t file_size = 0;
     std::int64_t file_modified = 0;
+    /// Restored from the session journal, for no client: the first engine
+    /// gets its track with --track (specs/session-journal/spec.md
+    /// requirement 19).
+    bool restored = false;
     /// The client has had its answer, or been refused.
     bool answered = false;
     /// The client has had its FileLoaded.
@@ -600,6 +624,50 @@ private:
     /// The last write, and the wait for it (requirement 14).
     void finish_journal();
 
+    // ---- Restoring the session (specs/session-journal/spec.md) ----
+
+    /// Reads the journal, and starts restoring the session from it, or, with
+    /// nothing to restore, starts the engine (requirements 17 to 19). Returns
+    /// kExitOk, or reports and returns kExitStartFailed.
+    int begin_restore();
+    /// Starts the engine as at any launch, with nothing restored. Returns
+    /// kExitOk, or reports and returns kExitStartFailed.
+    int start_without_session();
+    /// The journal to restore, if there's a state folder and a journal that
+    /// parse() accepts. Reports one that's refused, and keeps it as
+    /// kRejectedJournalName (requirement 18).
+    std::optional<Journal> read_session_journal();
+    /// Opens deck `deck`'s file and starts its worker (requirement 19).
+    void restore_entry(std::size_t deck);
+    /// Handles a restored load's Probed (requirements 19 and 23).
+    void restore_probed(Load& load, const ipc::msg::Probed& probed);
+    /// Gives up on deck `deck`'s entry, says why, and carries it
+    /// (requirements 22 and 24).
+    void give_up(std::size_t deck, std::string_view why);
+    /// The same for `load`, if its deck is still being restored.
+    void give_up(const Load& load, std::string_view why);
+    /// Once no entry is being probed, finishes restoring. Returns the exit
+    /// status if the supervisor must exit.
+    std::optional<int> settle_restore();
+    /// Writes the resume slot and starts the engine with the restored tracks
+    /// (requirements 25 and 26). Returns the exit status if the engine can't
+    /// be started.
+    std::optional<int> finish_restore();
+    /// The load of track `track_id`, or null.
+    [[nodiscard]] Load* find_load(std::uint64_t track_id);
+    /// Writes `slot` to its resume slot, by its generation, through a seqlock
+    /// writer. False if the segment can't be mapped.
+    bool write_resume_slot(const ipc::ResumeState& slot);
+    /// True if the first engine of a launch that restored a session has
+    /// failed, and may be started clean instead (requirement 27).
+    [[nodiscard]] bool may_start_clean() const {
+        return restored_session_ && !started_clean_ && !had_ready_ && !stopping();
+    }
+    /// Says that the engine `how` with the restored session, carries the
+    /// restored entries, and starts one clean. Returns the exit status if it
+    /// can't be started.
+    std::optional<int> start_clean(std::string_view how);
+
     /// Reads the session's clock, and creates the log folder, the session
     /// folder, and kool_spin.log (specs/logs/spec.md requirement 12). If one
     /// can't be created, warns once, and the supervisor runs without log
@@ -686,6 +754,14 @@ private:
     void handle_worker_message(Load& load, const ipc::Message& message);
     /// Handles a worker's Probed (requirement 12).
     void probed(Load& load, const ipc::msg::Probed& probed);
+    /// Why create_track() couldn't: the code to answer a client with.
+    struct TrackRefusal {
+        ipc::ErrorCode code;
+        std::string why;
+    };
+    /// Checks the budget for `load`'s track, and creates and maps its segment
+    /// (requirement 16).
+    std::expected<void, TrackRefusal> create_track(Load& load, const ipc::msg::Probed& probed);
     /// Handles a worker's Decoded.
     void decoded(Load& load, const ipc::msg::Decoded& decoded);
     /// Records how `load`'s decoding ended (specs/ks-play/spec.md
@@ -759,6 +835,40 @@ private:
         pid_t engine = 0;
     };
     JournalState journal_;
+    /// Restoring the session: the journal, and how each deck's entry is
+    /// getting on (specs/session-journal/spec.md requirements 17 to 25).
+    enum class RestoreStatus : std::uint8_t {
+        None,     ///< The journal has no entry for it.
+        Probing,  ///< Its worker has been started.
+        Restored, ///< Its track is decoding, for the first engine.
+        GivenUp,  ///< It wasn't restored, and is carried.
+    };
+    struct RestoreDeck {
+        RestoreStatus status = RestoreStatus::None;
+        /// The journal's entry for it.
+        JournalEntry entry;
+        std::uint64_t track_id = 0;
+    };
+    struct Restore {
+        /// The journal, but for its decks, which are in `decks`.
+        Journal journal;
+        std::array<RestoreDeck, kJournalDecks> decks{};
+    };
+    /// Only while the phase is Restoring.
+    Restore restore_;
+    /// Entries that weren't restored, kept in the journal until a client
+    /// loads or unloads the deck (requirement 24).
+    std::array<std::optional<JournalEntry>, kJournalDecks> carried_{};
+    /// Each restored deck's entry, as restored: carried if the first engine
+    /// fails with it (requirement 27).
+    std::array<std::optional<JournalEntry>, kJournalDecks> restored_{};
+    /// The engine from an earlier session that this launch stopped, and when
+    /// it was sent SIGTERM, or found gone (requirement 26).
+    struct StoppedOrphan {
+        pid_t pid = 0;
+        Clock::time_point at;
+    };
+    std::optional<StoppedOrphan> stopped_orphan_;
     /// For the log, once it's open: they were said before that.
     std::vector<std::string> early_warnings_;
     std::unique_ptr<ipc::SegmentFactory> factory_;
@@ -794,6 +904,11 @@ private:
     /// A replacement engine is starting, or its rings are being attached
     /// (requirement 9).
     bool restarting_ = false;
+    /// A resume slot was written for the first engine; and that engine
+    /// failed, and one was started clean (specs/session-journal/spec.md
+    /// requirement 27).
+    bool restored_session_ = false;
+    bool started_clean_ = false;
     /// When the engines that ended in the crash-loop window ended.
     std::vector<Clock::time_point> exits_;
     /// How many times an engine has been restarted, and when the last one
@@ -960,11 +1075,7 @@ int Supervisor::start() {
         return stopped;
     }
     open_engine_log();
-    if (const std::expected<void, std::string> started = spawn_engine(false); !started) {
-        error(started.error());
-        return kExitStartFailed;
-    }
-    return kExitOk;
+    return begin_restore();
 }
 
 int Supervisor::lock_state_dir() {
@@ -1085,6 +1196,9 @@ int Supervisor::stop_previous_engine() {
                           engine_path_.string()));
         return kExitStartFailed;
     }
+    // stop_orphan() sends SIGTERM, if the orphan is still there, as soon as
+    // it has checked the lock.
+    stopped_orphan_ = StoppedOrphan{.pid = *previous_engine_, .at = Clock::now()};
     const std::expected<Stopped, std::string> stopped =
         stop_orphan(previous_dir_, *previous_engine_, sleep_for);
     if (!stopped) {
@@ -1692,12 +1806,22 @@ std::optional<int> Supervisor::step() {
     watch_engine();
     record_journal();
     check_journal();
+    if (const std::optional<int> status = settle_restore()) {
+        return status;
+    }
     return deadline_passed();
 }
 
 std::optional<int> Supervisor::handle_signals() {
     for (const int signal : signals_->take()) {
         if (signal != SIGCHLD) {
+            if (phase_ == Phase::Restoring) {
+                // No engine yet: the workers stop as the supervisor exits, and
+                // the journal is left as it was (specs/session-journal/spec.md
+                // requirement 28).
+                info(std::format("stopping: got signal {} while restoring the session", signal));
+                return kExitOk;
+            }
             begin_stop(std::format("got signal {}", signal));
             continue;
         }
@@ -1731,8 +1855,12 @@ std::optional<int> Supervisor::engine_exited(int status) {
         return forced_status_;
     }
     switch (phase_) {
+    case Phase::Restoring: // No engine runs yet.
     case Phase::Starting:
         if (!had_ready_) {
+            if (may_start_clean()) {
+                return start_clean(how);
+            }
             error(std::format("ks-engine {} before it was ready", how));
             return kExitStartFailed;
         }
@@ -2039,9 +2167,10 @@ void Supervisor::engine_failed(std::string_view why) {
         // It's on its way out: wait for it.
         return;
     }
-    if (had_ready_) {
-        // A session is running: kill it, and carry on with a new engine when
-        // it's been reaped (requirement 1).
+    if (had_ready_ || may_start_clean()) {
+        // A session is running, or one was restored: kill it, and carry on
+        // with a new engine when it's been reaped (requirement 1), or a clean
+        // one (specs/session-journal/spec.md requirement 27).
         error(std::format("ks-engine's connection {}; killing it", why));
         ::kill(engine_pid_, SIGKILL);
         return;
@@ -2231,11 +2360,29 @@ std::optional<int> Supervisor::deadline_passed() {
         return std::nullopt;
     }
     switch (phase_) {
+    case Phase::Restoring:
+        for (std::size_t deck = 0; deck < kJournalDecks; ++deck) {
+            const RestoreDeck& restoring = std::span{restore_.decks}[deck];
+            if (restoring.status != RestoreStatus::Probing) {
+                continue;
+            }
+            give_up(deck,
+                    std::format("it wasn't probed within {} s", kRestoreProbeTimeout.count()));
+            if (Load* const load = find_load(restoring.track_id)) {
+                load->answered = true;
+                close_worker(*load, {}, true);
+            }
+        }
+        return finish_restore();
     case Phase::Starting:
         error(std::format("ks-engine didn't report ready within {} ms; killing it",
                           ready_timeout().count()));
         kill_engine();
         if (!had_ready_) {
+            if (may_start_clean()) {
+                return start_clean(
+                    std::format("didn't report ready within {} ms", ready_timeout().count()));
+            }
             return kExitStartFailed;
         }
         return engine_gone();
@@ -2443,7 +2590,8 @@ void Supervisor::record_journal(bool last) {
             if (const std::optional<ipc::DeckState> block =
                     ipc::SeqlockReader<ipc::DeckState>{std::span{state->decks}[i]}.try_read(
                         1'000)) {
-                std::span{journal.decks}[i] = journal_entry(*block);
+                std::optional<JournalEntry> entry = journal_entry(*block);
+                std::span{journal.decks}[i] = entry ? std::move(entry) : std::span{carried_}[i];
             }
         }
         if (const std::optional<ipc::MixerState> mixer =
@@ -2500,6 +2648,338 @@ void Supervisor::finish_journal() {
         check_journal();
     }
     journal_.writer.reset();
+}
+
+// ---- Restoring the session (specs/session-journal/spec.md) -------------------------
+
+int Supervisor::begin_restore() {
+    std::optional<Journal> journal = read_session_journal();
+    if (!journal) {
+        return start_without_session();
+    }
+    if (std::ranges::none_of(journal->decks, [](const auto& e) { return e.has_value(); }) &&
+        journal->mixer == JournalMixer{}) {
+        info(std::format("the session journal {} has nothing to restore", journal_file().string()));
+        return start_without_session();
+    }
+    info(std::format("restoring the session from {}", journal_file().string()));
+    restore_ = Restore{};
+    for (std::size_t deck = 0; deck < kJournalDecks; ++deck) {
+        if (std::optional<JournalEntry>& entry = std::span{journal->decks}[deck]) {
+            RestoreDeck& restoring = std::span{restore_.decks}[deck];
+            restoring.status = RestoreStatus::Probing;
+            restoring.entry = std::exchange(entry, std::nullopt).value_or(JournalEntry{});
+        }
+    }
+    restore_.journal = std::move(*journal);
+    phase_ = Phase::Restoring;
+    for (std::size_t deck = 0; deck < kJournalDecks; ++deck) {
+        if (std::span{restore_.decks}[deck].status == RestoreStatus::Probing) {
+            restore_entry(deck);
+        }
+    }
+    return settle_restore().value_or(kExitOk);
+}
+
+int Supervisor::start_without_session() {
+    if (const std::expected<void, std::string> started = spawn_engine(false); !started) {
+        error(started.error());
+        return kExitStartFailed;
+    }
+    return kExitOk;
+}
+
+std::optional<Journal> Supervisor::read_session_journal() {
+    if (state_dir_.empty()) {
+        return std::nullopt;
+    }
+    if (options_->new_session) {
+        info("--new-session: the session isn't restored");
+        return std::nullopt;
+    }
+    const std::filesystem::path path = journal_file();
+    const auto refuse = [&](std::string_view why) {
+        warning(std::format("can't restore the session: {}; it starts with empty decks", why));
+    };
+    const auto system_error = [](int code) {
+        return std::error_code{code, std::system_category()}.message();
+    };
+    int fd = -1;
+    for (;;) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): open() is variadic
+        fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (fd != -1 || errno != EINTR) {
+            break;
+        }
+    }
+    if (fd == -1) {
+        const int failed = errno;
+        if (failed == ENOENT) {
+            info("no session to restore");
+        } else if (failed == ELOOP) {
+            refuse(std::format("{} isn't a regular file", path.string()));
+        } else {
+            refuse(std::format("can't read {}: {}", path.string(), system_error(failed)));
+        }
+        return std::nullopt;
+    }
+    const ipc::Fd file{fd};
+    struct stat status{};
+    if (::fstat(file.get(), &status) != 0 || !S_ISREG(status.st_mode)) {
+        refuse(std::format("{} isn't a regular file", path.string()));
+        return std::nullopt;
+    }
+    // One byte more than parse() takes, so that it refuses a longer journal.
+    std::vector<std::byte> text(kMaxJournalSize + 1);
+    std::size_t size = 0;
+    while (size < text.size()) {
+        const std::span<std::byte> rest = std::span{text}.subspan(size);
+        const ssize_t got = ::read(file.get(), rest.data(), rest.size());
+        if (got == -1 && errno == EINTR) {
+            continue;
+        }
+        if (got == -1) {
+            refuse(std::format("can't read {}: {}", path.string(), system_error(errno)));
+            return std::nullopt;
+        }
+        if (got == 0) {
+            break;
+        }
+        size += static_cast<std::size_t>(got);
+    }
+    std::expected<Journal, std::string> journal = parse(std::span{text}.first(size));
+    if (journal) {
+        return std::move(*journal);
+    }
+    // Kept for a look, so that the new session doesn't overwrite it; only with
+    // the lock, since renaming is writing (requirement 8).
+    const std::filesystem::path rejected = state_dir_ / kRejectedJournalName;
+    std::string kept = "it's left where it is";
+    if (state_locked_) {
+        std::error_code renamed;
+        std::filesystem::rename(path, rejected, renamed);
+        kept = renamed
+                   ? std::format("it can't be kept as {}: {}", rejected.string(), renamed.message())
+                   : std::format("it's kept as {}", rejected.string());
+    }
+    refuse(std::format("{} is refused: {}; {}", path.string(), journal.error(), kept));
+    return std::nullopt;
+}
+
+void Supervisor::restore_entry(std::size_t deck) {
+    RestoreDeck& restoring = std::span{restore_.decks}[deck];
+    std::expected<ipc::Fd, std::string> file = open_track_file(restoring.entry.path);
+    if (!file) {
+        give_up(deck, file.error());
+        return;
+    }
+    auto load = std::make_unique<Load>();
+    std::tie(load->file_size, load->file_modified) = file_facts(file->get());
+    load->deck = static_cast<std::uint32_t>(deck);
+    load->path = restoring.entry.path;
+    load->restored = true;
+    open_worker_log();
+    if (const std::expected<void, std::string> started = start_worker(*load); !started) {
+        give_up(deck, "can't start ks-worker: " + started.error());
+        return;
+    }
+    // In deck order, from the session's counter (requirement 21).
+    load->track_id = next_track_++;
+    restoring.track_id = load->track_id;
+    std::span{latest_}[deck] = load->track_id;
+    info(std::format("started ks-worker (process {}) for track {}", load->worker_pid,
+                     load->track_id));
+    if (!deadline_) {
+        deadline_ = Clock::now() + kRestoreProbeTimeout;
+    }
+    const std::array<int, 1> fds{file->get()};
+    send_to_worker(*load, ipc::Message{.request_id = kProbeRequest, .body = ipc::msg::Probe{}},
+                   fds);
+    loads_.push_back(std::move(load));
+}
+
+void Supervisor::restore_probed(Load& load, const ipc::msg::Probed& probed) {
+    RestoreDeck& restoring = std::span{restore_.decks}[load.deck];
+    if (phase_ != Phase::Restoring || restoring.track_id != load.track_id ||
+        restoring.status != RestoreStatus::Probing) {
+        // Given up on already.
+        close_worker(load, {}, true);
+        return;
+    }
+    if (const std::expected<void, TrackRefusal> created = create_track(load, probed); !created) {
+        refuse_load(load, created.error().code, created.error().why);
+        close_worker(load);
+        return;
+    }
+    // The engine starts with the track before the worker has written to it,
+    // and takes its rate from the header (specs/engine-restart/spec.md
+    // requirement 5): the worker stores the same one.
+    ipc::TrackWriter{load.mapping->bytes()}.start(probed.sample_rate);
+    load.answered = true;
+    load.engine = EngineHold::Holds;
+    load.decode_sent = true;
+    const std::array<int, 1> fds{load.segment.get()};
+    send_to_worker(load,
+                   ipc::Message{.request_id = kDecodeRequest,
+                                .body = ipc::msg::Decode{.max_frames = ipc::kMaxTrackFrames}},
+                   fds);
+    restoring.status = RestoreStatus::Restored;
+}
+
+void Supervisor::give_up(std::size_t deck, std::string_view why) {
+    RestoreDeck& restoring = std::span{restore_.decks}[deck];
+    restoring.status = RestoreStatus::GivenUp;
+    JournalEntry entry = restoring.entry;
+    entry.playing = false;
+    warning(std::format("deck {}: can't restore {}: {}; it's kept in the session journal", deck + 1,
+                        entry.path, why));
+    std::span{carried_}[deck] = std::move(entry);
+}
+
+void Supervisor::give_up(const Load& load, std::string_view why) {
+    const RestoreDeck& restoring = std::span{restore_.decks}[load.deck];
+    if (phase_ == Phase::Restoring && restoring.track_id == load.track_id &&
+        restoring.status == RestoreStatus::Probing) {
+        give_up(load.deck, why);
+    }
+}
+
+std::optional<int> Supervisor::settle_restore() {
+    if (phase_ != Phase::Restoring ||
+        std::ranges::any_of(restore_.decks, [](const RestoreDeck& deck) {
+            return deck.status == RestoreStatus::Probing;
+        })) {
+        return std::nullopt;
+    }
+    return finish_restore();
+}
+
+Load* Supervisor::find_load(std::uint64_t track_id) {
+    const auto found =
+        std::ranges::find(loads_, track_id, [](const auto& load) { return load->track_id; });
+    return found == loads_.end() ? nullptr : found->get();
+}
+
+std::optional<int> Supervisor::finish_restore() {
+    Journal journal = std::move(restore_.journal);
+    const std::array<RestoreDeck, kJournalDecks> decks = std::move(restore_.decks);
+    restore_ = Restore{};
+    deadline_.reset();
+
+    // An orphan's decks played on after its supervisor died, while the
+    // journal stood still (requirement 26).
+    double played_on = 0.0;
+    const std::optional<std::string> boot = boot_id();
+    if (stopped_orphan_ && journal.boot.has_value() && journal.boot == boot &&
+        journal.engine == stopped_orphan_->pid) {
+        const std::int64_t stopped = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         stopped_orphan_->at.time_since_epoch())
+                                         .count();
+        played_on = static_cast<double>(std::max<std::int64_t>(stopped - journal.time, 0)) / 1e9;
+        info(std::format("the engine from an earlier session played on for {:.3f} s after the "
+                         "journal was written: its playing decks move on by that",
+                         played_on));
+    }
+
+    std::array<std::uint64_t, kJournalDecks> track_ids{};
+    for (std::size_t deck = 0; deck < kJournalDecks; ++deck) {
+        const RestoreDeck& restoring = std::span{decks}[deck];
+        const Load* const load =
+            restoring.status == RestoreStatus::Restored ? find_load(restoring.track_id) : nullptr;
+        if (load == nullptr || !load->probed) {
+            continue;
+        }
+        const std::uint32_t rate = load->probed.value_or(ipc::msg::Probed{}).sample_rate;
+        JournalEntry entry = restoring.entry;
+        if (load->file_size != entry.size || load->file_modified != entry.modified ||
+            rate != entry.sample_rate) {
+            // Positions in the old file may not mean anything in the new one
+            // (requirement 23).
+            warning(std::format("deck {}: {} has changed since the session journal was written; "
+                                "it's restored at its start",
+                                deck + 1, entry.path));
+            entry.size = load->file_size;
+            entry.modified = load->file_modified;
+            entry.sample_rate = rate;
+            entry.position = 0.0;
+            entry.cue = 0.0;
+        } else if (entry.playing) {
+            entry.position = std::clamp(entry.position + (entry.rate * rate * played_on), 0.0,
+                                        static_cast<double>(ipc::kMaxTrackFrames));
+        }
+        entry.playing = false;
+        info(std::format("deck {}: restored {} at {:.3f} s", deck + 1, entry.path,
+                         entry.position / rate));
+        std::span{track_ids}[deck] = load->track_id;
+        std::span{journal.decks}[deck] = entry;
+        std::span{restored_}[deck] = std::move(entry);
+    }
+
+    // With nothing to restore, the segment stays zero-filled (requirement 25).
+    if (std::ranges::any_of(track_ids, [](std::uint64_t id) { return id != 0; }) ||
+        journal.mixer != JournalMixer{}) {
+        if (write_resume_slot(resume_state(journal, track_ids, 1, Clock::now()))) {
+            restored_session_ = true;
+        } else {
+            warning("can't write the resume slot: the session starts with empty decks");
+            for (std::size_t deck = 0; deck < kJournalDecks; ++deck) {
+                if (std::optional<JournalEntry>& entry = std::span{restored_}[deck]) {
+                    std::span{carried_}[deck] = std::exchange(entry, std::nullopt);
+                }
+            }
+        }
+    }
+    phase_ = Phase::Starting;
+    if (const std::expected<void, std::string> started = spawn_engine(false); !started) {
+        error(started.error());
+        return kExitStartFailed;
+    }
+    return std::nullopt;
+}
+
+bool Supervisor::write_resume_slot(const ipc::ResumeState& slot) {
+    std::expected<ipc::Region, ipc::MapFailure> region =
+        ipc::Region::map(state_.get(), ipc::SegmentKind::EngineState,
+                         ipc::kEngineStateLayoutVersion, ipc::Access::ReadWrite);
+    if (!region) {
+        return false;
+    }
+    // at() checks against the size of the supervisor's own mapping.
+    auto* const state = region->at<ipc::EngineState>(ipc::kSegmentHeaderSize);
+    if (state == nullptr) {
+        return false;
+    }
+    // Every call into a seqlock runs inside this (see SignalsBlocked).
+    const SignalsBlocked blocked;
+    ipc::SeqlockWriter<ipc::ResumeState>{
+        std::span{state->resume}[static_cast<std::size_t>(slot.generation % ipc::kResumeSlots)]}
+        .write(slot);
+    return true;
+}
+
+std::optional<int> Supervisor::start_clean(std::string_view how) {
+    started_clean_ = true;
+    warning(std::format("ks-engine {} with the restored session; starting it clean, with empty "
+                        "decks",
+                        how));
+    for (const std::unique_ptr<Load>& load : loads_) {
+        if (load->restored && load->engine == EngineHold::Holds) {
+            load->engine = EngineHold::Done;
+            signal_worker(*load, SIGTERM);
+        }
+    }
+    for (std::size_t deck = 0; deck < kJournalDecks; ++deck) {
+        if (std::optional<JournalEntry>& entry = std::span{restored_}[deck]) {
+            std::span{carried_}[deck] = std::exchange(entry, std::nullopt);
+        }
+    }
+    wipe_state();
+    phase_ = Phase::Starting;
+    if (const std::expected<void, std::string> started = spawn_engine(true); !started) {
+        error(started.error());
+        return kExitStartFailed;
+    }
+    return std::nullopt;
 }
 
 // ---- Loading tracks (specs/track-loading/spec.md) -----------------------------------
@@ -2565,16 +3045,7 @@ void Supervisor::load_file(Client& client, std::uint32_t id, const ipc::msg::Loa
     }
 
     auto load = std::make_unique<Load>();
-    struct stat status{};
-    if (::fstat(file->get(), &status) == 0) {
-        load->file_size = static_cast<std::uint64_t>(status.st_size);
-#ifdef __APPLE__
-        const timespec modified = status.st_mtimespec;
-#else
-        const timespec modified = status.st_mtim;
-#endif
-        load->file_modified = (std::int64_t{modified.tv_sec} * 1'000'000'000) + modified.tv_nsec;
-    }
+    std::tie(load->file_size, load->file_modified) = file_facts(file->get());
     load->deck = request.deck;
     load->path = request.path;
     load->client = client.id;
@@ -2587,6 +3058,9 @@ void Supervisor::load_file(Client& client, std::uint32_t id, const ipc::msg::Loa
     }
     load->track_id = next_track_++;
     std::span{latest_}[load->deck] = load->track_id;
+    // The journal records the new load from now on (specs/session-journal/
+    // spec.md requirement 24).
+    std::span{carried_}[load->deck].reset();
     info(std::format("started ks-worker (process {}) for track {}", load->worker_pid,
                      load->track_id));
     const std::array<int, 1> fds{file->get()};
@@ -2635,6 +3109,10 @@ void Supervisor::refuse_load(Load& load, ipc::ErrorCode code, const std::string&
         return;
     }
     load.answered = true;
+    if (load.restored) {
+        give_up(load, why);
+        return;
+    }
     warning(std::format("refused client '{}' a load of {}: {}", load.client_name, load.path, why));
     if (Client* const client = find_client(load.client)) {
         send_to_client(*client, error_message(load.client_request, code, why));
@@ -2706,6 +3184,10 @@ void Supervisor::probed(Load& load, const ipc::msg::Probed& probed) {
         close_worker(load);
         return;
     }
+    if (load.restored) {
+        restore_probed(load, probed);
+        return;
+    }
     if (std::span{latest_}[load.deck] != load.track_id) {
         const bool unloaded = std::span{latest_}[load.deck] == kUnloaded;
         refuse_load(load, ipc::ErrorCode::Refused,
@@ -2714,36 +3196,11 @@ void Supervisor::probed(Load& load, const ipc::msg::Probed& probed) {
         close_worker(load);
         return;
     }
-    const std::uint64_t frames =
-        probed.estimated_frames != 0 ? probed.estimated_frames : ipc::kMaxTrackFrames;
-    const std::uint64_t needed = frames * ipc::kTrackFrameSize;
-    const std::uint64_t used = in_use();
-    if (used + needed > budget_) {
-        refuse_load(load, ipc::ErrorCode::Refused,
-                    std::format("the track needs {} MiB of track memory, and {} MiB of the {} MiB "
-                                "budget is in use",
-                                mib_up(needed), mib_up(used), budget_ / kMib));
+    if (const std::expected<void, TrackRefusal> created = create_track(load, probed); !created) {
+        refuse_load(load, created.error().code, created.error().why);
         close_worker(load);
         return;
     }
-    std::expected<ipc::Fd, std::error_code> segment =
-        factory_->create(ipc::SegmentKind::Track, ipc::kTrackLayoutVersion, ipc::kTrackSegmentSize);
-    if (!segment) {
-        refuse_load(load, ipc::ErrorCode::Unavailable,
-                    "can't create a track segment: " + segment.error().message());
-        close_worker(load);
-        return;
-    }
-    std::expected<ipc::Region, ipc::MapFailure> mapping = ipc::Region::map(
-        segment->get(), ipc::SegmentKind::Track, ipc::kTrackLayoutVersion, ipc::Access::ReadWrite);
-    if (!mapping) {
-        refuse_load(load, ipc::ErrorCode::Unavailable, "can't map the track segment");
-        close_worker(load);
-        return;
-    }
-    load.segment = std::move(*segment);
-    load.mapping = std::make_unique<ipc::Region>(std::move(*mapping));
-    load.reserved = needed;
 
     // The engine and the worker get the segment at the same time.
     const std::array<int, 1> fds{load.segment.get()};
@@ -2759,6 +3216,38 @@ void Supervisor::probed(Load& load, const ipc::msg::Probed& probed) {
                    ipc::Message{.request_id = kDecodeRequest,
                                 .body = ipc::msg::Decode{.max_frames = ipc::kMaxTrackFrames}},
                    fds);
+}
+
+std::expected<void, Supervisor::TrackRefusal>
+Supervisor::create_track(Load& load, const ipc::msg::Probed& probed) {
+    const std::uint64_t frames =
+        probed.estimated_frames != 0 ? probed.estimated_frames : ipc::kMaxTrackFrames;
+    const std::uint64_t needed = frames * ipc::kTrackFrameSize;
+    const std::uint64_t used = in_use();
+    if (used + needed > budget_) {
+        return std::unexpected{TrackRefusal{
+            .code = ipc::ErrorCode::Refused,
+            .why = std::format("the track needs {} MiB of track memory, and {} MiB of the {} MiB "
+                               "budget is in use",
+                               mib_up(needed), mib_up(used), budget_ / kMib)}};
+    }
+    std::expected<ipc::Fd, std::error_code> segment =
+        factory_->create(ipc::SegmentKind::Track, ipc::kTrackLayoutVersion, ipc::kTrackSegmentSize);
+    if (!segment) {
+        return std::unexpected{
+            TrackRefusal{.code = ipc::ErrorCode::Unavailable,
+                         .why = "can't create a track segment: " + segment.error().message()}};
+    }
+    std::expected<ipc::Region, ipc::MapFailure> mapping = ipc::Region::map(
+        segment->get(), ipc::SegmentKind::Track, ipc::kTrackLayoutVersion, ipc::Access::ReadWrite);
+    if (!mapping) {
+        return std::unexpected{TrackRefusal{.code = ipc::ErrorCode::Unavailable,
+                                            .why = "can't map the track segment"}};
+    }
+    load.segment = std::move(*segment);
+    load.mapping = std::make_unique<ipc::Region>(std::move(*mapping));
+    load.reserved = needed;
+    return {};
 }
 
 void Supervisor::decoding_ended(Load& load, std::uint64_t frames, ipc::TrackStatus status) {
@@ -2791,6 +3280,7 @@ void Supervisor::unload_deck(Client& client, std::uint32_t id,
     }
     // A load that is still probing must not put its track on the deck later.
     std::span{latest_}[request.deck] = kUnloaded;
+    std::span{carried_}[request.deck].reset();
     const std::uint32_t request_id = next_request();
     unloads_.push_back(PendingUnload{
         .request = request_id, .client = client.id, .client_request = id, .deck = request.deck});

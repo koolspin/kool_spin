@@ -627,6 +627,8 @@ struct FakeTrack {
     /// tests can leave it out of designated initializers
     /// (-Wmissing-designated-field-initializers).
     std::string refusal{}; // NOLINT(readability-redundant-member-init): see above
+    /// How long it waits after Decode before it stores the rate.
+    std::uint64_t decode_delay_ms = 0;
     std::uint64_t frames = 0;
     std::uint64_t chunk_frames = 4'096;
     std::uint64_t chunk_ms = 0;
@@ -647,6 +649,9 @@ inline std::filesystem::path write_fake(const std::filesystem::path& dir, std::s
         text << "probe hang\n";
     } else if (!fake.refusal.empty()) {
         text << "probe refuse " << fake.refusal << '\n';
+    }
+    if (fake.decode_delay_ms != 0) {
+        text << "decode-delay " << fake.decode_delay_ms << '\n';
     }
     text << "frames " << fake.frames << '\n'
          << "chunk " << fake.chunk_frames << ' ' << fake.chunk_ms << '\n'

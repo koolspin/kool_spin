@@ -9,6 +9,8 @@
 //   probe-delay <ms>      how long it waits before answering Probe (default 0)
 //   probe refuse <text>   answers Probe with Error Refused and <text>
 //   probe hang            never answers Probe
+//   decode-delay <ms>     how long it waits after Decode before it stores the
+//                         rate or publishes anything (default 0)
 //   frames <n>            the frames it decodes (default 0)
 //   chunk <frames> <ms>   publishes them in chunks of <frames>, <ms> apart
 //                         (default 4096 0)
@@ -89,6 +91,7 @@ struct Script {
     milliseconds probe_delay{0};
     ProbeAnswer probe = ProbeAnswer::Probed;
     std::string refusal;
+    milliseconds decode_delay{0};
     std::uint64_t frames = 0;
     std::uint64_t chunk_frames = 4'096;
     milliseconds chunk_delay{0};
@@ -122,6 +125,8 @@ bool apply_number(Script& script, std::string_view key, std::string_view first,
         script.estimate = *value;
     } else if (key == "probe-delay") {
         script.probe_delay = milliseconds{*value};
+    } else if (key == "decode-delay") {
+        script.decode_delay = milliseconds{*value};
     } else if (key == "frames") {
         script.frames = *value;
     } else if (key == "chunk") {
@@ -288,6 +293,9 @@ public:
                              ipc::kTrackLayoutVersion, ipc::Access::ReadWrite);
         if (!region) {
             refuse(decode_id, "not a track segment");
+            return 0;
+        }
+        if (!pause(script_.decode_delay)) {
             return 0;
         }
         return decode_into(decode_id, max_frames, region->bytes());

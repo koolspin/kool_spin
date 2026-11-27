@@ -150,6 +150,20 @@ std::expected<void, std::string> apply_value(Options& options, std::string_view 
     return set_track_memory(options.track_memory_mib, value);
 }
 
+/// The option `arg` names, if it's one that takes no value; otherwise null.
+bool* flag_of(Options& options, std::string_view arg) {
+    if (arg == "--recording") {
+        return &options.recording;
+    }
+    if (arg == "--stop-previous") {
+        return &options.stop_previous;
+    }
+    if (arg == "--new-session") {
+        return &options.new_session;
+    }
+    return nullptr;
+}
+
 } // namespace
 
 std::string usage() {
@@ -180,6 +194,8 @@ std::string usage() {
            "                        (default: half of physical memory)\n"
            "  --stop-previous       stop an engine still running from an earlier session,\n"
            "                        without asking\n"
+           "  --new-session         start with empty decks, rather than restoring the\n"
+           "                        session from the journal\n"
            "  --recording           keep a recording segment of what a paced engine plays,\n"
            "                        for tests (clients get it with OpenRecording)\n"
            "  --crash-window <ms>   for tests: the window in which engine exits count\n"
@@ -216,18 +232,11 @@ std::expected<Options, std::string> parse_options(std::span<const std::string_vi
             }
             return options;
         }
-        if (arg == "--recording") {
-            if (options.recording) {
-                return std::unexpected{std::string{"kool_spin: --recording given twice"}};
+        if (bool* const flag = flag_of(options, arg)) {
+            if (*flag) {
+                return std::unexpected{std::format("kool_spin: {} given twice", arg)};
             }
-            options.recording = true;
-            continue;
-        }
-        if (arg == "--stop-previous") {
-            if (options.stop_previous) {
-                return std::unexpected{std::string{"kool_spin: --stop-previous given twice"}};
-            }
-            options.stop_previous = true;
+            *flag = true;
             continue;
         }
         if (!takes_value(options, arg)) {

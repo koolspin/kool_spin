@@ -42,6 +42,9 @@ inline constexpr std::string_view kRejectedJournalName = "session.journal.reject
 inline constexpr std::chrono::milliseconds kJournalInterval{1'000};
 /// How long a stopping supervisor waits for the last write (requirement 14).
 inline constexpr std::chrono::seconds kJournalExitTimeout{2};
+/// How long restoring waits for the workers' probes, from the first worker's
+/// start (requirement 20).
+inline constexpr std::chrono::seconds kRestoreProbeTimeout{3};
 
 /// Which side of the crossfader a channel is on, as MixerState codes it.
 enum class JournalSide : std::uint8_t {
