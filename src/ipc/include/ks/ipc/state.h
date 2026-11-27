@@ -5,10 +5,13 @@
 /// The engine-state segment: what the engine publishes after every block it
 /// renders (ADR 0003 §5, specs/state-out/spec.md requirements 1 to 8), and the
 /// two resume slots it writes in turn (ADR 0003 §11,
-/// specs/resume-state/spec.md requirements 2 to 5).
+/// specs/resume-state/spec.md requirements 2 to 5), and the health block its
+/// control thread writes after each health pass (specs/health-checks/spec.md
+/// requirement 12).
 ///
-/// Each block is a seqlock that only the engine's audio thread writes. Every
-/// field is a std::uint64_t:
+/// Each block is a seqlock that only the engine writes: the health block from
+/// its control thread, the others from its audio thread. Every field is a
+/// std::uint64_t:
 /// - reals are the bit pattern of an IEEE-754 double;
 /// - host times are nanoseconds since the steady clock's epoch, as the bit
 ///   pattern of a std::int64_t; durations are nanoseconds;
@@ -56,6 +59,44 @@ inline constexpr std::uint64_t kResumePlaying = std::uint64_t{1} << 0U;
 
 /// The resume slots: the engine writes them in turn.
 inline constexpr std::size_t kResumeSlots = 2;
+
+// HealthState::known and ::failing: one bit per check
+// (specs/health-checks/spec.md requirement 12).
+inline constexpr std::uint64_t kHealthRealtime = std::uint64_t{1} << 0U;
+inline constexpr std::uint64_t kHealthMemory = std::uint64_t{1} << 1U;
+inline constexpr std::uint64_t kHealthPowerProfile = std::uint64_t{1} << 2U;
+inline constexpr std::uint64_t kHealthPowerSource = std::uint64_t{1} << 3U;
+inline constexpr std::uint64_t kHealthLoad = std::uint64_t{1} << 4U;
+/// Step 10b: keeping the machine awake.
+inline constexpr std::uint64_t kHealthAwake = std::uint64_t{1} << 5U;
+/// Every check's bit.
+inline constexpr std::uint64_t kHealthChecks = (std::uint64_t{1} << 6U) - 1;
+
+// HealthState's codes.
+/// HealthState::policy: the active driver thread's scheduling.
+inline constexpr std::uint64_t kPolicyUnknown = 0;
+inline constexpr std::uint64_t kPolicyOther = 1;
+inline constexpr std::uint64_t kPolicyFifo = 2;
+inline constexpr std::uint64_t kPolicyRr = 3;
+inline constexpr std::uint64_t kPolicyTimeConstraint = 4;
+/// HealthState::process_lock.
+inline constexpr std::uint64_t kProcessLockNone = 0;
+inline constexpr std::uint64_t kProcessLockLocked = 1;
+inline constexpr std::uint64_t kProcessLockFailed = 2;
+/// HealthState::power_profile.
+inline constexpr std::uint64_t kPowerProfileUnknown = 0;
+inline constexpr std::uint64_t kPowerProfileNormal = 1;
+inline constexpr std::uint64_t kPowerProfileSaving = 2;
+/// HealthState::power_source.
+inline constexpr std::uint64_t kPowerSourceUnknown = 0;
+inline constexpr std::uint64_t kPowerSourceMains = 1;
+inline constexpr std::uint64_t kPowerSourceBattery = 2;
+/// HealthState::awake (step 10b).
+inline constexpr std::uint64_t kAwakeUnknown = 0;
+inline constexpr std::uint64_t kAwakeBlocked = 1;
+inline constexpr std::uint64_t kAwakeNotBlocked = 2;
+/// HealthState::memlock_limit when the limit is unlimited.
+inline constexpr std::uint64_t kUnlimited = ~std::uint64_t{0};
 
 // The ranges a resume slot's values fall in (specs/resume-state/spec.md
 // requirement 7). The engine's limits are these, and the supervisor checks a
@@ -199,6 +240,42 @@ struct ResumeState {
     std::uint64_t checksum;
 };
 
+/// What the engine's last health pass found (specs/health-checks/spec.md
+/// requirement 12). A check whose bit isn't in `known` couldn't tell.
+struct HealthState {
+    /// Health passes so far; 0 before the first.
+    std::uint64_t passes;
+    /// Host time: when the pass ran.
+    std::uint64_t host_time;
+    /// kHealthRealtime, kHealthMemory, kHealthPowerProfile, kHealthPowerSource,
+    /// kHealthLoad, kHealthAwake: the checks that could tell.
+    std::uint64_t known;
+    /// The same bits: the checks that fail. Always within `known`.
+    std::uint64_t failing;
+    /// kPolicy...: the active driver thread's scheduling.
+    std::uint64_t policy;
+    /// Its priority (Linux), or 0.
+    std::uint64_t priority;
+    /// RLIMIT_RTPRIO's soft limit (Linux), or 0.
+    std::uint64_t rtprio_limit;
+    /// RLIMIT_MEMLOCK's soft limit, in bytes; kUnlimited for unlimited.
+    std::uint64_t memlock_limit;
+    /// kProcessLock...: the last mlockall().
+    std::uint64_t process_lock;
+    /// Track bytes locked, over the tracks the engine holds.
+    std::uint64_t locked_bytes;
+    /// Track bytes faulted in whose lock failed.
+    std::uint64_t unlocked_bytes;
+    /// kPowerProfile...
+    std::uint64_t power_profile;
+    /// kPowerSource...
+    std::uint64_t power_source;
+    /// Real: the highest render load in the last 10 s.
+    std::uint64_t peak_load;
+    /// kAwake... (step 10b).
+    std::uint64_t awake;
+};
+
 /// The engine-state segment's layout after its header (requirement 7).
 /// Zero-filled memory is an EngineState in which nothing has been published,
 /// and whose resume slots hold nothing valid.
@@ -208,11 +285,13 @@ struct EngineState {
     Seqlock<EngineStatus> status;
     /// Slot i holds the snapshots whose generation modulo 2 is i.
     std::array<Seqlock<ResumeState>, kResumeSlots> resume;
+    /// Written by the control thread, after each health pass.
+    Seqlock<HealthState> health;
 };
 
 /// The layout version in an engine-state segment's header: 2 since the
-/// resume slots were added.
-inline constexpr std::uint32_t kEngineStateLayoutVersion = 2;
+/// resume slots were added, 3 since the health block was.
+inline constexpr std::uint32_t kEngineStateLayoutVersion = 3;
 
 /// An engine-state segment's size: the header, then an EngineState at
 /// kSegmentHeaderSize.
@@ -304,6 +383,24 @@ static_assert(offsetof(ResumeState, bus_main) == 344);
 static_assert(offsetof(ResumeState, bus_cue) == 352);
 static_assert(offsetof(ResumeState, checksum) == 360);
 
+static_assert(std::is_standard_layout_v<HealthState> && std::is_trivially_copyable_v<HealthState>);
+static_assert(sizeof(HealthState) == 15 * sizeof(std::uint64_t));
+static_assert(offsetof(HealthState, passes) == 0);
+static_assert(offsetof(HealthState, host_time) == 8);
+static_assert(offsetof(HealthState, known) == 16);
+static_assert(offsetof(HealthState, failing) == 24);
+static_assert(offsetof(HealthState, policy) == 32);
+static_assert(offsetof(HealthState, priority) == 40);
+static_assert(offsetof(HealthState, rtprio_limit) == 48);
+static_assert(offsetof(HealthState, memlock_limit) == 56);
+static_assert(offsetof(HealthState, process_lock) == 64);
+static_assert(offsetof(HealthState, locked_bytes) == 72);
+static_assert(offsetof(HealthState, unlocked_bytes) == 80);
+static_assert(offsetof(HealthState, power_profile) == 88);
+static_assert(offsetof(HealthState, power_source) == 96);
+static_assert(offsetof(HealthState, peak_load) == 104);
+static_assert(offsetof(HealthState, awake) == 112);
+
 static_assert(std::is_standard_layout_v<EngineState> && std::is_trivially_copyable_v<EngineState>);
 static_assert(offsetof(EngineState, decks) == 0);
 static_assert(offsetof(EngineState, mixer) == kStateDecks * sizeof(Seqlock<DeckState>));
@@ -311,6 +408,8 @@ static_assert(offsetof(EngineState, status) ==
               offsetof(EngineState, mixer) + sizeof(Seqlock<MixerState>));
 static_assert(offsetof(EngineState, resume) ==
               offsetof(EngineState, status) + sizeof(Seqlock<EngineStatus>));
+static_assert(offsetof(EngineState, health) ==
+              offsetof(EngineState, resume) + (kResumeSlots * sizeof(Seqlock<ResumeState>)));
 static_assert(kSegmentHeaderSize % alignof(EngineState) == 0,
               "an EngineState starts right after the segment header");
 

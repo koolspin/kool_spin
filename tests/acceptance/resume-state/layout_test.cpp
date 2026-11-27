@@ -92,7 +92,7 @@ TEST_CASE("Resume state: the layout", "[resume][layout]") {
                                   std::array<Seqlock<ResumeState>, ks::ipc::kResumeSlots>>);
     STATIC_REQUIRE(offsetof(EngineState, resume) ==
                    offsetof(EngineState, status) + sizeof(Seqlock<EngineStatus>));
-    STATIC_REQUIRE(ks::ipc::kEngineStateLayoutVersion == 2);
+    STATIC_REQUIRE(ks::ipc::kEngineStateLayoutVersion == 3);
     STATIC_REQUIRE(ks::ipc::kEngineStateSegmentSize ==
                    ks::ipc::kSegmentHeaderSize + sizeof(EngineState));
 }

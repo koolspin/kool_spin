@@ -225,6 +225,11 @@ std::uint64_t Engine::dropped_events() const noexcept KS_NONBLOCKING {
     return dropped_events_.load(std::memory_order_relaxed);
 }
 
+double Engine::take_peak_load() noexcept KS_NONBLOCKING {
+    static_cast<void>(peak_load_.load(std::memory_order_relaxed));
+    return 0.0; // Step 10a: not built yet.
+}
+
 std::uint64_t Engine::handovers_given() const noexcept {
     return handovers_given_;
 }

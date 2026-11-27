@@ -2,6 +2,7 @@
 
 # The library holds everything except argument handling, so tests can use it.
 add_library(ks_engine_app STATIC
+    health.cpp
     options.cpp
     run.cpp
     segment_track.cpp)
@@ -11,6 +12,7 @@ target_sources(ks_engine_app PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include
     FILES
+        include/ks/engine_app/health.h
         include/ks/engine_app/options.h
         include/ks/engine_app/run.h
         include/ks/engine_app/segment_track.h)
