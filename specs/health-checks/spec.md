@@ -29,7 +29,7 @@ The engine checks what it can't control but can see: whether its audio thread ru
   - **10a:** requirements 1 to 20, and 27's parts for 10a; the criteria under "Health checks".
   - **10b:** requirements 21 to 26, and 27's parts for 10b; the criteria under "Keeping awake", and the manual ones.
 - **This spec amends:**
-  - `specs/state-out/spec.md` and `specs/resume-state/spec.md`: the engine-state segment gains a health block, after the resume slots, and its layout version becomes 3. `tests/acceptance/resume-state/layout_test.cpp` checks version 2 today; that line changes to 3, which this spec approves.
+  - `specs/state-out/spec.md` and `specs/resume-state/spec.md`: the engine-state segment gains a health block, after the resume slots, and its layout version becomes 3. `tests/acceptance/resume-state/layout_test.cpp` and `tests/acceptance/state-out/layout_test.cpp` check version 2 today; that line changes to 3 in both, which this spec approves.
   - `specs/ks-play/spec.md` requirement 22's command table: a `health` command (requirement 19).
   - `specs/processes/spec.md`: `ks-engine`'s command line and start (requirements 8 and 9), and `kool_spin`'s command line and start (requirements 13 and 15).
   - Everything else in them still applies.
@@ -165,7 +165,7 @@ Health checks (10a; `health_test.cpp` and `health_process_test.cpp`):
 - [ ] `[auto]` **Real-time granted:** on macOS always, and on Linux when the hard `RLIMIT_RTPRIO` is 70 or more (skipped otherwise), with the soft limit raised to 70: `realtime=1`, with `policy=time-constraint` (macOS) or `policy=fifo priority=70` (Linux); on Linux, `/proc/<pid>/task/*/stat` shows one engine thread at `SCHED_FIFO` 70. (test: "Health: real-time priority granted")
 - [ ] `[auto]` **Memory refused** (Linux; skipped on macOS): with `RLIMIT_MEMLOCK` 64 KiB, soft and hard, a 10 s track loads, decodes, and plays: `process_lock=failed memlock_limit=65536`, `unlocked_bytes` at least the track's size, `memory` in `failing`, one warning. (test: "Health: memory locking refused")
 - [ ] `[auto]` **Memory locked:** on Linux when the hard `RLIMIT_MEMLOCK` is unlimited (skipped otherwise), with the soft limit raised to it; on macOS always. A 10 s track loads and decodes: `locked_bytes` at least the track's size, `unlocked_bytes=0`; on Linux `process_lock=locked`, `VmLck` in `/proc/<pid>/status` at least the track's size, and `VmRSS` less than 256 MiB (the unused segment space isn't committed). (test: "Health: memory locked")
-- [ ] `[auto]` **`ks-play health`:** every field in requirement 19's order; `failing=none` when nothing fails (a fake root at `balanced`, with mains); exit status 0. Against an engine that never passes (`-- --start-delay` beyond 2 s, with the paced backend), status 1 and `ks-play: no health check yet`. `--help` lists `health`. (test: "Play: health")
+- [ ] `[auto]` **`ks-play health`:** every field in requirement 19's order; `failing=none` when nothing fails (a fake root at `balanced`, with mains), checked where the hard limits allow real-time priority 70 and unlimited memory locking; elsewhere, the power checks don't fail; exit status 0. Against an engine that never passes (the paced backend with `-- --hang-control-after 0`, so the control thread stops just after Ready, and the supervisor's `--ping-interval 60000`), status 1 and `ks-play: no health check yet`. `--help` lists `health`. (test: "Play: health")
 - [ ] `[auto]` **After a restart:** after `kill -9` of the engine, the new engine's health block counts passes from 1 again, and its checks are logged afresh. (test: "Health: after an engine restart")
 - [ ] `[auto]` **Options:** `--sysfs-root` twice, a relative path, and a 4,097-byte one are usage errors with status 2 (Linux); on macOS, `--sysfs-root` is one. `ks-engine --help` doesn't list it. (test: "Health: options")
 - [ ] `[auto]` **RealtimeSanitizer:** under `rtsan`, every test above passes with no report, so `current_thread()` and `take_peak_load()` run cleanly in the callback.
@@ -182,7 +182,7 @@ Keeping awake (10b; `awake_test.cpp`):
 
 Everywhere:
 
-- [ ] `[auto]` **The earlier steps' tests** all pass, unchanged except `layout_test.cpp`'s layout version (requirement 12).
+- [ ] `[auto]` **The earlier steps' tests** all pass, unchanged except the two `layout_test.cpp` files' layout version (requirement 12).
 - [ ] `[auto]` **Every CI configuration:** all of the above pass on Linux in every preset, and on macOS arm64 in `debug`, `release`, `asan`, and `tsan`.
 - [ ] `[manual]` **Linux laptop:** with suspend after 2 minutes idle, a loaded deck keeps it awake for 5 minutes; 2 minutes after the unload, it suspends. `ks-play health` on the maintainer's laptop shows what it should: on battery, and with the CPU set to power-saving.
 - [ ] `[manual]` **macOS:** the same with the Mac's sleep settings; `pmset -g assertions` shows both while a deck is loaded.
