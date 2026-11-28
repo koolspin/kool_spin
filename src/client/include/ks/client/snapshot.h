@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace ks::client {
@@ -98,6 +99,50 @@ struct EngineInfo {
     friend bool operator==(const EngineInfo&, const EngineInfo&) = default;
 };
 
+/// The active driver thread's scheduling policy (specs/health-checks/spec.md
+/// requirement 6).
+enum class Policy : std::uint8_t { Unknown = 0, Other = 1, Fifo = 2, Rr = 3, TimeConstraint = 4 };
+
+/// The last mlockall()'s outcome: none when not tried, or not available.
+enum class ProcessLock : std::uint8_t { None = 0, Locked = 1, Failed = 2 };
+
+enum class PowerProfile : std::uint8_t { Unknown = 0, Normal = 1, Saving = 2 };
+
+enum class PowerSource : std::uint8_t { Unknown = 0, Mains = 1, Battery = 2 };
+
+/// Whether the machine is kept awake (step 10b).
+enum class Awake : std::uint8_t { Unknown = 0, Blocked = 1, NotBlocked = 2 };
+
+/// The engine's last health pass (specs/health-checks/spec.md requirements
+/// 12 and 14). A code the client doesn't know reads as unknown (none, for
+/// `process_lock`), and `failing` holds only checks in `known`.
+struct HealthInfo {
+    /// Health passes so far; never 0 here.
+    std::uint64_t passes = 0;
+    std::uint64_t host_time = 0;
+    /// ipc::kHealthRealtime ... ipc::kHealthAwake: the checks that could
+    /// tell, and those that fail.
+    std::uint64_t known = 0;
+    std::uint64_t failing = 0;
+    Policy policy = Policy::Unknown;
+    std::uint64_t priority = 0;
+    std::uint64_t rtprio_limit = 0;
+    /// ipc::kUnlimited for unlimited.
+    std::uint64_t memlock_limit = 0;
+    ProcessLock process_lock = ProcessLock::None;
+    std::uint64_t locked_bytes = 0;
+    std::uint64_t unlocked_bytes = 0;
+    PowerProfile power_profile = PowerProfile::Unknown;
+    PowerSource power_source = PowerSource::Unknown;
+    double peak_load = 0.0;
+    Awake awake = Awake::Unknown;
+
+    friend bool operator==(const HealthInfo&, const HealthInfo&) = default;
+};
+
+/// The health block, validated: none while it says no pass has run.
+[[nodiscard]] std::optional<HealthInfo> health_info(const ipc::HealthState& health) noexcept;
+
 /// The whole state. Each block is consistent in itself (read through its
 /// seqlock); different blocks may come from different moments.
 struct Snapshot {
@@ -106,6 +151,8 @@ struct Snapshot {
     std::array<ChannelInfo, ipc::kStateDecks> channels;
     MixerInfo mixer;
     std::array<ClientInfo, ipc::kStateClients> clients;
+    /// The engine's last health pass; none before its first.
+    std::optional<HealthInfo> health;
 };
 
 } // namespace ks::client

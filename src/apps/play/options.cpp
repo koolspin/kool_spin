@@ -356,6 +356,9 @@ std::expected<Request, std::string> parse_command(std::string_view command, Argu
     if (command == "status") {
         return parse_status(args);
     }
+    if (command == "health") {
+        return parse_bare<Health>(args, command);
+    }
     if (command == "stop") {
         return parse_bare<Stop>(args, command);
     }
@@ -472,6 +475,7 @@ std::string usage() {
            "  status [--watch] [--interval <ms>]\n"
            "                                show the engine's state; --watch repeats it\n"
            "                                every interval (50 to 60000 ms, default 500)\n"
+           "  health                        show the engine's health checks\n"
            "  stop                          fade out and stop kool_spin\n"
            "  ping                          check that kool_spin answers\n"
            "\n"

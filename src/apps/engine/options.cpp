@@ -88,12 +88,23 @@ std::optional<std::string> paced_only(const Options& options) {
     return std::nullopt;
 }
 
+/// `--sysfs-root`, for tests, on Linux only (specs/health-checks/spec.md
+/// requirement 17): elsewhere it's an unexpected argument.
+#ifdef __linux__
+constexpr bool kHasSysfsRoot = true;
+#else
+constexpr bool kHasSysfsRoot = false;
+#endif
+
+/// The longest `--sysfs-root`, in bytes.
+constexpr std::size_t kMaxSysfsRoot = 4'096;
+
 bool takes_value(std::string_view arg) noexcept {
     return arg == "--supervisor-fd" || arg == "--state-fd" || arg == "--log-fd" ||
            arg == "--record-fd" || arg == "--track" || arg == "--start-delay" ||
            arg == "--hang-control-after" || arg == "--runtime-dir" || arg == "--state-dir" ||
            arg == "--backend" || arg == "--device" || arg == "--rate" || arg == "--channels" ||
-           arg == "--period";
+           arg == "--period" || (kHasSysfsRoot && arg == "--sysfs-root");
 }
 
 /// `--track <id>:<fd>`: adds the track, refusing an ID of 0, a repeated ID or
@@ -176,6 +187,26 @@ std::expected<void, std::string> apply_output(Options& options, std::string_view
     return set_once(*field, arg, *setting);
 }
 
+/// `--state-dir`, `--sysfs-root`, and `--runtime-dir`.
+std::expected<void, std::string> apply_path(Options& options, std::string_view arg,
+                                            std::string_view value) {
+    if (arg == "--sysfs-root") {
+        if (value.size() > kMaxSysfsRoot || !std::filesystem::path{value}.is_absolute()) {
+            return std::unexpected{
+                std::format("ks-engine: --sysfs-root must be an absolute path of at most {} bytes",
+                            kMaxSysfsRoot)};
+        }
+        return set_once(options.sysfs_root, arg, std::filesystem::path{value});
+    }
+    if (value.empty()) {
+        return std::unexpected{std::format("ks-engine: {} needs a path", arg)};
+    }
+    if (arg == "--state-dir") {
+        return set_once(options.state_dir, arg, std::filesystem::path{value});
+    }
+    return set_once(options.runtime_dir, arg, std::filesystem::path{value});
+}
+
 /// Applies `value` to the option `arg`, one of those takes_value() accepts.
 std::expected<void, std::string> apply_value(Options& options, std::string_view arg,
                                              std::string_view value) {
@@ -216,17 +247,8 @@ std::expected<void, std::string> apply_value(Options& options, std::string_view 
         }
         return set_once(options.supervisor_fd, arg, *fd);
     }
-    if (arg == "--state-dir") {
-        if (value.empty()) {
-            return std::unexpected{std::string{"ks-engine: --state-dir needs a path"}};
-        }
-        return set_once(options.state_dir, arg, std::filesystem::path{value});
-    }
-    if (arg == "--runtime-dir") {
-        if (value.empty()) {
-            return std::unexpected{std::string{"ks-engine: --runtime-dir needs a path"}};
-        }
-        return set_once(options.runtime_dir, arg, std::filesystem::path{value});
+    if (arg == "--state-dir" || arg == "--sysfs-root" || arg == "--runtime-dir") {
+        return apply_path(options, arg, value);
     }
     return apply_output(options, arg, value);
 }

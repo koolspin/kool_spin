@@ -181,6 +181,11 @@ public:
     /// (specs/audio-events/spec.md requirements 3 and 4). It only goes up.
     [[nodiscard]] std::uint64_t dropped_events() const noexcept KS_NONBLOCKING;
 
+    /// The highest render load of any block since the last call, or since the
+    /// engine was built, and resets it to 0 (specs/health-checks/spec.md
+    /// requirement 9). The control thread calls it; rendered() updates it.
+    [[nodiscard]] double take_peak_load() noexcept KS_NONBLOCKING;
+
     // The audio thread.
 
     /// Applies handovers, reads commands, renders the mixer, and releases
@@ -315,6 +320,8 @@ private:
     ipc::SpscRing<AudioEvent, kAudioEventCapacity> event_ring_{};
     /// Written only by the audio thread, from dropped_.
     std::atomic<std::uint64_t> dropped_events_{0};
+    /// The highest render load since take_peak_load() last took it.
+    std::atomic<double> peak_load_{0.0};
     /// Written only by the audio thread, from handovers_applied_.
     std::atomic<std::uint64_t> handovers_held_{0};
 

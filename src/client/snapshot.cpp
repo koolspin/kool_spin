@@ -37,6 +37,37 @@ std::string_view rejection_name(Rejection rejection) noexcept {
     return "none";
 }
 
+std::optional<HealthInfo> health_info(const ipc::HealthState& health) noexcept {
+    if (health.passes == 0) {
+        return std::nullopt;
+    }
+    // Codes beyond the known ones read as unknown.
+    const auto code = [](std::uint64_t value, std::uint64_t max) noexcept {
+        return value <= max ? static_cast<std::uint8_t>(value) : std::uint8_t{0};
+    };
+    const std::uint64_t known = health.known & ipc::kHealthChecks;
+    return HealthInfo{
+        .passes = health.passes,
+        .host_time = health.host_time,
+        .known = known,
+        .failing = health.failing & known,
+        .policy = static_cast<Policy>(code(health.policy, ipc::kPolicyTimeConstraint)),
+        .priority = health.priority,
+        .rtprio_limit = health.rtprio_limit,
+        .memlock_limit = health.memlock_limit,
+        .process_lock =
+            static_cast<ProcessLock>(code(health.process_lock, ipc::kProcessLockFailed)),
+        .locked_bytes = health.locked_bytes,
+        .unlocked_bytes = health.unlocked_bytes,
+        .power_profile =
+            static_cast<PowerProfile>(code(health.power_profile, ipc::kPowerProfileSaving)),
+        .power_source =
+            static_cast<PowerSource>(code(health.power_source, ipc::kPowerSourceBattery)),
+        .peak_load = std::bit_cast<double>(health.peak_load),
+        .awake = static_cast<Awake>(code(health.awake, ipc::kAwakeNotBlocked)),
+    };
+}
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -190,6 +221,12 @@ Result<Snapshot> Session::snapshot_from(ipc::EngineState& state, Milliseconds bu
     if (Result<void> converted = convert_mixer(*mixer, snapshot); !converted) {
         return std::unexpected{std::move(converted.error())};
     }
+
+    const std::optional<ipc::HealthState> health = read_until(state.health, deadline);
+    if (!health.has_value()) {
+        return std::unexpected{bad_state("unstable seqlock: health")};
+    }
+    snapshot.health = health_info(*health);
     return snapshot;
 }
 

@@ -3,11 +3,13 @@
 
 #include <ks/core/clock.h>
 #include <ks/core/realtime.h>
+#include <ks/core/thread.h>
 #include <ks/engine/block.h>
 #include <ks/engine/interleave.h>
 
 #include "miniaudio_device_config.h"
 #include <miniaudio.h>
+#include <pthread.h>
 
 #include <algorithm>
 #include <array>
@@ -274,6 +276,8 @@ public:
 
     std::expected<void, BackendError> start() override {
         loss_.starting();
+        // The first callback after this start names its thread again.
+        thread_known_.store(false, std::memory_order_relaxed);
         if (const ma_result result = ma_device_start(&device_); result != MA_SUCCESS) {
             return failure(BackendError::Kind::StartFailed,
                            std::format("could not start the output device: {}",
@@ -298,6 +302,13 @@ public:
         return callbacks_.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] std::optional<pthread_t> render_thread() const noexcept override {
+        if (!thread_known_.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        return thread_.load(std::memory_order_relaxed);
+    }
+
 private:
     // The audio thread's entry point.
     static void callback(ma_device* device, void* output, const void* /*input*/,
@@ -305,6 +316,13 @@ private:
         const auto host_time = core::monotonic_now();
         auto* const self = static_cast<MiniaudioBackend*>(device->pUserData);
         self->callbacks_.fetch_add(1, std::memory_order_relaxed);
+        // The first callback since the device started names its thread, for
+        // the control thread to raise (specs/health-checks/spec.md
+        // requirement 4).
+        if (!self->thread_known_.load(std::memory_order_relaxed)) {
+            self->thread_.store(core::current_thread(), std::memory_order_relaxed);
+            self->thread_known_.store(true, std::memory_order_release);
+        }
         const std::span<float> out{static_cast<float*>(output),
                                    std::size_t{frames} * self->channels_};
         static_cast<void>(render_interleaved(*self->core_, self->scratch_, out, self->channels_,
@@ -329,6 +347,9 @@ private:
     DriverId driver_ = kDefaultDriver;
     std::chrono::nanoseconds output_latency_{0};
     std::atomic<std::uint64_t> callbacks_{0};
+    /// The thread of the first callback since the device last started.
+    std::atomic<pthread_t> thread_;
+    std::atomic<bool> thread_known_{false};
     LossDetector loss_;
     Context context_;
     ma_device device_{};

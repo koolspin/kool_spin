@@ -5,12 +5,15 @@
 /// Keeping the core rendering through device loss (ADR 0002 §4, ADR 0003 §15).
 
 #include <ks/engine/audio_backend.h>
+#include <ks/engine/paced_backend.h>
 #include <ks/engine/render_core.h>
+#include <ks/engine/thread_priority.h>
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace ks::engine {
 
@@ -46,6 +49,9 @@ public:
     void start();
 
     /// Notices a lost device, looks for its return, and hands back to it.
+    /// Once a device's thread has called back, raises it to real-time
+    /// priority if it isn't already (specs/health-checks/spec.md
+    /// requirement 5).
     void poll();
 
     /// Mutes the core, waits for the fade out (at most the fade time plus
@@ -59,8 +65,20 @@ public:
     [[nodiscard]] std::uint32_t device_sample_rate() const noexcept;
     [[nodiscard]] std::uint32_t device_channels() const noexcept;
 
+    /// The scheduling of the active driver's thread, after asking for
+    /// real-time priority (requirement 6): the device's while Playing, the
+    /// freewheel driver's while Freewheeling or Attaching. None while
+    /// Stopped, or before the thread is known.
+    [[nodiscard]] std::optional<ThreadScheduling> driver_scheduling() const noexcept;
+
+    /// How many devices have opened and started so far.
+    [[nodiscard]] std::uint64_t devices_started() const noexcept;
+
 private:
     using Clock = std::chrono::steady_clock;
+
+    /// poll()'s work on the state.
+    void poll_state();
 
     /// A DriverId never given out before.
     DriverId next_driver() noexcept;
@@ -81,8 +99,17 @@ private:
     /// period at `start_time`.
     void start_freewheel(Clock::time_point start_time);
 
+    /// Makes `device`, which has just started, the device waiting to become
+    /// active or to be adopted; its thread isn't known yet.
+    void set_device(std::unique_ptr<AudioBackend> device) noexcept;
+
+    /// Raises the device's thread, and reads the freewheel driver's, once
+    /// they're known.
+    void check_threads() noexcept;
+
     /// Stops and destroys `backend`, if there is one.
-    static void close(std::unique_ptr<AudioBackend>& backend) noexcept;
+    template <typename Backend>
+    static void close(std::unique_ptr<Backend>& backend) noexcept;
 
     RenderCore* core_;
     DeviceSource* source_;
@@ -92,8 +119,15 @@ private:
     /// While Playing, the active device; while Attaching, the device waiting
     /// to become active.
     std::unique_ptr<AudioBackend> device_;
-    std::unique_ptr<AudioBackend> freewheel_;
+    std::unique_ptr<PacedBackend> freewheel_;
     DriverId device_driver_ = kDefaultDriver;
+
+    /// The device's thread's scheduling, once it has been raised; and the
+    /// freewheel driver's, once it has asked. Cleared when they go, so they
+    /// never name a thread that has ended.
+    std::optional<ThreadScheduling> device_scheduling_;
+    std::optional<ThreadScheduling> freewheel_scheduling_;
+    std::uint64_t devices_started_ = 0;
 
     /// The next DriverId to give out. 0 is kDefaultDriver, never given out.
     std::uint32_t next_driver_ = 1;

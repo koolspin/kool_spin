@@ -7,10 +7,13 @@
 
 #include <ks/engine/render_core.h>
 
+#include <pthread.h>
+
 #include <chrono>
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace ks::engine {
@@ -75,6 +78,14 @@ public:
     /// paced periods), whether or not anything rendered. Any thread may call
     /// it.
     [[nodiscard]] virtual std::uint64_t callbacks() const noexcept = 0;
+
+    /// The thread it renders on, once it has rendered since it last started;
+    /// none before, or if it can't say (specs/health-checks/spec.md
+    /// requirement 4). Valid only while the backend runs: the thread may end
+    /// once it stops. Any thread may call it.
+    [[nodiscard]] virtual std::optional<pthread_t> render_thread() const noexcept {
+        return std::nullopt;
+    }
 };
 
 /// How the output controller reaches the device: whether it's there, and

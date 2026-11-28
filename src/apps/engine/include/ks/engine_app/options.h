@@ -82,6 +82,10 @@ struct Options {
     std::optional<std::filesystem::path> runtime_dir;
     /// `--state-dir` (specs/state-folder/spec.md requirement 10).
     std::optional<std::filesystem::path> state_dir;
+    /// `--sysfs-root <dir>`, for tests, on Linux only: where the power
+    /// checks read what they'd read under /sys (specs/health-checks/spec.md
+    /// requirement 17).
+    std::optional<std::filesystem::path> sysfs_root;
     std::optional<engine::MiniaudioBackends> backend;
     /// A device number, as `ks-harness --list-devices` numbers them. Checked
     /// against the device list by run(), not here.

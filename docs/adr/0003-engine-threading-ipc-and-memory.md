@@ -87,8 +87,9 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   - one block per deck;
   - one for the mixer;
   - one for engine status: device state, underrun and NaN counts, callback load, heartbeat, and the last sequence number applied for each client;
-  - the resume state (section 11).
-- **Writers and readers.** The audio thread is the only writer. No real-time thread ever reads a seqlock.
+  - the resume state (section 11);
+  - the health checks' results (section 6).
+- **Writers and readers.** The audio thread is the only writer, except for the health block, which the control thread writes. No real-time thread ever reads a seqlock.
 - **Memory model.** A seqlock over plain memory is a data race, which is undefined behavior in C++ and which TSan reports. Payloads are therefore arrays of `std::uint64_t`, read and written only through `std::atomic_ref` with relaxed ordering (section 7), and fences order them:
   - **writer:** store `seq + 1` (relaxed); release fence; store the payload; store `seq + 2` (release);
   - **reader:** load `seq` (acquire), retrying while it's odd; load the payload into a local copy; acquire fence; load `seq` again (relaxed), and retry if it changed.
@@ -116,6 +117,9 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   5. Meanwhile, the control thread maps the segment, locks it, and builds a track object. It hands the object to the audio thread through an internal ring (section 10).
   6. Playback can start before decoding finishes (section 9).
   7. When decoding ends, the supervisor tells the client that asked (`DecodeEnded`), after it has answered the load. A client unloads a deck by asking the supervisor (`UnloadDeck`), which asks the engine's control thread.
+- **Health checks** (ADR 0002 §7; `specs/health-checks/spec.md`). The control thread runs a health pass 100 ms after `Ready`, then once a second. It checks the active driver thread's real-time priority, memory locking (section 9), the power profile and power source, and the highest render load of the last 10 s, which the audio thread keeps with a lock-free maximum and the control thread takes with an exchange.
+  - It writes what it found to a seqlocked health block in the engine-state segment, after the resume slots, which it alone writes, and which a restarted engine starts again from 0 passes. `ks-play health` prints it.
+  - It logs a warning when a check starts failing, and a line at info when it's fine again. A failing check never stops the engine.
 
 ### 7. Shared-memory segments
 
@@ -157,8 +161,9 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
 - **Total budget:** half of physical memory by default, configurable. A load that would exceed it, judged by the decoder's duration estimate, is refused with a clear error. A file with no estimate counts as the per-track cap. Once a track has decoded, its actual size counts instead.
 - **Progressive playback:** as it decodes, the worker publishes `frames_ready` with release ordering. The engine's control thread reads it with acquire ordering, checks it, faults in the newly decoded pages, and locks them when it can, before it passes the count on to the audio thread. The audio thread therefore never reads the shared header, and never takes the first page fault on track memory. Past that point, the deck plays silence and reports that it's waiting.
 - **Memory locking:**
-  - The engine calls `mlockall(MCL_CURRENT)` after starting and after each device opens.
-  - It locks each track in chunks as the track decodes.
+  - On Linux, the engine calls `mlockall(MCL_CURRENT | MCL_ONFAULT)` once it has built the engine, and after each device opens. `MCL_ONFAULT` locks pages only as they're touched: with `MCL_CURRENT` alone, the track segments mapped then, sized at the cap, would be committed in full.
+  - macOS has no `mlockall()`, so only tracks are locked there.
+  - It locks each track in chunks as the track decodes, with `mlock()` on the pages it has just faulted in. A chunk that can't be locked isn't retried; the track plays on.
   - It never uses `MCL_FUTURE`. With a low `RLIMIT_MEMLOCK` (the kernel default is 8 MiB), every later `mmap` would fail.
   - Locking is best effort. When it fails, the health check warns.
 - **Release:** when no deck holds a track, the engine unmaps it and tells the supervisor, which closes its descriptor. The kernel frees the memory when the last mapping is gone.
@@ -247,9 +252,9 @@ Phase 4 adds MIDI and controller-script threads. They send to the audio thread t
   3. When the device is back, it reopens it.
   4. Once the device is calling back, the control thread makes it the active driver and stops the freewheel driver, and the output fades back in.
 - **Real-time priority:** no rtkit, which would bring D-Bus into the engine.
-  - Device threads get whatever priority their backend gives them. PipeWire's JACK layer manages its own.
-  - The freewheel thread asks for `SCHED_FIFO` on Linux, which needs `RLIMIT_RTPRIO`, and for a time-constraint policy on macOS.
-  - The health check reports when a thread doesn't get the priority it asked for.
+  - The freewheel thread asks for `SCHED_FIFO` at 70 on Linux, which needs `RLIMIT_RTPRIO`, and for a time-constraint policy on macOS.
+  - Device threads start with whatever priority their backend gives them. At a device's first callback, its thread records its handle (`core::current_thread()`); the control thread then reads the thread's scheduling, and if it isn't real-time, asks for it as the freewheel thread does. A thread that's already real-time, such as JACK's or Core Audio's, isn't touched. The handle is dropped before the device closes.
+  - The health check reports when the active driver's thread doesn't have real-time priority after asking.
 
 ### 16. Phase 1 is split in two
 

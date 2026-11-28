@@ -40,7 +40,7 @@ The maintainer's DJ software from the 1990s lost sets when Windows kernel audio 
 | Process | Contains | Allowed dependencies | If it crashes |
 |---|---|---|---|
 | **Supervisor** (`kool_spin`) | Starts, monitors, and restarts the other processes. Creates and owns the shared-memory regions, so they outlive any child. Writes the session journal. | Standard library only | The children keep running. Loading tracks and automatic recovery are unavailable until the orphaned engine is stopped (ADR 0003), and the UI says so. |
-| **Engine** (`ks-engine`) | Audio device I/O, decks, mixer, output safety stage, MIDI I/O, controller mapping scripts. | miniaudio, libremidi, QuickJS-ng; later, a time-stretch library | The supervisor restarts it. It maps the decoded tracks and its last published state from shared memory, and resumes playing with a short fade-in. |
+| **Engine** (`ks-engine`) | Audio device I/O, decks, mixer, output safety stage, MIDI I/O, controller mapping scripts. | miniaudio, libremidi, QuickJS-ng; later, a time-stretch library. On macOS, the IOKit and CoreFoundation system frameworks, for the power source | The supervisor restarts it. It maps the decoded tracks and its last published state from shared memory, and resumes playing with a short fade-in. |
 | **UI** (`ks-ui`) | Qt Quick interface, GPU waveforms. Hosts the library component, which owns the database. | Qt, SQLite | Audio and controllers are unaffected. The supervisor restarts it, and it rebuilds its view from the engine's state. |
 | **Workers** (`ks-worker`) | Decoding, tag reading, analysis. One job at a time; disposable. | FFmpeg, TagLib, qm-dsp, libebur128 | That job fails with an error, and the file is flagged so it isn't retried in a loop. Nothing else is affected. |
 
@@ -95,6 +95,8 @@ A bug must never become a full-scale blast through a PA.
   - a power-saving CPU profile, or running on battery;
   - audio callback load too close to the buffer deadline.
 - System sleep, display sleep, and macOS App Nap are blocked while any deck is loaded.
+- The engine runs the checks, and reports them in its log and in shared state (ADR 0003 §6; `specs/health-checks/spec.md`). On macOS, it reads the power source through IOKit.
+- macOS's App Nap and Low Power Mode wait for the Qt UI (Phase 3): App Nap applies to apps, and both need Foundation, which is Objective-C. Until then, the power-profile check is unknown on macOS.
 
 ### 8. Verification
 
