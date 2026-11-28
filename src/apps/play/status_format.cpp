@@ -3,13 +3,16 @@
 #include "status_format.h"
 
 #include <ks/client/snapshot.h>
+#include <ks/ipc/state.h>
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace ks::play_app {
 namespace {
@@ -66,7 +69,120 @@ std::string rejection_field(client::Rejection rejection) {
     return name;
 }
 
+/// A pass or fail check as requirement 19 writes it: 1 when it passes, 0
+/// when it fails, `unknown` when it couldn't tell.
+std::string_view check_field(const client::HealthInfo& health, std::uint64_t bit) noexcept {
+    if ((health.known & bit) == 0) {
+        return "unknown";
+    }
+    return (health.failing & bit) != 0 ? "0" : "1";
+}
+
+/// The failing checks' names, comma-separated, or `none`.
+std::string failing_field(std::uint64_t failing) {
+    constexpr std::array<std::pair<std::uint64_t, std::string_view>, 6> kNames{{
+        {ipc::kHealthRealtime, "realtime"},
+        {ipc::kHealthMemory, "memory"},
+        {ipc::kHealthPowerProfile, "power-profile"},
+        {ipc::kHealthPowerSource, "power-source"},
+        {ipc::kHealthLoad, "load"},
+        {ipc::kHealthAwake, "awake"},
+    }};
+    std::string names;
+    for (const auto& [bit, name] : kNames) {
+        if ((failing & bit) != 0) {
+            if (!names.empty()) {
+                names += ',';
+            }
+            names += name;
+        }
+    }
+    return names.empty() ? std::string{"none"} : names;
+}
+
+std::string_view policy_name(client::Policy policy) noexcept {
+    switch (policy) {
+    case client::Policy::Other:
+        return "other";
+    case client::Policy::Fifo:
+        return "fifo";
+    case client::Policy::Rr:
+        return "rr";
+    case client::Policy::TimeConstraint:
+        return "time-constraint";
+    case client::Policy::Unknown:
+        break;
+    }
+    return "unknown";
+}
+
+std::string_view process_lock_name(client::ProcessLock lock) noexcept {
+    switch (lock) {
+    case client::ProcessLock::Locked:
+        return "locked";
+    case client::ProcessLock::Failed:
+        return "failed";
+    case client::ProcessLock::None:
+        break;
+    }
+    return "none";
+}
+
+std::string_view power_profile_name(client::PowerProfile profile) noexcept {
+    switch (profile) {
+    case client::PowerProfile::Normal:
+        return "normal";
+    case client::PowerProfile::Saving:
+        return "saving";
+    case client::PowerProfile::Unknown:
+        break;
+    }
+    return "unknown";
+}
+
+std::string_view power_source_name(client::PowerSource source) noexcept {
+    switch (source) {
+    case client::PowerSource::Mains:
+        return "mains";
+    case client::PowerSource::Battery:
+        return "battery";
+    case client::PowerSource::Unknown:
+        break;
+    }
+    return "unknown";
+}
+
+std::string_view awake_name(client::Awake awake) noexcept {
+    switch (awake) {
+    case client::Awake::Blocked:
+        return "blocked";
+    case client::Awake::NotBlocked:
+        return "not-blocked";
+    case client::Awake::Unknown:
+        break;
+    }
+    return "unknown";
+}
+
+std::string limit(std::uint64_t value) {
+    return value == ipc::kUnlimited ? std::string{"unlimited"} : std::to_string(value);
+}
+
 } // namespace
+
+void format_health(const client::HealthInfo& health, std::ostream& out) {
+    out << "health failing=" << failing_field(health.failing)
+        << " realtime=" << check_field(health, ipc::kHealthRealtime)
+        << " policy=" << policy_name(health.policy) << " priority=" << health.priority
+        << " rtprio_limit=" << limit(health.rtprio_limit)
+        << " memory=" << check_field(health, ipc::kHealthMemory)
+        << " process_lock=" << process_lock_name(health.process_lock)
+        << " memlock_limit=" << limit(health.memlock_limit)
+        << " locked_bytes=" << health.locked_bytes << " unlocked_bytes=" << health.unlocked_bytes
+        << " power_profile=" << power_profile_name(health.power_profile)
+        << " power_source=" << power_source_name(health.power_source)
+        << " peak_load=" << real(health.peak_load) << " awake=" << awake_name(health.awake) << '\n';
+}
 
 void format_status(const client::Snapshot& snapshot, std::ostream& out) {
     const client::EngineInfo& engine = snapshot.engine;

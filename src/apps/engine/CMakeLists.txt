@@ -21,6 +21,12 @@ target_link_libraries(ks_engine_app
     PUBLIC ks::engine ks::ipc
     PRIVATE ks::warnings)
 
+# The power source, on macOS (specs/health-checks/spec.md requirement 8;
+# ADR 0002 §1): system frameworks, not dependencies to install.
+if(APPLE)
+    target_link_libraries(ks_engine_app PRIVATE "-framework IOKit" "-framework CoreFoundation")
+endif()
+
 add_executable(ks-engine main.cpp)
 target_link_libraries(ks-engine PRIVATE ks::engine_app ks::warnings)
 

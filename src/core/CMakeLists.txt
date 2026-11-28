@@ -8,6 +8,7 @@ target_sources(ks_core INTERFACE
     BASE_DIRS include
     FILES
         include/ks/core/clock.h
-        include/ks/core/realtime.h)
+        include/ks/core/realtime.h
+        include/ks/core/thread.h)
 
 target_compile_features(ks_core INTERFACE cxx_std_23)

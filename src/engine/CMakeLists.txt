@@ -18,6 +18,7 @@ add_library(ks_engine STATIC
     render_core.cpp
     resume.cpp
     safety.cpp
+    thread_priority.cpp
     track.cpp)
 add_library(ks::engine ALIAS ks_engine)
 
@@ -41,6 +42,7 @@ target_sources(ks_engine PUBLIC
         include/ks/engine/render_core.h
         include/ks/engine/resume.h
         include/ks/engine/safety.h
+        include/ks/engine/thread_priority.h
         include/ks/engine/track.h)
 
 target_link_libraries(ks_engine

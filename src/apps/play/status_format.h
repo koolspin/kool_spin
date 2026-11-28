@@ -17,4 +17,8 @@ namespace ks::play_app {
 /// `1`, and a rejection's name has its spaces written `_`.
 void format_status(const client::Snapshot& snapshot, std::ostream& out);
 
+/// Writes `health` as specs/health-checks/spec.md requirement 19's `health`
+/// line.
+void format_health(const client::HealthInfo& health, std::ostream& out);
+
 } // namespace ks::play_app

@@ -15,9 +15,10 @@ namespace ks::core {
     // steady_clock::now() isn't annotated, so function effect analysis rejects
     // the call. It doesn't block: it reads the clock, usually without even a
     // system call (the vDSO on Linux, the commpage on macOS). RealtimeSanitizer
-    // still checks it at run time. Apart from the guardrail canaries, this is
-    // the only function-effects suppression, approved in
-    // specs/render-core/spec.md; don't add others without the maintainer's
+    // still checks it at run time. Apart from the guardrail canaries, this and
+    // current_thread() (<ks/core/thread.h>) are the only function-effects
+    // suppressions, approved in specs/render-core/spec.md and
+    // specs/health-checks/spec.md; don't add others without the maintainer's
     // approval.
 #if KS_HAS_NONBLOCKING
 #pragma clang diagnostic push

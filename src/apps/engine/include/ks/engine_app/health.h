@@ -11,6 +11,7 @@
 #include <ks/ipc/state.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -40,6 +41,35 @@ struct PowerProfileReading {
 /// `root`: ipc::kPowerSourceUnknown, kPowerSourceMains, or
 /// kPowerSourceBattery.
 [[nodiscard]] std::uint64_t read_power_source(const std::filesystem::path& root);
+
+/// The last mlockall()'s outcome (requirement 1).
+struct ProcessLock {
+    /// ipc::kProcessLockNone (not tried, or not available: macOS),
+    /// kProcessLockLocked, or kProcessLockFailed.
+    std::uint64_t state = ipc::kProcessLockNone;
+    /// Why it failed: strerror's text.
+    std::string error;
+};
+
+/// Locks `size` bytes from `address`, which is page-aligned, with mlock().
+/// Returns whether it did.
+///
+/// On Linux it makes the system call itself: the sanitizers' runtimes
+/// intercept mlock() and mlockall() as no-ops that report success, which
+/// would hide a refusal from the health check under `asan` and `tsan`.
+[[nodiscard]] bool lock_pages(void* address, std::size_t size) noexcept;
+
+/// Locks the process's current memory as it's touched, with
+/// `mlockall(MCL_CURRENT | MCL_ONFAULT)` (Linux), never MCL_FUTURE. On macOS,
+/// which has no mlockall(), does nothing and returns kProcessLockNone.
+[[nodiscard]] ProcessLock lock_process_memory();
+
+/// RLIMIT_MEMLOCK's soft limit, in bytes; ipc::kUnlimited for unlimited.
+[[nodiscard]] std::uint64_t memlock_limit() noexcept;
+
+/// RLIMIT_RTPRIO's soft limit (Linux), ipc::kUnlimited for unlimited; 0 on
+/// macOS, which has none.
+[[nodiscard]] std::uint64_t rtprio_limit() noexcept;
 
 /// What the control thread gives a health pass.
 struct HealthReadings {
@@ -81,6 +111,10 @@ public:
 
 private:
     ipc::HealthState state_{};
+    /// The checks whose failure the log has reported, and not yet their
+    /// recovery. A check that becomes unknown keeps its bit: it's neither
+    /// logged as fine again, nor, if it fails again, as failing again.
+    std::uint64_t reported_ = 0;
     /// The peak load each pass took, and when, for the last 10 s.
     std::deque<std::pair<Clock::time_point, double>> loads_;
 };

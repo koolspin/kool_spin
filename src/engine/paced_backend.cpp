@@ -2,18 +2,12 @@
 #include <ks/engine/paced_backend.h>
 
 #include <ks/core/realtime.h>
+#include <ks/core/thread.h>
 #include <ks/engine/block.h>
 #include <ks/engine/interleave.h>
+#include <ks/engine/thread_priority.h>
 
 #include <pthread.h>
-
-#ifdef __APPLE__
-#include <mach/mach.h>
-#include <mach/mach_time.h>
-#include <mach/thread_policy.h>
-#elifdef __linux__
-#include <sched.h>
-#endif
 
 #include <algorithm>
 #include <array>
@@ -25,6 +19,7 @@
 #include <format>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -65,40 +60,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-/// Asks for real-time priority for the calling thread, as ADR 0003 §15 says.
-/// Returns whether it was granted.
-bool request_realtime_priority([[maybe_unused]] std::chrono::nanoseconds period) {
-#ifdef __linux__
-    // Below PipeWire's data threads (88), and needs RLIMIT_RTPRIO.
-    constexpr int kPriority = 70;
-    sched_param param{};
-    param.sched_priority = kPriority;
-    return pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) == 0;
-#elifdef __APPLE__
-    mach_timebase_info_data_t timebase{};
-    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.numer == 0) {
-        return false;
-    }
-    // Mach absolute time units are numer/denom nanoseconds.
-    const auto ticks = [&timebase](std::int64_t nanoseconds) {
-        const auto value =
-            static_cast<std::uint64_t>(nanoseconds) * timebase.denom / timebase.numer;
-        return static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(value, std::numeric_limits<std::uint32_t>::max()));
-    };
-    thread_time_constraint_policy_data_t policy{};
-    policy.period = ticks(period.count());
-    policy.computation = ticks(period.count() / 2);
-    policy.constraint = ticks(period.count());
-    policy.preemptible = TRUE;
-    return thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,
-                             reinterpret_cast<thread_policy_t>(&policy),
-                             THREAD_TIME_CONSTRAINT_POLICY_COUNT) == KERN_SUCCESS;
-#else
-    return false;
-#endif
-}
-
 class PacedBackendImpl final : public PacedBackend {
 public:
     PacedBackendImpl(RenderCore& core, const PacedConfig& config)
@@ -127,7 +88,7 @@ public:
     ~PacedBackendImpl() override { stop(); }
 
     std::expected<void, BackendError> start() override {
-        if (thread_.joinable()) {
+        if (worker_.joinable()) {
             return {}; // already running
         }
         const Clock::time_point start_time =
@@ -137,12 +98,13 @@ public:
             const std::scoped_lock lock{mutex_};
             stop_requested_ = false;
         }
-        thread_ = std::thread{[this, start_time] { run(start_time); }};
+        thread_known_.store(false, std::memory_order_relaxed);
+        worker_ = std::thread{[this, start_time] { run(start_time); }};
         return {};
     }
 
     void stop() noexcept override {
-        if (!thread_.joinable()) {
+        if (!worker_.joinable()) {
             return;
         }
         {
@@ -150,7 +112,7 @@ public:
             stop_requested_ = true;
         }
         wake_.notify_all();
-        thread_.join();
+        worker_.join();
     }
 
     [[nodiscard]] const StreamInfo& info() const noexcept override { return info_; }
@@ -171,6 +133,13 @@ public:
         return priority_.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] std::optional<pthread_t> render_thread() const noexcept override {
+        if (!thread_known_.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        return thread_.load(std::memory_order_relaxed);
+    }
+
 private:
     /// The thread: renders each period at its host time, catching up when
     /// behind, until stopped or its device goes away.
@@ -178,10 +147,14 @@ private:
         const std::chrono::nanoseconds period =
             frames_to_duration(config_.period_frames, config_.sample_rate);
         if (config_.realtime_priority) {
-            priority_.store(request_realtime_priority(period) ? Priority::Granted
-                                                              : Priority::Refused,
+            priority_.store(request_realtime(core::current_thread(), period) ? Priority::Granted
+                                                                             : Priority::Refused,
                             std::memory_order_relaxed);
         }
+        // Once it has asked for its priority, so a reader of the thread's
+        // scheduling sees what it got.
+        thread_.store(core::current_thread(), std::memory_order_relaxed);
+        thread_known_.store(true, std::memory_order_release);
 
         std::uint64_t n = 0;
         std::unique_lock lock{mutex_};
@@ -258,9 +231,12 @@ private:
     std::atomic<bool> lost_{false};
     std::atomic<std::uint64_t> callbacks_{0};
     std::atomic<Priority> priority_{Priority::NotRequested};
+    /// The thread, once it has started and asked for its priority.
+    std::atomic<pthread_t> thread_;
+    std::atomic<bool> thread_known_{false};
 
     bool started_before_ = false;
-    std::thread thread_;
+    std::thread worker_;
     std::mutex mutex_;
     std::condition_variable wake_;
     bool stop_requested_ = false; ///< Guarded by mutex_.

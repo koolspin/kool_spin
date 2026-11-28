@@ -2,6 +2,7 @@
 #include <ks/engine_app/segment_track.h>
 
 #include <ks/engine/track.h>
+#include <ks/engine_app/health.h>
 #include <ks/ipc/fd.h>
 #include <ks/ipc/region.h>
 #include <ks/ipc/track_segment.h>
@@ -114,6 +115,7 @@ TrackPass SegmentTrack::pass(std::size_t budget) {
     TrackPass result;
     if (target > passed_on_) {
         fault_in(passed_on_, target);
+        lock(passed_on_, target);
         result.faulted = static_cast<std::size_t>(target - passed_on_) * ipc::kTrackFrameSize;
     }
     const bool complete = progress->complete && target == progress->frames;
@@ -149,6 +151,26 @@ void SegmentTrack::fault_in(std::uint64_t from, std::uint64_t to) const noexcept
         // this process, so the audio thread never takes the first fault on it.
         const volatile std::byte& first = bytes[page];
         static_cast<void>(first);
+    }
+}
+
+void SegmentTrack::lock(std::uint64_t from, std::uint64_t to) noexcept {
+    const std::span<std::byte> bytes = region_.bytes();
+    const std::size_t begin =
+        ipc::kTrackSamplesOffset + (static_cast<std::size_t>(from) * ipc::kTrackFrameSize);
+    const std::size_t end =
+        ipc::kTrackSamplesOffset + (static_cast<std::size_t>(to) * ipc::kTrackFrameSize);
+    // Whole pages: the mapping starts on one.
+    const std::size_t first = begin / page_size_ * page_size_;
+    const std::size_t last =
+        std::min(bytes.size(), (end + page_size_ - 1) / page_size_ * page_size_);
+    const std::span<std::byte> pages = bytes.subspan(first, last - first);
+    // The frames' own bytes, so a page shared by two ranges counts once.
+    const std::uint64_t counted = end - begin;
+    if (lock_pages(pages.data(), pages.size())) {
+        locked_bytes_ += counted;
+    } else {
+        unlocked_bytes_ += counted;
     }
 }
 

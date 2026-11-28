@@ -226,8 +226,7 @@ std::uint64_t Engine::dropped_events() const noexcept KS_NONBLOCKING {
 }
 
 double Engine::take_peak_load() noexcept KS_NONBLOCKING {
-    static_cast<void>(peak_load_.load(std::memory_order_relaxed));
-    return 0.0; // Step 10a: not built yet.
+    return peak_load_.exchange(0.0, std::memory_order_relaxed);
 }
 
 std::uint64_t Engine::handovers_given() const noexcept {
@@ -584,6 +583,13 @@ bool Engine::drain(PendingRelease& release) noexcept KS_NONBLOCKING {
 void Engine::rendered(const Block& block, const RenderStats& stats) noexcept KS_NONBLOCKING {
     // With or without a state block, and before anything is published.
     record_rendered(block, stats);
+    // A lock-free maximum: the control thread takes it with an exchange
+    // (specs/health-checks/spec.md requirement 9).
+    double peak = peak_load_.load(std::memory_order_relaxed);
+    while (stats.render_load > peak &&
+           !peak_load_.compare_exchange_weak(peak, stats.render_load, std::memory_order_relaxed,
+                                             std::memory_order_relaxed)) {
+    }
     if (!status_writer_.has_value() || !mixer_writer_.has_value()) {
         release_held(); // No snapshot to wait for.
         return;

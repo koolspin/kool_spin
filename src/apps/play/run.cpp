@@ -49,6 +49,11 @@ constexpr Milliseconds kDecodePoll{1'000};
 /// How long `status --watch` waits for each interval's `Pong`.
 constexpr Milliseconds kWatchPing{1'000};
 
+/// How long `health` waits for the engine's first health pass, and how often
+/// it looks.
+constexpr Milliseconds kHealthWait{2'000};
+constexpr Milliseconds kHealthPoll{20};
+
 /// Exit statuses for SIGINT and SIGTERM (requirement 29): 128 + the signal.
 constexpr int kExitInterrupted = 130;
 constexpr int kExitTerminated = 143;
@@ -231,6 +236,28 @@ int do_status(Session& session, const Status& status, const std::atomic<bool>& s
     }
 }
 
+/// `health` (specs/health-checks/spec.md requirement 19): waits up to
+/// kHealthWait for the engine's first health pass, then prints it.
+int do_health(Session& session, std::ostream& out, std::ostream& err) {
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + kHealthWait;
+    for (;;) {
+        const client::Result<client::Snapshot> snapshot = session.snapshot();
+        if (!snapshot) {
+            return report(err, snapshot.error());
+        }
+        if (snapshot->health) {
+            format_health(*snapshot->health, out);
+            return finish(out, err);
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            err << "ks-play: no health check yet\n";
+            return kExitFailed;
+        }
+        std::this_thread::sleep_for(kHealthPoll);
+    }
+}
+
 int do_stop(Session& session, std::ostream& out, std::ostream& err) {
     if (const client::Result<void> done = session.stop(); !done) {
         return report(err, done.error());
@@ -314,6 +341,8 @@ int work(const Invocation& invocation, const std::atomic<bool>& stop, std::ostre
                 return do_control(*session, request, out, err);
             } else if constexpr (std::is_same_v<T, Status>) {
                 return do_status(*session, request, stop, out, err);
+            } else if constexpr (std::is_same_v<T, Health>) {
+                return do_health(*session, out, err);
             } else if constexpr (std::is_same_v<T, Stop>) {
                 return do_stop(*session, out, err);
             } else if constexpr (std::is_same_v<T, Ping>) {

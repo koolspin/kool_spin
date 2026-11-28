@@ -45,12 +45,14 @@ struct Status {
     std::uint32_t interval_ms = 500;
 };
 
+/// `health` (specs/health-checks/spec.md requirement 19).
+struct Health {};
 struct Stop {};
 struct Ping {};
 /// `--help`.
 struct Help {};
 
-using Request = std::variant<Load, Unload, Control, Status, Stop, Ping, Help>;
+using Request = std::variant<Load, Unload, Control, Status, Health, Stop, Ping, Help>;
 
 /// A parsed command line.
 struct Invocation {

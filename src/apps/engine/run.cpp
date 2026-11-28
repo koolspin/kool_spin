@@ -7,6 +7,8 @@
 #include <ks/engine/output_controller.h>
 #include <ks/engine/paced_backend.h>
 #include <ks/engine/render_core.h>
+#include <ks/engine/thread_priority.h>
+#include <ks/engine_app/health.h>
 #include <ks/engine_app/options.h>
 #include <ks/engine_app/segment_track.h>
 #include <ks/ipc/child_process.h>
@@ -19,6 +21,7 @@
 #include <ks/ipc/recording.h>
 #include <ks/ipc/region.h>
 #include <ks/ipc/runtime_dir.h>
+#include <ks/ipc/seqlock.h>
 #include <ks/ipc/state.h>
 #include <ks/ipc/state_dir.h>
 #include <ks/ipc/track_segment.h>
@@ -59,6 +62,28 @@ using Clock = std::chrono::steady_clock;
 
 /// How long the engine keeps trying to send Done once it has stopped.
 constexpr std::chrono::seconds kDoneTimeout{1};
+
+/// The first health pass comes this long after Ready, and the others this
+/// far apart (specs/health-checks/spec.md requirement 11).
+constexpr std::chrono::milliseconds kFirstHealthPass{100};
+constexpr std::chrono::seconds kHealthInterval{1};
+
+/// The health block's code for a thread's scheduling policy.
+std::uint64_t policy_code(engine::SchedulingPolicy policy) noexcept {
+    switch (policy) {
+    case engine::SchedulingPolicy::Other:
+        return ipc::kPolicyOther;
+    case engine::SchedulingPolicy::Fifo:
+        return ipc::kPolicyFifo;
+    case engine::SchedulingPolicy::RoundRobin:
+        return ipc::kPolicyRr;
+    case engine::SchedulingPolicy::TimeConstraint:
+        return ipc::kPolicyTimeConstraint;
+    case engine::SchedulingPolicy::Unknown:
+        break;
+    }
+    return ipc::kPolicyUnknown;
+}
 
 // ---- Signals (requirement 11; specs/audio-events/spec.md requirement 9) --------
 //
@@ -227,6 +252,15 @@ private:
     void relay_tracks();
     /// Logs how `track` finished.
     void log_finished(const SegmentTrack& track, const TrackFinished& finished);
+    /// Locks the process's memory (specs/health-checks/spec.md requirement
+    /// 1), and remembers how it went and after how many devices.
+    void lock_memory();
+    /// Locks the memory again once another device has started, and runs a
+    /// health pass when one is due (requirements 1 and 11).
+    void check_health(Clock::time_point now);
+    /// Runs a health pass: gathers the readings, writes the health block,
+    /// and logs what changed (requirements 11 to 13).
+    void health_pass(Clock::time_point now);
     /// Closes the supervisor's socket: the engine plays on (requirement 12).
     void lose_supervisor(std::string_view why);
     /// Fades out and stops, replies Done if `stop` asked, and returns kExitOk
@@ -279,6 +313,15 @@ private:
     };
     /// In the order they're sent.
     std::deque<HeldMessage> held_messages_;
+
+    /// The health checks (specs/health-checks/spec.md): the pass, the
+    /// health block's writer, when the next pass is due, the last
+    /// mlockall()'s outcome, and how many devices had started by then.
+    HealthMonitor health_;
+    std::optional<ipc::SeqlockWriter<ipc::HealthState>> health_writer_;
+    Clock::time_point next_health_pass_;
+    ProcessLock process_lock_;
+    std::uint64_t locked_after_devices_ = 0;
 };
 
 std::expected<void, StartFailure>
@@ -376,6 +419,10 @@ std::expected<void, StartFailure> EngineProcess::start() {
     if (state == nullptr) {
         return failure("the engine-state segment is too small");
     }
+    // A restarted engine counts its health passes from 0 again
+    // (specs/health-checks/spec.md requirement 15).
+    health_writer_.emplace(state->health);
+    health_writer_->write(ipc::HealthState{});
 
     // 4. The recording, and the tracks a restarted engine is given.
     if (options_->record_fd) {
@@ -390,6 +437,7 @@ std::expected<void, StartFailure> EngineProcess::start() {
     // 5 to 7. The engine, which resumes if it can, before the device opens;
     // the device source; and the output.
     build_engine(*state);
+    lock_memory();
     core_ = std::make_unique<engine::RenderCore>(*engine_);
     const std::expected<engine::DeviceSource*, StartFailure> source = make_source();
     if (!source) {
@@ -408,11 +456,15 @@ std::expected<void, StartFailure> EngineProcess::start() {
     controller_ = std::make_unique<engine::OutputController>(*core_, **source, output);
     controller_->start();
     log_output();
+    if (controller_->devices_started() != locked_after_devices_) {
+        lock_memory();
+    }
 
     // 7. Ready.
     supervisor_ = std::make_unique<ipc::Connection>(std::move(supervisor));
     send(ipc::Message{.request_id = 0, .body = ipc::msg::Ready{}});
     report(ipc::LogLevel::Info, "ready");
+    next_health_pass_ = Clock::now() + kFirstHealthPass;
     release_unheld_tracks();
     return {};
 }
@@ -629,6 +681,7 @@ int EngineProcess::loop() {
         send_held_messages();
         relay_tracks();
         retry_detaches();
+        check_health(Clock::now());
         if (ipc::take_stop_signal()) {
             return stop(std::nullopt, "got a signal");
         }
@@ -919,6 +972,51 @@ void EngineProcess::log_finished(const SegmentTrack& track, const TrackFinished&
     }
     report(ipc::LogLevel::Warning,
            std::format("track {} failed after {} frames", track.id(), finished.frames));
+}
+
+void EngineProcess::lock_memory() {
+    locked_after_devices_ = controller_ ? controller_->devices_started() : 0;
+    process_lock_ = lock_process_memory();
+}
+
+void EngineProcess::check_health(Clock::time_point now) {
+    // The device's thread and buffers are new mappings since the last lock.
+    if (controller_->devices_started() != locked_after_devices_) {
+        lock_memory();
+    }
+    if (now >= next_health_pass_) {
+        health_pass(now);
+        next_health_pass_ = now + kHealthInterval;
+    }
+}
+
+void EngineProcess::health_pass(Clock::time_point now) {
+    HealthReadings readings;
+    if (const std::optional<engine::ThreadScheduling> scheduling =
+            controller_->driver_scheduling()) {
+        readings.policy = policy_code(scheduling->policy);
+        readings.priority = static_cast<std::uint64_t>(std::max(scheduling->priority, 0));
+    }
+    readings.rtprio_limit = rtprio_limit();
+    readings.memlock_limit = memlock_limit();
+    readings.process_lock = process_lock_.state;
+    readings.process_lock_error = process_lock_.error;
+    for (const std::unique_ptr<SegmentTrack>& track : tracks_) {
+        readings.locked_bytes += track->locked_bytes();
+        readings.unlocked_bytes += track->unlocked_bytes();
+    }
+    const std::filesystem::path root = options_->sysfs_root.value_or(std::filesystem::path{"/sys"});
+    readings.power_profile = read_power_profile(root);
+    readings.power_source = read_power_source(root);
+    readings.peak_load = engine_->take_peak_load();
+
+    const std::vector<engine::EventLine> lines = health_.pass(now, readings);
+    if (health_writer_) {
+        health_writer_->write(health_.state());
+    }
+    for (const engine::EventLine& line : lines) {
+        report(line.level, line.text);
+    }
 }
 
 void EngineProcess::lose_supervisor(std::string_view why) {

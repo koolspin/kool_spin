@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <ks/engine/output_controller.h>
 
+#include <ks/engine/block.h>
 #include <ks/engine/paced_backend.h>
+#include <ks/engine/thread_priority.h>
+
+#include <pthread.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -38,7 +46,8 @@ void OutputController::start() {
         // Active before it starts, so its first callback renders.
         core_->activate(driver);
         if (device->start()) {
-            adopt_device(std::move(device), driver, now);
+            set_device(std::move(device));
+            adopt_device(std::move(device_), driver, now);
             set_state(OutputState::Playing);
             return;
         }
@@ -49,6 +58,11 @@ void OutputController::start() {
 }
 
 void OutputController::poll() {
+    poll_state();
+    check_threads();
+}
+
+void OutputController::poll_state() {
     const Clock::time_point now = Clock::now();
     switch (state_) {
     case OutputState::Stopped:
@@ -80,7 +94,7 @@ void OutputController::poll() {
         if (std::unique_ptr<AudioBackend> device = open_device(driver); device && device->start()) {
             // Not active yet: the freewheel driver keeps rendering until the
             // device calls back.
-            device_ = std::move(device);
+            set_device(std::move(device));
             device_driver_ = driver;
             device_started_ = now;
             set_state(OutputState::Attaching);
@@ -130,6 +144,52 @@ std::uint32_t OutputController::device_channels() const noexcept {
     return channels_;
 }
 
+std::optional<ThreadScheduling> OutputController::driver_scheduling() const noexcept {
+    switch (state_) {
+    case OutputState::Playing:
+        return device_scheduling_;
+    case OutputState::Freewheeling:
+    case OutputState::Attaching:
+        return freewheel_scheduling_;
+    case OutputState::Stopped:
+        break;
+    }
+    return std::nullopt;
+}
+
+std::uint64_t OutputController::devices_started() const noexcept {
+    return devices_started_;
+}
+
+void OutputController::set_device(std::unique_ptr<AudioBackend> device) noexcept {
+    device_ = std::move(device);
+    device_scheduling_.reset();
+    ++devices_started_;
+}
+
+void OutputController::check_threads() noexcept {
+    if (!device_) {
+        device_scheduling_.reset();
+    } else if (!device_scheduling_) {
+        if (const std::optional<pthread_t> thread = device_->render_thread()) {
+            const StreamInfo& info = device_->info();
+            const std::size_t period =
+                info.period_frames != 0 ? info.period_frames : config_.freewheel_period_frames;
+            const std::uint32_t rate =
+                info.sample_rate != 0 ? info.sample_rate : config_.default_sample_rate;
+            device_scheduling_ = raise_to_realtime(*thread, frames_to_duration(period, rate));
+        }
+    }
+    if (!freewheel_) {
+        freewheel_scheduling_.reset();
+    } else if (!freewheel_scheduling_) {
+        // It asks for its own priority before it names its thread.
+        if (const std::optional<pthread_t> thread = freewheel_->render_thread()) {
+            freewheel_scheduling_ = read_scheduling(*thread);
+        }
+    }
+}
+
 void OutputController::set_state(OutputState state) noexcept {
     state_ = state;
     core_->set_output_state(state);
@@ -177,10 +237,12 @@ void OutputController::start_freewheel(Clock::time_point start_time) {
     core_->activate(driver);
     if ((*opened)->start()) {
         freewheel_ = std::move(*opened);
+        freewheel_scheduling_.reset();
     }
 }
 
-void OutputController::close(std::unique_ptr<AudioBackend>& backend) noexcept {
+template <typename Backend>
+void OutputController::close(std::unique_ptr<Backend>& backend) noexcept {
     if (backend) {
         backend->stop();
         backend.reset();

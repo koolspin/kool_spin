@@ -77,9 +77,17 @@ public:
     /// The frames passed on to the audio thread so far.
     [[nodiscard]] std::uint64_t passed_on() const noexcept { return passed_on_; }
 
+    /// The bytes of frames pass() has locked in memory, and those it couldn't
+    /// (specs/health-checks/spec.md requirement 2). Unmapping the track
+    /// unlocks them.
+    [[nodiscard]] std::uint64_t locked_bytes() const noexcept { return locked_bytes_; }
+    [[nodiscard]] std::uint64_t unlocked_bytes() const noexcept { return unlocked_bytes_; }
+
     /// Reads the header once and passes its progress on (requirement 5):
     /// checks it; faults in the pages of newly published frames, at most
-    /// `budget` bytes of them; and publishes the frames faulted in, complete
+    /// `budget` bytes of them, and locks them in memory if it can
+    /// (specs/health-checks/spec.md requirement 2, never retried); and
+    /// publishes the frames faulted in, complete
     /// once the header is complete and every frame has been faulted in. A
     /// corrupt header finishes the track at the frames already passed on.
     /// Does nothing once the track is finished.
@@ -92,12 +100,18 @@ private:
     /// Reads a byte of every page that holds a byte of frames [from, to).
     void fault_in(std::uint64_t from, std::uint64_t to) const noexcept;
 
+    /// Locks the pages that hold frames [from, to), and counts their bytes
+    /// as locked or unlocked.
+    void lock(std::uint64_t from, std::uint64_t to) noexcept;
+
     ipc::Fd segment_;
     ipc::Region region_;
     const ipc::TrackHeader* header_;
     std::unique_ptr<engine::Track> track_;
     std::size_t page_size_;
     std::uint64_t passed_on_ = 0;
+    std::uint64_t locked_bytes_ = 0;
+    std::uint64_t unlocked_bytes_ = 0;
     bool finished_ = false;
 };
 
