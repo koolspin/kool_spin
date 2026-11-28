@@ -105,6 +105,8 @@ Exit criteria:
   - **Step 9c, restoring the session: done** (`specs/session-journal/spec.md`). At launch, before the engine starts, the supervisor restores the decks and the mixer from the journal, paused, through a resume slot and `--track`. Entries it can't restore are kept in the journal for the next launch; a changed file starts at 0; after an orphan, playing decks move on by the time it played on.
 - Per-process logs through shared memory, with shared timestamps.
 - Health checks reported by `ks-play`: real-time priority, memory locking, CPU power profile, battery. System sleep is blocked while decks are loaded.
+  - **Step 10a, the health checks and memory locking: done** (`specs/health-checks/spec.md`). The engine raises its device thread to real-time priority if it can, locks its memory with `mlockall(MCL_CURRENT | MCL_ONFAULT)` on Linux and each track as it decodes, and once a second checks priority, memory locking, the power profile and source, and render load. It logs what starts failing, and `ks-play health` prints the health block.
+  - Step 10b, keeping the machine awake while a deck is loaded, through `systemd-inhibit` or `caffeinate`, is next.
 
 Exit criteria:
 
