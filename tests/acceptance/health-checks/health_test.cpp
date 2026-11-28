@@ -2,8 +2,9 @@
 // Acceptance tests for specs/health-checks/spec.md, step 10a, in the test's
 // own process: the health block's layout (requirement 12), the engine's peak
 // load (requirement 9), the load check over 10 s (requirements 10 and 13),
-// the power profile and source read from a fake /sys (requirements 7 and 8),
-// and ks-engine's --sysfs-root (requirement 17).
+// the memory check (requirement 3), the power profile and source read from a
+// fake /sys (requirements 7 and 8), the client's view of the block
+// (requirement 14), and ks-engine's --sysfs-root (requirement 17).
 //
 // The peak-load tests drive the engine on the test's threads, as the render
 // core would, so under the rtsan preset RealtimeSanitizer checks
@@ -11,6 +12,7 @@
 
 #include <ks/engine_app/health.h>
 
+#include <ks/client/snapshot.h>
 #include <ks/engine/block.h>
 #include <ks/engine/engine.h>
 #include <ks/engine/render_core.h>
@@ -34,6 +36,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <span>
@@ -123,6 +126,13 @@ std::size_t count(const std::vector<EventLine>& lines, LogLevel level, std::stri
 
 double real(std::uint64_t code) noexcept {
     return std::bit_cast<double>(code);
+}
+
+/// `value`'s value, failing the test if it has none.
+template <typename T>
+T require(const std::optional<T>& value) {
+    REQUIRE(value.has_value());
+    return value.value_or(T{});
 }
 
 /// Readings in which only the load says anything.
@@ -480,5 +490,121 @@ TEST_CASE("Health: options", "[health]") {
 #endif
     SECTION("--help doesn't list it") {
         CHECK(ks::engine_app::usage().find("--sysfs-root") == std::string::npos);
+    }
+}
+
+TEST_CASE("Health: the memory check", "[health]") {
+    HealthMonitor monitor;
+    HealthReadings readings;
+    readings.memlock_limit = 65'536;
+
+    SECTION("mlockall() failed, with no tracks: failing") {
+        readings.process_lock = ks::ipc::kProcessLockFailed;
+        readings.process_lock_error = "Cannot allocate memory";
+        const std::vector<EventLine> failed = monitor.pass(kStart, readings);
+        CAPTURE(failed.size());
+        CHECK(count(failed, LogLevel::Warning,
+                    "health: memory isn't locked (mlockall: Cannot allocate memory); "
+                    "RLIMIT_MEMLOCK is 65536") == 1);
+        CHECK(failed.size() == 1);
+        CHECK((monitor.state().known & ks::ipc::kHealthMemory) != 0);
+        CHECK((monitor.state().failing & ks::ipc::kHealthMemory) != 0);
+        CHECK(monitor.state().process_lock == ks::ipc::kProcessLockFailed);
+        CHECK(monitor.state().unlocked_bytes == 0);
+
+        // A later mlockall() succeeds.
+        readings.process_lock = ks::ipc::kProcessLockLocked;
+        readings.process_lock_error.clear();
+        const std::vector<EventLine> fixed = monitor.pass(kStart + seconds{1}, readings);
+        CHECK(count(fixed, LogLevel::Info, "health: memory locking is fine again") == 1);
+        CHECK(fixed.size() == 1);
+        CHECK((monitor.state().known & ks::ipc::kHealthMemory) != 0);
+        CHECK((monitor.state().failing & ks::ipc::kHealthMemory) == 0);
+    }
+
+    SECTION("locked, with no tracks: passing") {
+        readings.process_lock = ks::ipc::kProcessLockLocked;
+        CHECK(monitor.pass(kStart, readings).empty());
+        CHECK((monitor.state().known & ks::ipc::kHealthMemory) != 0);
+        CHECK((monitor.state().failing & ks::ipc::kHealthMemory) == 0);
+    }
+
+    SECTION("not tried, with no tracks: unknown") {
+        CHECK(monitor.pass(kStart, readings).empty());
+        CHECK((monitor.state().known & ks::ipc::kHealthMemory) == 0);
+        CHECK((monitor.state().failing & ks::ipc::kHealthMemory) == 0);
+    }
+}
+
+TEST_CASE("Health: the client's view", "[health]") {
+    using ks::client::health_info;
+    using ks::client::HealthInfo;
+    HealthState block{};
+
+    SECTION("no pass yet: none") {
+        block.known = ks::ipc::kHealthLoad;
+        CHECK_FALSE(health_info(block).has_value());
+    }
+
+    SECTION("every field decoded") {
+        block.passes = 7;
+        block.host_time = 123'456'789;
+        block.known = ks::ipc::kHealthChecks;
+        block.failing = ks::ipc::kHealthPowerSource | ks::ipc::kHealthLoad;
+        block.policy = ks::ipc::kPolicyFifo;
+        block.priority = 70;
+        block.rtprio_limit = 95;
+        block.memlock_limit = ks::ipc::kUnlimited;
+        block.process_lock = ks::ipc::kProcessLockLocked;
+        block.locked_bytes = 3'840'000;
+        block.unlocked_bytes = 4'096;
+        block.power_profile = ks::ipc::kPowerProfileSaving;
+        block.power_source = ks::ipc::kPowerSourceBattery;
+        block.peak_load = std::bit_cast<std::uint64_t>(0.75);
+        block.awake = ks::ipc::kAwakeBlocked;
+        const HealthInfo got = require(health_info(block));
+        CHECK(got.passes == 7);
+        CHECK(got.host_time == 123'456'789);
+        CHECK(got.known == ks::ipc::kHealthChecks);
+        CHECK(got.failing == (ks::ipc::kHealthPowerSource | ks::ipc::kHealthLoad));
+        CHECK(got.policy == ks::client::Policy::Fifo);
+        CHECK(got.priority == 70);
+        CHECK(got.rtprio_limit == 95);
+        CHECK(got.memlock_limit == ks::ipc::kUnlimited);
+        CHECK(got.process_lock == ks::client::ProcessLock::Locked);
+        CHECK(got.locked_bytes == 3'840'000);
+        CHECK(got.unlocked_bytes == 4'096);
+        CHECK(got.power_profile == ks::client::PowerProfile::Saving);
+        CHECK(got.power_source == ks::client::PowerSource::Battery);
+        CHECK(got.peak_load == 0.75);
+        CHECK(got.awake == ks::client::Awake::Blocked);
+    }
+
+    SECTION("failing outside known, and bits past the checks, are dropped") {
+        constexpr std::uint64_t kBeyond = std::uint64_t{1} << 6U;
+        block.passes = 1;
+        block.known = ks::ipc::kHealthRealtime | ks::ipc::kHealthLoad | kBeyond;
+        block.failing = ks::ipc::kHealthRealtime | ks::ipc::kHealthMemory |
+                        ks::ipc::kHealthPowerSource | kBeyond | (kBeyond << 1U);
+        const HealthInfo info = require(health_info(block));
+        CHECK(info.known == (ks::ipc::kHealthRealtime | ks::ipc::kHealthLoad));
+        CHECK(info.failing == ks::ipc::kHealthRealtime);
+    }
+
+    SECTION("codes it doesn't know read as unknown") {
+        const std::uint64_t code = GENERATE(std::uint64_t{5}, ~std::uint64_t{0});
+        CAPTURE(code);
+        block.passes = 1;
+        block.policy = code;
+        block.process_lock = code;
+        block.power_profile = code;
+        block.power_source = code;
+        block.awake = code;
+        const HealthInfo info = require(health_info(block));
+        CHECK(info.policy == ks::client::Policy::Unknown);
+        CHECK(info.process_lock == ks::client::ProcessLock::None);
+        CHECK(info.power_profile == ks::client::PowerProfile::Unknown);
+        CHECK(info.power_source == ks::client::PowerSource::Unknown);
+        CHECK(info.awake == ks::client::Awake::Unknown);
     }
 }

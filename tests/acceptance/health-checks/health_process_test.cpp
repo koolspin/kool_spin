@@ -18,13 +18,18 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -53,6 +58,48 @@ std::size_t log_lines(const HealthSession& session, std::string_view text, std::
         },
         timeout));
     return found;
+}
+
+/// When a log line was written, from its timestamp (`YYYY-MM-DD
+/// HH:MM:SS.ffffff`), in microseconds; none if it doesn't start with one.
+std::optional<std::int64_t> line_time(std::string_view line) {
+    constexpr std::size_t kSize = 26;
+    if (line.size() < kSize || line[4] != '-' || line[7] != '-' || line[10] != ' ' ||
+        line[13] != ':' || line[16] != ':' || line[19] != '.') {
+        return std::nullopt;
+    }
+    bool ok = true;
+    const auto field = [&](std::size_t at, std::size_t size) {
+        int value = 0;
+        const std::string_view text = line.substr(at, size);
+        const char* const last = std::to_address(text.end());
+        const auto [end, error] = std::from_chars(std::to_address(text.begin()), last, value);
+        ok = ok && error == std::errc{} && end == last;
+        return value;
+    };
+    const std::chrono::year_month_day date{std::chrono::year{field(0, 4)},
+                                           std::chrono::month{static_cast<unsigned>(field(5, 2))},
+                                           std::chrono::day{static_cast<unsigned>(field(8, 2))}};
+    const std::chrono::microseconds time =
+        std::chrono::hours{field(11, 2)} + std::chrono::minutes{field(14, 2)} +
+        std::chrono::seconds{field(17, 2)} + std::chrono::microseconds{field(20, 6)};
+    if (!ok || !date.ok()) {
+        return std::nullopt;
+    }
+    return (std::chrono::sys_days{date}.time_since_epoch() + time).count();
+}
+
+/// The times of `log`'s lines for which `match` holds, in order.
+template <typename Match>
+std::vector<std::int64_t> line_times(const std::string& log, Match match) {
+    std::vector<std::int64_t> times;
+    for (const std::string& line : play::lines_of(log)) {
+        const std::optional<std::int64_t> time = line_time(line);
+        if (time && match(std::string_view{line})) {
+            times.push_back(*time);
+        }
+    }
+    return times;
 }
 
 /// Options with only `engine_options` set.
@@ -185,16 +232,20 @@ TEST_CASE("Health: memory locking refused", "[health][process]") {
         SKIP("root ignores RLIMIT_MEMLOCK");
     }
     const Files files;
+    constexpr std::uint64_t kLimit = 65'536;
     const HealthSession session{limits(std::nullopt, Limit{.soft = "65536", .hard = "65536"})};
     load_and_play(session.dir(), files.ten_seconds());
 
+    // Every range is counted, locked or not. One decoded early enough to be
+    // small may fit under the limit and lock; the rest is refused.
     const HealthRun run = health_until(session.dir(), [](const HealthRun& health) {
-        return health.number("unlocked_bytes") >= kTenSecondBytes;
+        return health.number("locked_bytes") + health.number("unlocked_bytes") >= kTenSecondBytes;
     });
     CAPTURE(run.finished.out, run.finished.err, session.engine_log());
     CHECK(run.get("process_lock") == "failed");
     CHECK(run.get("memlock_limit") == "65536");
-    CHECK(run.number("unlocked_bytes") >= kTenSecondBytes);
+    CHECK(run.number("locked_bytes") <= kLimit);
+    CHECK(run.number("unlocked_bytes") >= kTenSecondBytes - kLimit);
     CHECK(run.get("memory") == "0");
     CHECK(run.fails("memory"));
     CHECK(log_lines(session, "health: memory isn't locked (", 1) == 1);
@@ -341,24 +392,53 @@ TEST_CASE("Health: after an engine restart", "[health][process]") {
     REQUIRE(old > 0);
     const std::uint64_t before = view->passes();
     REQUIRE(::kill(old, SIGKILL) == 0);
-    REQUIRE(eventually(
+
+    // The new engine starts its block from 0 passes (requirement 15), before
+    // its first pass, 100 ms after Ready; read every millisecond, the block
+    // shows it. Then it counts its own passes, from 1.
+    bool reset = false;
+    std::uint64_t after = 0;
+    const Clock::time_point deadline = Clock::now() + restart::kRestartWait;
+    while (Clock::now() < deadline) {
+        const std::optional<ks::ipc::HealthState> block = view->health();
+        if (block) {
+            reset = reset || block->passes == 0;
+            if (reset && block->passes >= 1) {
+                after = block->passes;
+                break;
+            }
+        }
+        std::this_thread::sleep_for(Milliseconds{1});
+    }
+    CAPTURE(before, after);
+    CHECK(reset);
+    CHECK(after >= 1);
+    CHECK(after < before);
+    CHECK(eventually(
         [&] {
             const pid_t now = session.engine();
             return now > 0 && now != old;
         },
         restart::kRestartWait));
-
-    // The new engine counts its own passes, from 1.
-    std::uint64_t after = 0;
-    CHECK(eventually(
-        [&] {
-            after = view->passes();
-            return after >= 1 && after < before;
-        },
-        Milliseconds{5'000} * kSlack));
-    CAPTURE(before, after);
 #ifdef __linux__
     // And logs its checks afresh.
     CHECK(log_lines(session, warning, 2) == 2);
+
+    // Each engine's first pass, which logs the warning, comes 100 ms after
+    // its `ready` (requirement 11), not a whole interval later.
+    const std::string log = session.engine_log();
+    CAPTURE(log);
+    const std::vector<std::int64_t> ready =
+        line_times(log, [](std::string_view line) { return line.ends_with(" info ready"); });
+    const std::vector<std::int64_t> warned = line_times(
+        log, [&](std::string_view line) { return line.find(warning) != std::string_view::npos; });
+    REQUIRE(ready.size() == 2);
+    REQUIRE(warned.size() == 2);
+    for (std::size_t i = 0; i < ready.size(); ++i) {
+        const std::int64_t gap = std::span{warned}[i] - std::span{ready}[i];
+        CAPTURE(i, gap);
+        CHECK(gap >= 90'000);
+        CHECK(gap < 600'000);
+    }
 #endif
 }

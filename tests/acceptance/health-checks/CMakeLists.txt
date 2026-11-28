@@ -7,7 +7,7 @@
 
 ks_add_test(ks_health_acceptance_tests
     SOURCES health_test.cpp
-    LIBRARIES ks::engine ks::engine_app ks::ipc)
+    LIBRARIES ks::client ks::engine ks::engine_app ks::ipc)
 
 # Sets resource limits, then executes kool_spin, for the process tests.
 add_executable(ks_rlimit_exec rlimit_exec.cpp)
